@@ -390,6 +390,58 @@ go run ./examples/multiprovider     # 跑所有配了 key 的厂商
 
 ---
 
+## 用你自己的 key 实测一遍
+
+配一个 key，一条命令看这家厂商在你账号下**到底支持什么**：
+
+```bash
+DEEPSEEK_API_KEY=sk-... go run ./cmd/llmkit-probe deepseek
+```
+
+```
+llmkit probe · deepseek · deepseek-chat
+──────────────────────────────────────────────────────────────────────────────
+  PASS  模型列表             64 个模型                                    412ms
+  PASS  非流式对话           38 字 · 96 tokens                             1.2s
+  PASS  流式对话             47 chunks · 首字 340ms                        2.1s
+  PASS  多轮上下文           正确记住 42                                   1.8s
+  PASS  工具调用             get_temperature({"city":"杭州"}) → 结果被采用  2.4s
+  PASS  结构化输出           仅支持 json_object（不支持 json_schema）       1.9s
+   N/A  多模态图像输入       该模型不接受图像输入                             0s
+   N/A  Embeddings           该 provider 无 embeddings 接口                  0s
+  PASS  错误分类             401 → IsAuthError                            380ms
+──────────────────────────────────────────────────────────────────────────────
+  7 通过 · 2 不适用  ·  约 480 tokens
+```
+
+四种结果：`PASS` 能用 · `FAIL` 该能用但没用成（打印原因）· `N/A` 这家/这个模型没有该能力 · `SKIP` 未尝试。
+
+**key 从哪来**（按优先级）：`-key` 参数 → 环境变量 → `.env` 文件。所以也可以：
+
+```bash
+echo "DEEPSEEK_API_KEY=sk-..." > .env
+go run ./cmd/llmkit-probe deepseek
+```
+
+常用法：
+
+```bash
+go run ./cmd/llmkit-probe                          # 所有配了 key 的厂商，末尾出汇总表
+go run ./cmd/llmkit-probe -list                    # 支持的厂商与对应环境变量
+go run ./cmd/llmkit-probe deepseek -v              # 打印模型的完整回复
+go run ./cmd/llmkit-probe deepseek -model deepseek-reasoner
+go run ./cmd/llmkit-probe openai -media            # 额外测图像生成（更贵）
+go run ./cmd/llmkit-probe deepseek -base-url https://my-relay.example/v1
+```
+
+**费用**：每项探测都封了 output token，一家跑完通常不到一美分。`-media` 会真的生成图片，明显更贵，所以默认不跑。
+
+**先做连通性预检**：key 无效或模型不存在时立即中止并说明原因 —— 凭据不通时的能力探测结果没有意义，不会给你一屏误导性的 N/A。
+
+模型可用环境变量覆盖，不必改代码：`LLMKIT_MODEL_<PROVIDER>` / `LLMKIT_EMBED_MODEL_<PROVIDER>` / `LLMKIT_IMAGE_MODEL_<PROVIDER>`。
+
+---
+
 ## 测试
 
 ```bash

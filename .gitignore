@@ -11,3 +11,11 @@ image-*.png
 .DS_Store
 .idea/
 .vscode/
+
+# Secrets — llmkit-probe reads keys from here. Never commit it.
+.env
+.env.*
+!.env.example
+
+# Coverage
+coverage.out

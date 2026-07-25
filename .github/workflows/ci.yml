@@ -38,3 +38,18 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./... -race -count=1
+
+      # The integration tests carry a build tag, so the run above never compiles
+      # them — nothing else would catch a break in that file.
+      - name: Vet integration tests
+        run: go vet -tags=integration ./...
+
+      - name: Smoke-test llmkit-probe
+        run: |
+          go run ./cmd/llmkit-probe -list
+          # With no keys configured it must exit non-zero with usage, not hang
+          # or pretend to succeed.
+          if go run ./cmd/llmkit-probe 2>/dev/null; then
+            echo "probe should have failed with no keys configured"
+            exit 1
+          fi
