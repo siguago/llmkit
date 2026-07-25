@@ -2,6 +2,7 @@ package llmkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -449,5 +450,106 @@ func TestWrap_UsesAdapterDirectly(t *testing.T) {
 	}
 	if _, err := c.Say(context.Background(), "test-model", "hi"); err != nil {
 		t.Fatalf("Say: %v", err)
+	}
+}
+
+func TestModels(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			t.Errorf("path = %s, want a /models endpoint", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"m-1"},{"id":"m-2"}]}`)
+	})
+
+	models, err := c.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 2 || models[0].ModelID != "m-1" {
+		t.Errorf("models = %+v", models)
+	}
+}
+
+// EditImage must NOT be retried: the upload readers are single-use, so a second
+// attempt would send an empty body.
+func TestEditImage_IsNeverRetried(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"overloaded"}`)
+	}, WithRetry(RetryConfig{MaxAttempts: 5, InitialBackoff: time.Millisecond}))
+
+	_, err := c.EditImage(context.Background(), &ImageEditRequest{
+		Model:  "gpt-image-1",
+		Prompt: "edit",
+		Images: []UploadPart{{
+			Filename:    "in.png",
+			ContentType: "image/png",
+			Reader:      strings.NewReader("png-bytes"),
+		}},
+	})
+	if !IsServerError(err) {
+		t.Fatalf("err = %v, want the 503 surfaced", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("upstream calls = %d, want 1 — retrying would resend a consumed reader", got)
+	}
+}
+
+func TestGenerateImage_IsRetried(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"AAAA"}]}`)
+	}, WithRetry(RetryConfig{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}))
+
+	resp, err := c.GenerateImage(context.Background(), &ImageRequest{Model: "gpt-image-1", Prompt: "cat"})
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0].B64JSON != "AAAA" {
+		t.Errorf("data = %+v", resp.Data)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("calls = %d, want 2 (prompt-only generation is safe to retry)", got)
+	}
+}
+
+func TestAdapter_ExposesUnderlyingProvider(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+	if a := c.Adapter(); a == nil || a.Name() != DeepSeek {
+		t.Errorf("Adapter() = %v", a)
+	}
+}
+
+func TestSayWithSystem(t *testing.T) {
+	var body map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, chatOK)
+	})
+
+	got, err := c.SayWithSystem(context.Background(), "test-model", "be terse", "hello")
+	if err != nil {
+		t.Fatalf("SayWithSystem: %v", err)
+	}
+	if got != "hi there" {
+		t.Errorf("SayWithSystem = %q", got)
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %+v", msgs)
+	}
+	first, _ := msgs[0].(map[string]any)
+	if first["role"] != "system" || first["content"] != "be terse" {
+		t.Errorf("system message = %+v", first)
 	}
 }
