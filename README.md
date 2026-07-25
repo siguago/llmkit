@@ -313,6 +313,7 @@ llmkit/
 ├── retry.go             # 退避重试
 ├── errors.go            # 错误分类
 ├── types.go             # 类型别名（对外只需 import 一个包）
+├── integration_test.go  # 真实 API 测试（-tags=integration，默认不跑）
 ├── provider/            # 适配层 —— 直接用也行
 │   ├── types.go         #   统一请求/响应/流接口
 │   ├── compat/          #   OpenAI 兼容基类
@@ -323,7 +324,10 @@ llmkit/
 │   ├── httpx/           #   统一 transport（代理 / 连接池 / 头注入）
 │   ├── ipprivacy/       #   剥离客户端 IP 泄露头
 │   └── safehttp/        #   SSRF 安全的图片下载
-└── examples/            # 9 个可运行示例
+├── cmd/llmkit-probe/    # 能力探测 CLI（配个 key 就能实测厂商支持什么）
+├── examples/            # 9 个可运行示例
+├── Makefile             # make help 看全部命令
+└── .env.example         # 复制成 .env 填 key，probe 会自动读
 ```
 
 ---
@@ -451,39 +455,47 @@ go test ./... -race
 
 **所有默认测试都是离线的**（`httptest` 打本地服务器），验证的是「请求构造得对不对、响应解析得对不对」，**不验证厂商是否接受**。
 
-要验证真的能跑通，跑集成测试 —— 它会**发真实请求、产生真实费用**（每家几分之一美分，token 都封了顶）：
+要验证真的能跑通，有两条路，都会发真实请求、产生真实费用（每家几分之一美分，token 都封了顶）：
 
 ```bash
-DEEPSEEK_API_KEY=sk-... go test -tags=integration -v -run TestLive .
+make probe PROVIDER=deepseek                              # 人看的能力报告，见上一节
+go test -tags=integration -v -run TestLive .              # 机器读的断言，可进 CI
 ```
 
-它按环境变量里有哪些 key 决定测哪几家，覆盖非流式 / 流式 / 多轮上下文 / 工具调用 / 模型列表 / embeddings / 错误分类 / 流式取消。模型可用 `LLMKIT_TEST_MODEL_<PROVIDER>` 覆盖，媒体测试要额外加 `-media`。
+两者覆盖面接近，差别在用途：`probe` 给你一张「这家支持什么」的表，失败不中断、继续跑完；集成测试是标准 `go test`，可以 `-run TestLiveTools` 单点跑、失败即红。集成测试的模型用 `LLMKIT_TEST_MODEL_<PROVIDER>` 覆盖，媒体测试加 `-media`。
 
-覆盖率现状（`go test ./... -cover`）：
+覆盖率现状（`make cover`）：
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
 | 门面层（根包） | 92% | |
 | `internal/httpx` | 91% | |
 | `provider/*` 适配层 | 40–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
+| `cmd/llmkit-probe` | 21% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/vercel` 图像部分 | 0% | 已知空白 |
+| `provider/{minimax,siliconflow}` | 见备注 | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包显示 0% |
 
 ---
 
 ## 贡献
 
-欢迎 issue 和 PR。提 PR 前请确认：
+欢迎 issue 和 PR。提 PR 前跑一遍 CI 跑的那套：
 
 ```bash
-gofmt -l .          # 无输出
-go vet ./...
-go test ./... -race
+make lint        # gofmt + vet + 零依赖校验
+make test-race
 ```
 
-**保持零依赖**是这个库的设计约束 —— CI 会检查 `go.mod` 是否混入第三方 require。
+**保持零依赖**是这个库的设计约束 —— `make lint` 和 CI 都会检查 `go.mod` 是否混入第三方 require。
 
-新增厂商见上面「新增一家厂商」一节；能力矩阵变化时 `TestCapabilityMatrix` 会失败，
-更新它并同步 README 表格即可。
+改动涉及某家厂商时，最好用你自己的 key 实测一次：
+
+```bash
+make probe PROVIDER=<厂商>
+```
+
+新增厂商见上面「新增一家厂商」一节。能力矩阵变化时 `TestCapabilityMatrix` 会失败 ——
+更新它、同步 README 的能力矩阵表，再在 `cmd/llmkit-probe/render.go` 的模型表里补一行默认模型。
 
 ---
 

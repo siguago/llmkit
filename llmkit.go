@@ -35,6 +35,21 @@
 // New reads the provider's conventional environment variable when WithAPIKey is
 // not supplied — OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and so on
 // (see EnvVar).
+//
+// # Checking what a provider actually supports
+//
+// Capabilities vary by vendor and by model, and a vendor's docs don't always
+// match what your account can reach. The bundled CLI probes it directly:
+//
+//	go run github.com/siguago/llmkit/cmd/llmkit-probe@latest deepseek
+//
+// It reports chat, streaming, multi-turn, tool calling, structured output,
+// reasoning, vision, embeddings and error classification as PASS / FAIL / N/A,
+// using your own key. In code, ask before calling:
+//
+//	if client.SupportsEmbeddings() { ... }
+//
+// or just call and handle ErrUnsupported.
 package llmkit
 
 import (
