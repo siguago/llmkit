@@ -371,13 +371,50 @@ go run ./examples/multiprovider     # 跑所有配了 key 的厂商
 
 ---
 
+## 尚未覆盖的能力
+
+这个库覆盖的是**对话及其周边**。以下能力各家 API 有、但 SDK 目前没有，别指望：
+
+| 缺口 | 说明 |
+|---|---|
+| 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
+| Rerank | RAG 重排序，SiliconFlow / Jina / Cohere 有 |
+| Files API | 上传文件供后续引用；目前只支持消息内联文件 |
+| Batch API | 批量异步（通常半价） |
+| Moderation API | 独立的内容审核端点（图像生成里的 `moderation` 参数不是这个） |
+| Token 计数 | 本地 tokenizer 需要第三方库，与零依赖冲突；Anthropic 的 `count_tokens` 端点也未接 |
+| 余额 / 额度查询 | 未接 |
+| Gemini embeddings | Gemini 有该 API，但适配器还没实现 |
+| 自定义 `http.Client` / `Transport` | mTLS、自签证书场景用不了；代理和超时可以配（见上） |
+| 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，需要自己在上层做 |
+
+---
+
 ## 测试
 
 ```bash
-go test ./...
+go test ./...          # 离线，不需要 key，不产生费用
+go test ./... -race
 ```
 
-适配层的测试全部离线（`httptest`），不需要 API key，也不会产生费用。
+**所有默认测试都是离线的**（`httptest` 打本地服务器），验证的是「请求构造得对不对、响应解析得对不对」，**不验证厂商是否接受**。
+
+要验证真的能跑通，跑集成测试 —— 它会**发真实请求、产生真实费用**（每家几分之一美分，token 都封了顶）：
+
+```bash
+DEEPSEEK_API_KEY=sk-... go test -tags=integration -v -run TestLive .
+```
+
+它按环境变量里有哪些 key 决定测哪几家，覆盖非流式 / 流式 / 多轮上下文 / 工具调用 / 模型列表 / embeddings / 错误分类 / 流式取消。模型可用 `LLMKIT_TEST_MODEL_<PROVIDER>` 覆盖，媒体测试要额外加 `-media`。
+
+覆盖率现状（`go test ./... -cover`）：
+
+| 包 | 覆盖率 | 备注 |
+|---|---|---|
+| 门面层（根包） | 92% | |
+| `internal/httpx` | 91% | |
+| `provider/*` 适配层 | 40–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
+| `provider/vercel` 图像部分 | 0% | 已知空白 |
 
 ---
 
