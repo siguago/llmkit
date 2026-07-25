@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          # No go.sum: this module has zero third-party dependencies.
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify zero dependencies
+        run: |
+          # The selling point is a standard-library-only SDK. Fail loudly if a
+          # third-party require ever sneaks into go.mod.
+          if grep -qE '^\s*(require|\t)[^ ]+\.[^ ]+/' go.mod; then
+            echo "go.mod gained a third-party dependency:"
+            cat go.mod
+            exit 1
+          fi
+
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./... -race -count=1

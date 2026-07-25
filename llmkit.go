@@ -1,0 +1,184 @@
+// Package llmkit is a single-dependency-free Go SDK for talking to every major
+// LLM vendor through one OpenAI-shaped interface.
+//
+// # Quick start
+//
+//	client, err := llmkit.New(llmkit.DeepSeek, llmkit.WithAPIKey(key))
+//	if err != nil {
+//		return err
+//	}
+//	text, err := client.Say(ctx, "deepseek-chat", "Explain CAP theorem in one paragraph.")
+//
+// The full surface is OpenAI-compatible, so anything you already know about
+// chat completions applies:
+//
+//	resp, err := client.Chat(ctx, &llmkit.ChatRequest{
+//		Model:    "deepseek-chat",
+//		Messages: []llmkit.Message{llmkit.User("Hello")},
+//	})
+//
+// # Provider differences
+//
+// Adapters translate the unified request into each vendor's native wire format
+// (Anthropic Messages, Gemini generateContent, and the various OpenAI-compatible
+// dialects). Vendor-specific knobs live as optional fields on ChatRequest;
+// providers that don't understand a field ignore it, so the same request struct
+// works everywhere and gains fidelity where the vendor supports it.
+//
+// Capabilities beyond chat are optional per provider. Ask before calling, or
+// handle ErrUnsupported:
+//
+//	if client.SupportsImages() { ... }
+//
+// # Credentials
+//
+// New reads the provider's conventional environment variable when WithAPIKey is
+// not supplied — OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and so on
+// (see EnvVar).
+package llmkit
+
+import (
+	"fmt"
+	"os"
+	"sort"
+
+	"github.com/siguago/llmkit/provider"
+	"github.com/siguago/llmkit/provider/anthropic"
+	"github.com/siguago/llmkit/provider/dashscope"
+	"github.com/siguago/llmkit/provider/deepseek"
+	"github.com/siguago/llmkit/provider/easyrouter"
+	"github.com/siguago/llmkit/provider/gemini"
+	"github.com/siguago/llmkit/provider/minimax"
+	"github.com/siguago/llmkit/provider/moonshot"
+	"github.com/siguago/llmkit/provider/openai"
+	"github.com/siguago/llmkit/provider/openrouter"
+	"github.com/siguago/llmkit/provider/siliconflow"
+	"github.com/siguago/llmkit/provider/vercel"
+	"github.com/siguago/llmkit/provider/volcengine"
+	"github.com/siguago/llmkit/provider/zhipu"
+)
+
+// Provider identifiers accepted by New.
+const (
+	OpenAI      = "openai"      // api.openai.com
+	Anthropic   = "anthropic"   // api.anthropic.com (Claude)
+	Gemini      = "gemini"      // generativelanguage.googleapis.com
+	DeepSeek    = "deepseek"    // api.deepseek.com
+	Moonshot    = "moonshot"    // api.moonshot.ai (Kimi)
+	Zhipu       = "zhipu"       // open.bigmodel.cn (GLM)
+	MiniMax     = "minimax"     // api.minimax.io
+	SiliconFlow = "siliconflow" // api.siliconflow.cn
+	DashScope   = "dashscope"   // dashscope.aliyuncs.com (Qwen)
+	Volcengine  = "volcengine"  // ark.cn-beijing.volces.com (Doubao)
+	OpenRouter  = "openrouter"  // openrouter.ai — multi-vendor aggregator
+	EasyRouter  = "easyrouter"  // easyrouter.io — multi-vendor aggregator
+	Vercel      = "vercel"      // ai-gateway.vercel.sh — multi-vendor aggregator
+)
+
+// Kimi is an alias for Moonshot, the vendor's consumer-facing brand.
+const Kimi = Moonshot
+
+// factories maps a provider name to its constructor. Every adapter takes the
+// same (baseURL string) shape here; an empty baseURL selects the vendor's
+// official endpoint.
+var factories = map[string]func(baseURL string) provider.Provider{
+	OpenAI:      func(b string) provider.Provider { return openai.NewWithBaseURL(b) },
+	Anthropic:   func(b string) provider.Provider { return anthropic.NewWithBaseURL(b) },
+	Gemini:      func(b string) provider.Provider { return gemini.NewWithBaseURL(b) },
+	OpenRouter:  func(b string) provider.Provider { return openrouter.NewWithBaseURL(b) },
+	EasyRouter:  func(b string) provider.Provider { return easyrouter.New(b) },
+	Vercel:      func(b string) provider.Provider { return vercel.New(b) },
+	Volcengine:  func(b string) provider.Provider { return volcengine.New(b) },
+	DashScope:   func(b string) provider.Provider { return dashscope.New(b) },
+	SiliconFlow: func(b string) provider.Provider { return siliconflow.New(b) },
+	DeepSeek:    func(b string) provider.Provider { return deepseek.New(b) },
+	Moonshot:    func(b string) provider.Provider { return moonshot.New(b) },
+	Zhipu:       func(b string) provider.Provider { return zhipu.New(b) },
+	MiniMax:     func(b string) provider.Provider { return minimax.New(b) },
+}
+
+// envVars maps a provider to the environment variable New falls back to.
+var envVars = map[string]string{
+	OpenAI:      "OPENAI_API_KEY",
+	Anthropic:   "ANTHROPIC_API_KEY",
+	Gemini:      "GEMINI_API_KEY",
+	DeepSeek:    "DEEPSEEK_API_KEY",
+	Moonshot:    "MOONSHOT_API_KEY",
+	Zhipu:       "ZHIPU_API_KEY",
+	MiniMax:     "MINIMAX_API_KEY",
+	SiliconFlow: "SILICONFLOW_API_KEY",
+	DashScope:   "DASHSCOPE_API_KEY",
+	Volcengine:  "VOLCENGINE_API_KEY",
+	OpenRouter:  "OPENROUTER_API_KEY",
+	EasyRouter:  "EASYROUTER_API_KEY",
+	Vercel:      "VERCEL_AI_GATEWAY_KEY",
+}
+
+// EnvVar returns the environment variable New reads for the given provider when
+// WithAPIKey is not supplied, or "" for an unknown provider.
+func EnvVar(providerName string) string { return envVars[providerName] }
+
+// Providers lists every supported provider name, sorted.
+func Providers() []string {
+	names := make([]string, 0, len(factories))
+	for name := range factories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// New builds a Client for the named provider.
+//
+// The credential comes from WithAPIKey, or failing that from the provider's
+// conventional environment variable (see EnvVar). New returns ErrNoAPIKey when
+// neither is present, and ErrUnknownProvider for an unrecognized name.
+//
+// Retries default to DefaultRetry(); pass WithRetry(NoRetry()) to opt out.
+func New(providerName string, opts ...Option) (*Client, error) {
+	factory, ok := factories[providerName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q (known: %v)", ErrUnknownProvider, providerName, Providers())
+	}
+
+	cfg := clientConfig{retry: DefaultRetry()}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.apiKey == "" {
+		if env := envVars[providerName]; env != "" {
+			cfg.apiKey = os.Getenv(env)
+		}
+	}
+	if cfg.apiKey == "" {
+		return nil, fmt.Errorf("%w: provider %q (env %s)", ErrNoAPIKey, providerName, envVars[providerName])
+	}
+
+	return &Client{
+		name:     providerName,
+		provider: factory(cfg.baseURL),
+		cfg:      cfg,
+	}, nil
+}
+
+// Wrap builds a Client around an adapter you constructed yourself. Use it for a
+// provider configured in a way the factory doesn't cover, or for a custom
+// implementation of provider.Provider (a fake in tests, an internal gateway).
+func Wrap(p provider.Provider, opts ...Option) (*Client, error) {
+	if p == nil {
+		return nil, fmt.Errorf("llmkit: nil provider")
+	}
+	cfg := clientConfig{retry: DefaultRetry()}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.apiKey == "" {
+		if env := envVars[p.Name()]; env != "" {
+			cfg.apiKey = os.Getenv(env)
+		}
+	}
+	if cfg.apiKey == "" {
+		return nil, fmt.Errorf("%w: provider %q", ErrNoAPIKey, p.Name())
+	}
+	return &Client{name: p.Name(), provider: p, cfg: cfg}, nil
+}

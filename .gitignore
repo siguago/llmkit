@@ -1,0 +1,13 @@
+# Build artifacts
+*.exe
+*.test
+*.out
+
+# Example outputs
+image-*.png
+*.mp4
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
