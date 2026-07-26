@@ -39,20 +39,6 @@ jobs:
       - run: go build ./...
       - run: go test ./... -race -count=1
 
-  # go.mod declares the oldest Go this module actually compiles under. Testing
-  # only on the newest toolchain would let a newer language feature raise that
-  # floor silently, breaking users on older Go with no signal here.
-  min-go-version:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: false
-      - run: go build ./...
-      - run: go test ./... -count=1
-
       # The integration tests carry a build tag, so the run above never compiles
       # them — nothing else would catch a break in that file.
       - name: Vet integration tests
@@ -111,3 +97,21 @@ jobs:
             echo "probe should have failed with no keys configured"
             exit 1
           fi
+
+  # go.mod declares the oldest Go this module actually compiles under. Testing
+  # only on the newest toolchain would let a newer language feature raise that
+  # floor silently, breaking users on older Go with no signal here.
+  #
+  # Deliberately just build + test: this job answers "does the declared floor
+  # still hold", not "is everything green". The thorough checks — race, fuzz,
+  # integration vet — belong on the primary toolchain above.
+  min-go-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - run: go build ./...
+      - run: go test ./... -count=1
