@@ -182,7 +182,10 @@ func (d StreamDiagnostics) ScanError(err error) error {
 		return nil
 	}
 	if err == bufio.ErrTooLong {
-		return fmt.Errorf("%s stream: frame exceeds %d bytes; raise it with llmkit.WithStreamPolicy: %w",
+		// Name the option a caller can actually reach for. This package's
+		// WithStreamPolicy is the adapter-facing knob; someone hitting this is
+		// almost certainly using the llmkit façade.
+		return fmt.Errorf("%s stream: frame exceeds %d bytes; raise it with llmkit.WithMaxStreamFrameBytes: %w",
 			d.provider, d.policy.maxFrameBytes(), err)
 	}
 	return err

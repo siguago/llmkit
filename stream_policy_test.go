@@ -172,8 +172,16 @@ func TestStream_FrameCeilingIsEnforcedAndNamed(t *testing.T) {
 	if err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("oversized frame ended the stream with %v, want an error", err)
 	}
-	if !strings.Contains(err.Error(), "WithStreamPolicy") && !strings.Contains(err.Error(), "1024") {
-		t.Errorf("err = %v, want it to name the ceiling and how to raise it", err)
+	// Both, not either: the message has to state the limit that was hit AND name
+	// a real option to raise it. An && here let an earlier version ship a
+	// message pointing at llmkit.WithStreamPolicy, which does not exist on this
+	// package — the caller would go looking for it and come up empty.
+	msg := err.Error()
+	if !strings.Contains(msg, "1024") {
+		t.Errorf("err = %v, want it to state the ceiling that was hit", err)
+	}
+	if !strings.Contains(msg, "WithMaxStreamFrameBytes") {
+		t.Errorf("err = %v, want it to name the option that raises the ceiling", err)
 	}
 }
 
