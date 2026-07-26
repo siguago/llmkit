@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/siguago/llmkit/internal/httpx"
+	"github.com/siguago/llmkit/internal/logging"
 	"github.com/siguago/llmkit/provider"
 )
 
@@ -107,7 +107,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 	}
 	_ = json.Unmarshal(respBody, &rawWithContent)
 
-	return convertResponse(&anthropicResp, rawWithContent.Content, jsonSchemaToolName), nil
+	return convertResponse(ctx, &anthropicResp, rawWithContent.Content, jsonSchemaToolName), nil
 }
 
 func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (provider.StreamReader, error) {
@@ -142,7 +142,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, provider.NewProviderErrorFromResponse(resp, "anthropic", respBody)
 	}
 
-	return NewStreamReader(resp.Body, jsonSchemaToolName), nil
+	return NewStreamReader(ctx, resp.Body, jsonSchemaToolName), nil
 }
 
 // ListModels fetches available models from the Anthropic API.
@@ -913,7 +913,7 @@ var providerTurnBlockTypes = map[string]bool{
 	"mcp_tool_result":                   true,
 }
 
-func convertResponse(resp *response, rawContent []map[string]any, jsonSchemaToolName string) *provider.ChatCompletionResponse {
+func convertResponse(ctx context.Context, resp *response, rawContent []map[string]any, jsonSchemaToolName string) *provider.ChatCompletionResponse {
 	var content string
 	var reasoningContent string
 	var reasoningSignature string
@@ -996,7 +996,7 @@ func convertResponse(resp *response, rawContent []map[string]any, jsonSchemaTool
 				// addition (new server tool, new content modality) doesn't get
 				// silently dropped from gateway responses. Operators can use
 				// the log to decide whether to extend providerTurnBlockTypes.
-				slog.Warn("anthropic: unhandled content block type — dropped from response",
+				logging.From(ctx).Warn("llmkit: unhandled content block type — dropped from response",
 					"type", block.Type)
 			}
 		}

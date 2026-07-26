@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -562,7 +563,7 @@ func TestConvertResponse_PreservesProviderTurnBlocks(t *testing.T) {
 		},
 		{"type": "text", "text": "Result from web search."},
 	}
-	out := convertResponse(resp, rawContent, "")
+	out := convertResponse(context.Background(), resp, rawContent, "")
 	msg := out.Choices[0].Message
 	if len(msg.ProviderTurnBlocks) != 2 {
 		t.Fatalf("expected 2 provider turn blocks (server_tool_use + web_search_tool_result), got %d: %+v",
@@ -695,7 +696,7 @@ func TestConvertResponse_ExtractsRedactedThinking(t *testing.T) {
 		},
 		StopReason: "end_turn",
 	}
-	out := convertResponse(resp, nil, "")
+	out := convertResponse(context.Background(), resp, nil, "")
 	msg := out.Choices[0].Message
 	if len(msg.RedactedThinking) != 2 {
 		t.Fatalf("expected 2 redacted blobs, got %d", len(msg.RedactedThinking))
@@ -739,7 +740,7 @@ func TestConvertResponse_ExtractsThinkingSignature(t *testing.T) {
 		},
 		StopReason: "end_turn",
 	}
-	out := convertResponse(resp, nil, "")
+	out := convertResponse(context.Background(), resp, nil, "")
 	if len(out.Choices) == 0 || out.Choices[0].Message == nil {
 		t.Fatalf("response has no message")
 	}

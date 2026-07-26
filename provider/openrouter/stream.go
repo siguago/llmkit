@@ -2,10 +2,10 @@ package openrouter
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -15,6 +15,7 @@ import (
 type StreamReader struct {
 	reader         io.ReadCloser
 	scanner        *bufio.Scanner
+	diag           provider.StreamDiagnostics
 	usage          *provider.Usage
 	emitUsageChunk bool
 	// imageCount 累加流式中每个 chunk 解析到的图像数量。
@@ -25,12 +26,13 @@ type StreamReader struct {
 	mediaCount int
 }
 
-func NewStreamReader(reader io.ReadCloser, emitUsageChunk bool) *StreamReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+func NewStreamReader(ctx context.Context, reader io.ReadCloser, emitUsageChunk bool) *StreamReader {
+	diag := provider.NewStreamDiagnostics(ctx, "openrouter")
+	scanner := diag.NewScanner(reader)
 	return &StreamReader{
 		reader:         reader,
 		scanner:        scanner,
+		diag:           diag,
 		emitUsageChunk: emitUsageChunk,
 	}
 }
@@ -54,10 +56,10 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		default:
 			continue
 		}
-		if data == "[DONE]" {
+		switch provider.ClassifyFrame(data) {
+		case provider.FrameDone:
 			return nil, io.EOF
-		}
-		if !strings.HasPrefix(data, "{") {
+		case provider.FrameSkip:
 			continue
 		}
 
@@ -70,7 +72,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 
 		var chunk provider.ChatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			slog.Warn("openrouter stream: chunk parse error", "error", err, "data_preview", truncate(data, 200))
+			if err := s.diag.Malformed("chunk", err, data); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -110,7 +114,7 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		return &chunk, nil
 	}
 
-	if err := s.scanner.Err(); err != nil {
+	if err := s.diag.ScanError(s.scanner.Err()); err != nil {
 		return nil, err
 	}
 	return nil, io.EOF
@@ -135,13 +139,6 @@ func (s *StreamReader) GetUsage() *provider.Usage {
 		}
 	}
 	return s.usage
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // detectOpenRouterStreamError mirrors compat.detectStreamError. OpenRouter

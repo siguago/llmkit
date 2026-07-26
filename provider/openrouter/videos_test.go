@@ -1,6 +1,7 @@
 package openrouter
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ func TestCreateVideoJob_MapsInputReferenceImageToInputReferences(t *testing.T) {
 
 	p := NewWithBaseURL(srv.URL)
 	dur := 8.0
-	_, err := p.CreateVideoJob(t.Context(), "test-key", "openrouter/google/veo-3.1",
+	_, err := p.CreateVideoJob(context.Background(), "test-key", "openrouter/google/veo-3.1",
 		&provider.VideoCreateRequest{
 			Model:           "openrouter/google/veo-3.1",
 			Prompt:          "a cat",

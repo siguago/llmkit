@@ -1,3 +1,9 @@
+//go:build integration
+
+// This test makes a REAL API call. The env-var guard alone already kept it from
+// running by default, but the build tag is what the rest of the repo uses to
+// mark live tests, and it keeps `go test ./...` from even compiling a path to
+// the network. Run it with -tags=integration.
 package easyrouter
 
 import (

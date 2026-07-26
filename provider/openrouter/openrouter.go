@@ -233,7 +233,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, provider.NewProviderErrorFromResponse(resp, "openrouter", respBody)
 	}
 
-	return NewStreamReader(resp.Body, emitUsageChunk), nil
+	return NewStreamReader(ctx, resp.Body, emitUsageChunk), nil
 }
 
 // ListModels fetches available models from the OpenRouter API.

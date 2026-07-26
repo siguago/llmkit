@@ -25,10 +25,12 @@
 // providers that don't understand a field ignore it, so the same request struct
 // works everywhere and gains fidelity where the vendor supports it.
 //
-// Capabilities beyond chat are optional per provider. Ask before calling, or
-// handle ErrUnsupported:
+// Capabilities beyond chat are optional per provider, and they are tracked per
+// endpoint rather than per feature — several vendors generate images without
+// being able to edit them, and only one can cancel a video job. Ask before
+// calling, or handle ErrUnsupported:
 //
-//	if client.SupportsImages() { ... }
+//	if client.SupportsImageGeneration() { ... }
 //
 // # Credentials
 //

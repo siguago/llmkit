@@ -54,3 +54,56 @@ func applyExtraHeaders(ctx context.Context, h http.Header) {
 		h.Set(name, value)
 	}
 }
+
+type requestIDKey struct{}
+
+type requestIDConfig struct {
+	fn     func() string
+	header string
+}
+
+// WithRequestIDFunc returns a context whose requests each carry a freshly
+// generated identifier under the given header name.
+//
+// This is separate from WithExtraHeaders because the value must differ per
+// request, and the extras map is resolved once per Client call. Generating it
+// down here — at RoundTrip time — is what makes each retry attempt, and each
+// internal follow-up request an adapter makes, individually identifiable.
+func WithRequestIDFunc(ctx context.Context, fn func() string, header string) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	if header == "" {
+		header = "X-Request-Id"
+	}
+	return context.WithValue(ctx, requestIDKey{}, requestIDConfig{fn: fn, header: header})
+}
+
+// applyRequestID stamps a generated identifier on h, if one was configured. An
+// empty generated value is treated as "skip this one" rather than written as an
+// empty header.
+func applyRequestID(ctx context.Context, h http.Header) {
+	if ctx == nil {
+		return
+	}
+	cfg, ok := ctx.Value(requestIDKey{}).(requestIDConfig)
+	if !ok || cfg.fn == nil {
+		return
+	}
+	if protectedHeaders[strings.ToLower(cfg.header)] {
+		return
+	}
+	if id := cfg.fn(); id != "" {
+		h.Set(cfg.header, id)
+	}
+}
+
+// hasRequestID reports whether a generator is installed, so RoundTrip can skip
+// cloning the request when there is nothing to add.
+func hasRequestID(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	cfg, ok := ctx.Value(requestIDKey{}).(requestIDConfig)
+	return ok && cfg.fn != nil
+}

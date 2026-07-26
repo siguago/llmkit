@@ -5,11 +5,13 @@ import (
 	"io"
 )
 
-// ImageGenerationRequest 是网关侧统一的图像生成请求形态。
-// 不同 provider 的字段差异由 adapter 内部映射，不在公共结构里堆砌。
+// ImageGenerationRequest 是统一的图像生成请求。各家的字段差异由 adapter 内部
+// 映射，不在这个公共结构里堆砌；不认识某个字段的厂商会忽略它。
+//
+// Model 和 Prompt 必填，其余可选。
 type ImageGenerationRequest struct {
-	Model             string `json:"model" binding:"required"`
-	Prompt            string `json:"prompt" binding:"required"`
+	Model             string `json:"model"`
+	Prompt            string `json:"prompt"`
 	N                 *int   `json:"n,omitempty"`
 	Size              string `json:"size,omitempty"`
 	AspectRatio       string `json:"aspect_ratio,omitempty"`
@@ -19,18 +21,23 @@ type ImageGenerationRequest struct {
 	OutputFormat      string `json:"output_format,omitempty"`
 	OutputCompression *int   `json:"output_compression,omitempty"`
 	Moderation        string `json:"moderation,omitempty"`
-	// Delivery controls gateway-side asset delivery. "proxy" (default) stores
-	// assets and returns /v1/media/:id/content. "inline" also includes b64_json
-	// when the upstream returned inline data and the response fits config limits.
-	Delivery        string         `json:"delivery,omitempty"`        // proxy | inline
-	ResponseFormat  string         `json:"response_format,omitempty"` // deprecated; provider-specific passthrough only
-	Stream          *bool          `json:"stream,omitempty"`
-	User            string         `json:"user,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	// ResponseFormat is a provider-specific passthrough.
+	//
+	// Deprecated: it was never uniform across vendors. Read the returned
+	// MediaAsset instead — it carries whichever of URL / B64JSON the vendor
+	// actually sent.
+	ResponseFormat string         `json:"response_format,omitempty"`
+	Stream         *bool          `json:"stream,omitempty"`
+	User           string         `json:"user,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	// ProviderOptions is an opaque per-vendor block forwarded as-is, for knobs
+	// this struct does not model. Providers that don't recognize it ignore it.
 	ProviderOptions map[string]any `json:"provider_options,omitempty"`
 }
 
-// ImageEditRequest 与生成请求共享多数字段；额外携带二进制上传内容（multipart）。
+// ImageEditRequest 与生成请求共享多数字段，额外携带 multipart 上传内容。
+//
+// Model、Prompt 和至少一张 Images 必填。
 type ImageEditRequest struct {
 	Model             string
 	Prompt            string
@@ -42,15 +49,17 @@ type ImageEditRequest struct {
 	Background        string
 	OutputFormat      string
 	OutputCompression *int
-	Delivery          string
-	ResponseFormat    string // deprecated
-	User              string
-	Metadata          map[string]any
-	ProviderOptions   map[string]any
+	// Deprecated: 同 ImageGenerationRequest.ResponseFormat。
+	ResponseFormat  string
+	User            string
+	Metadata        map[string]any
+	ProviderOptions map[string]any
 }
 
-// UploadPart 是 multipart 上传的最小抽象。Reader 只能一次性消费；
-// adapter 内部需要重发或缓存时必须自行 ReadAll。
+// UploadPart 是 multipart 上传的最小抽象。
+//
+// Reader 只能消费一次，这也是 Client.EditImage 从不重试的原因：第二次尝试拿到
+// 的是一个已经读空的 Reader。adapter 内部若需重发必须自行 ReadAll。
 type UploadPart struct {
 	Filename    string
 	ContentType string
@@ -58,8 +67,8 @@ type UploadPart struct {
 	Reader      io.Reader
 }
 
-// ImageGenerationResponse 是网关侧统一的图像响应。`Data` 是生成的资产列表，
-// `Usage` 用现有 Usage 表达（PromptTokens / CompletionTokens / ImageCount / Cost 等）。
+// ImageGenerationResponse 是统一的图像响应。Data 是生成的资产列表，
+// Usage 用现有 Usage 表达（PromptTokens / CompletionTokens / ImageCount / Cost 等）。
 type ImageGenerationResponse struct {
 	Object   string       `json:"object,omitempty"`
 	Created  int64        `json:"created"`
@@ -69,10 +78,13 @@ type ImageGenerationResponse struct {
 	Provider string       `json:"provider_name,omitempty"`
 }
 
-// VideoCreateRequest 是网关侧统一的视频创建请求。Provider adapter 必须按 §10 映射。
+// VideoCreateRequest 是统一的视频创建请求。各家的字段差异由 adapter 内部映射；
+// 不认识某个字段的厂商会忽略它。
+//
+// Model 和 Prompt 必填，其余可选。
 type VideoCreateRequest struct {
-	Model               string           `json:"model" binding:"required"`
-	Prompt              string           `json:"prompt" binding:"required"`
+	Model               string           `json:"model"`
+	Prompt              string           `json:"prompt"`
 	Size                string           `json:"size,omitempty"`
 	AspectRatio         string           `json:"aspect_ratio,omitempty"`
 	Resolution          string           `json:"resolution,omitempty"`
@@ -112,8 +124,12 @@ type InputReference struct {
 	B64JSON  string `json:"b64_json,omitempty"`
 }
 
-// VideoJob 是网关侧的视频任务模型，对外 HTTP 响应固定 object=video.job。
-// 状态枚举：queued / in_progress / completed / failed / cancel_requested / cancelled / expired。
+// VideoJob 是一个异步视频任务的状态。Client.CreateVideo 返回它，Client.GetVideo
+// 刷新它，Client.WaitVideo 轮询到终态。
+//
+// Status 取 VideoStatus* 常量之一；用 IsTerminalVideoStatus 判断是否还需轮询。
+// 任务失败时 Status 是 VideoStatusFailed 且 Error 非空 —— 注意那不是调用错误，
+// GetVideo 本身返回的 err 仍是 nil。
 type VideoJob struct {
 	ID            string         `json:"id"`
 	Model         string         `json:"model"`
@@ -130,7 +146,8 @@ type VideoJob struct {
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
-// ErrorObject 标识终态失败的错误。Message 来自上游；Code 是网关分类。
+// ErrorObject 描述一个终态失败的视频任务。Message 和 Raw 来自上游原文，
+// Code / Type 是归一化后的分类。
 type ErrorObject struct {
 	Message  string `json:"message"`
 	Code     string `json:"code,omitempty"`
@@ -139,7 +156,8 @@ type ErrorObject struct {
 	Raw      string `json:"raw,omitempty"`
 }
 
-// 视频状态枚举常量（与设计文档 §6.6 对齐）
+// 视频任务状态。VideoStatusCancelRequested 只会出现在支持取消的厂商上
+// （见 Client.SupportsVideoCancellation）。
 const (
 	VideoStatusQueued          = "queued"
 	VideoStatusInProgress      = "in_progress"
@@ -160,20 +178,53 @@ func IsTerminalVideoStatus(s string) bool {
 	}
 }
 
-// ImageProvider 是支持图像生成/编辑的 provider 子接口。
-// Registry 用类型断言判断 provider 是否实现该接口；不强制所有 provider 实现。
-type ImageProvider interface {
+// 媒体能力按「单个端点」而不是「整块功能」切分，因为厂商的支持就是按端点参差
+// 的：Vercel 和 OpenRouter 能生成图像但没有编辑端点，Gemini 和 OpenRouter 能
+// 建视频任务但没有取消端点。
+//
+// 只实现得了一半的 adapter 就只实现对应的那个接口，不要用返回 ErrUnsupported
+// 的空方法把接口凑齐 —— 那样类型断言会返回 true，调用方拿到的能力探测就是错的。
+
+// ImageGenerator 支持从文本提示生成图像。
+type ImageGenerator interface {
 	Name() string
 	GenerateImage(ctx context.Context, apiKey, model string, req *ImageGenerationRequest) (*ImageGenerationResponse, error)
+}
+
+// ImageEditor 支持按提示编辑上传的图像。比 ImageGenerator 少见得多：
+// 聚合类服务通常只转发生成端点。
+type ImageEditor interface {
+	Name() string
 	EditImage(ctx context.Context, apiKey, model string, req *ImageEditRequest) (*ImageGenerationResponse, error)
 }
 
-// VideoProvider 是支持视频任务的 provider 子接口。CancelVideoJob 可返回 unsupported。
-type VideoProvider interface {
+// ImageProvider 是两种图像能力都具备的 provider。断言它等于同时要求生成和编辑；
+// 只需要其中一种时请断言更小的那个接口。
+type ImageProvider interface {
+	ImageGenerator
+	ImageEditor
+}
+
+// VideoCreator 支持提交并轮询异步视频任务。创建和查询不拆开：能建任务却查不了
+// 状态的 adapter 没有意义。
+type VideoCreator interface {
 	Name() string
 	CreateVideoJob(ctx context.Context, apiKey, model string, req *VideoCreateRequest) (*VideoJob, error)
 	GetVideoJob(ctx context.Context, apiKey string, job *VideoJob) (*VideoJob, error)
+}
+
+// VideoCanceller 支持请求上游取消运行中的任务。目前没有任何内置 adapter 实现
+// 它 —— Gemini 和 OpenRouter 都没有取消端点。接口留在这里是为了让自定义
+// adapter 能声明该能力，也为了厂商补上端点时有位置可接。
+type VideoCanceller interface {
+	Name() string
 	CancelVideoJob(ctx context.Context, apiKey string, job *VideoJob) (*VideoJob, error)
+}
+
+// VideoProvider 是视频能力齐全（含取消）的 provider。
+type VideoProvider interface {
+	VideoCreator
+	VideoCanceller
 }
 
 // ErrUnsupported 表示 provider adapter 主动声明能力不支持。例如 OpenAI Videos 没有 cancel 端点。

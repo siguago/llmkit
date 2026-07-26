@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"net/url"
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
@@ -182,53 +182,69 @@ func TestUntestedAdapters_ErrorsCarryStatusAndRetryAfter(t *testing.T) {
 	}
 }
 
+type smokeCaps struct{ models, embeddings, imageGen, imageEdit bool }
+
 func TestUntestedAdapters_Capabilities(t *testing.T) {
 	// All three ride the compat layer, so all three get models + embeddings.
-	// Only vercel adds image generation on top.
-	want := map[string]struct{ models, embeddings, images bool }{
+	// Only vercel adds images — and only generation: its gateway has no editing
+	// endpoint, so it must NOT satisfy provider.ImageEditor. Pinning imageEdit
+	// false is the regression guard against someone "completing" the interface
+	// with an ErrUnsupported stub, which would make the capability check lie.
+	want := map[string]smokeCaps{
 		"minimax":     {models: true, embeddings: true},
 		"siliconflow": {models: true, embeddings: true},
-		"vercel":      {models: true, embeddings: true, images: true},
+		"vercel":      {models: true, embeddings: true, imageGen: true},
 	}
 	for name, p := range adapters("") {
-		_, models := p.(provider.ModelLister)
-		_, embeddings := p.(provider.Embedder)
-		_, images := p.(provider.ImageProvider)
-		got := struct{ models, embeddings, images bool }{models, embeddings, images}
+		var got smokeCaps
+		_, got.models = p.(provider.ModelLister)
+		_, got.embeddings = p.(provider.Embedder)
+		_, got.imageGen = p.(provider.ImageGenerator)
+		_, got.imageEdit = p.(provider.ImageEditor)
 		if got != want[name] {
 			t.Errorf("%s: %+v, want %+v", name, got, want[name])
 		}
 	}
 }
 
-func TestUntestedAdapters_DefaultBaseURLs(t *testing.T) {
-	// An empty baseURL must select the vendor's official endpoint, not produce
-	// a request to "/chat/completions" with no host.
-	for name, p := range adapters("") {
-		if p == nil {
-			t.Fatalf("%s: nil adapter", name)
-		}
-		// A request against the default endpoint is expected to fail (no
-		// credential / no network in CI), but it must fail as a transport or
-		// API error, never as a malformed-URL error.
-		_, err := p.ChatCompletion(t.Context(), "", "m", &provider.ChatCompletionRequest{
-			Model:    "m",
-			Messages: []provider.Message{{Role: "user", Content: "x"}},
-		})
-		if err == nil {
-			t.Skipf("%s: unexpectedly reached upstream; skipping", name)
-		}
-		if isMalformedURLError(err) {
-			t.Errorf("%s: default base URL is malformed: %v", name, err)
-		}
-	}
+// defaultChatURL is the exact endpoint an empty baseURL must resolve to. A typo
+// here is a request sent to the wrong vendor, or to no host at all.
+var defaultChatURL = map[string]string{
+	"minimax":     "https://api.minimax.io/v1/chat/completions",
+	"siliconflow": "https://api.siliconflow.cn/v1/chat/completions",
+	"vercel":      "https://ai-gateway.vercel.sh/v1/chat/completions",
 }
 
-// isMalformedURLError distinguishes "the default base URL is broken" from the
-// expected "no credential / no network" failure.
-func isMalformedURLError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "unsupported protocol scheme") ||
-		strings.Contains(msg, "missing protocol scheme") ||
-		strings.Contains(msg, "no Host in request URL")
+func TestUntestedAdapters_DefaultBaseURLs(t *testing.T) {
+	// This runs offline. The request is issued under an already-cancelled
+	// context, so net/http builds the full URL, then aborts before dialing and
+	// reports the target back in *url.Error.URL. That gives us the exact
+	// endpoint to assert against without touching the network — the previous
+	// version of this test reached the three vendors for real, which made the
+	// suite slow behind a firewall and contradicted the "all default tests are
+	// offline" promise in the README.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for name, p := range adapters("") {
+		t.Run(name, func(t *testing.T) {
+			if p == nil {
+				t.Fatal("nil adapter")
+			}
+			_, err := p.ChatCompletion(ctx, "", "m", &provider.ChatCompletionRequest{
+				Model:    "m",
+				Messages: []provider.Message{{Role: "user", Content: "x"}},
+			})
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) {
+				t.Fatalf("err = %v (%T), want *url.Error carrying the target URL", err, err)
+			}
+			if !errors.Is(urlErr.Err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled — the request must not have been sent", urlErr.Err)
+			}
+			if got := urlErr.URL; got != defaultChatURL[name] {
+				t.Errorf("default endpoint = %q, want %q", got, defaultChatURL[name])
+			}
+		})
+	}
 }

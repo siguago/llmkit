@@ -30,9 +30,6 @@ func main() {
 		Prompt: prompt,
 		N:      &n,
 		Size:   "1024x1024",
-		// "inline" asks the adapter to keep base64 payloads in the response.
-		// The gateway-oriented "proxy" mode has no meaning outside a gateway.
-		Delivery: "inline",
 	})
 	if err != nil {
 		log.Fatal(err)

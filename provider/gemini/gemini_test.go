@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -18,7 +19,7 @@ func TestBuildRequest_ThinkingSetsIncludeThoughts(t *testing.T) {
 			BudgetTokens: 1024,
 		},
 	}
-	r, err := buildRequest(req)
+	r, err := buildRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestBuildRequest_ToolMessageNameLookupFromToolCallID(t *testing.T) {
 			{Role: "tool", ToolCallID: "call_42", Content: `{"result":"ok"}`},
 		},
 	}
-	r, err := buildRequest(req)
+	r, err := buildRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -130,7 +131,7 @@ func TestBuildRequest_StructuredOutputJSONSchema(t *testing.T) {
 			},
 		},
 	}
-	r, err := buildRequest(req)
+	r, err := buildRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestBuildRequest_ForwardsSafetySettings(t *testing.T) {
 		{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
 		{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_LOW_AND_ABOVE"},
 	}
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages:       []provider.Message{{Role: "user", Content: "hi"}},
 		SafetySettings: settings,
 	})
@@ -244,7 +245,7 @@ func TestStreamReader_MultiCandidateChunkEmitsAllChoices(t *testing.T) {
 			`{"content":{"parts":[{"text":"second"}]},"finishReason":"STOP","index":1}` +
 			`]}` + "\n\n",
 	))
-	sr := NewStreamReader(body, "gemini-test")
+	sr := NewStreamReader(context.Background(), body, "gemini-test")
 	chunk, err := sr.Recv()
 	if err != nil {
 		t.Fatalf("recv: %v", err)
@@ -290,7 +291,7 @@ func TestConvertResponse_EmptyCandidatesAlwaysReturnsArray(t *testing.T) {
 }
 
 func TestBuildRequest_PropagatesImageError(t *testing.T) {
-	_, err := buildRequest(&provider.ChatCompletionRequest{
+	_, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{
 			Role: "user",
 			Content: []provider.ContentPart{

@@ -236,3 +236,25 @@ func TestSolidPNG(t *testing.T) {
 }
 
 func testRed() color.Color { return color.RGBA{R: 220, G: 30, B: 30, A: 255} }
+
+// The two video-only providers must not be advertised as having a chat model,
+// and everyone else must be.
+func TestProviderDoesChat(t *testing.T) {
+	videoOnly := map[string]bool{"dashscope": true, "volcengine": true}
+	for _, name := range llmkit.Providers() {
+		if got, want := providerDoesChat(name), !videoOnly[name]; got != want {
+			t.Errorf("providerDoesChat(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// -list must work with no credentials configured at all — it is the command you
+// run to find out what to configure.
+func TestProviderDoesChat_NeedsNoCredential(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		t.Setenv(llmkit.EnvVar(name), "")
+	}
+	if !providerDoesChat("openai") {
+		t.Error("providerDoesChat should not depend on a configured key")
+	}
+}

@@ -2,10 +2,10 @@ package gemini
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -15,17 +15,19 @@ import (
 type StreamReader struct {
 	reader  io.ReadCloser
 	scanner *bufio.Scanner
+	diag    provider.StreamDiagnostics
 	usage   *provider.Usage
 	model   string
 	id      string
 }
 
-func NewStreamReader(reader io.ReadCloser, model string) *StreamReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+func NewStreamReader(ctx context.Context, reader io.ReadCloser, model string) *StreamReader {
+	diag := provider.NewStreamDiagnostics(ctx, "gemini")
+	scanner := diag.NewScanner(reader)
 	return &StreamReader{
 		reader:  reader,
 		scanner: scanner,
+		diag:    diag,
 		model:   model,
 		id:      fmt.Sprintf("chatcmpl-gemini-%d", time.Now().UnixNano()),
 	}
@@ -49,9 +51,20 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 			continue
 		}
 
+		switch provider.ClassifyFrame(data) {
+		case provider.FrameDone:
+			// Gemini itself doesn't send [DONE], but relays configured with
+			// WithBaseURL routinely append it to look OpenAI-shaped.
+			return nil, io.EOF
+		case provider.FrameSkip:
+			continue
+		}
+
 		var resp response
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
-			slog.Warn("gemini stream: chunk parse error", "error", err, "data_preview", truncate(data, 200))
+			if err := s.diag.Malformed("chunk", err, data); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -183,7 +196,7 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		}, nil
 	}
 
-	if err := s.scanner.Err(); err != nil {
+	if err := s.diag.ScanError(s.scanner.Err()); err != nil {
 		return nil, err
 	}
 	return nil, io.EOF
@@ -195,11 +208,4 @@ func (s *StreamReader) Close() error {
 
 func (s *StreamReader) GetUsage() *provider.Usage {
 	return s.usage
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }

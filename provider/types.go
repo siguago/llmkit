@@ -37,8 +37,8 @@ type ChatCompletionRequest struct {
 	// LogitBias is OpenAI's per-token sampling adjustment table — keys are
 	// token IDs (as strings), values are biases in [-100, 100]. Decoded as
 	// any so we don't lock the int-string-key map shape; opaque passthrough
-	// to upstream. DeepSeek / reasoning models reject this; for them the
-	// gateway either strips (reasoning) or relies on upstream 400 (DeepSeek).
+	// to upstream. DeepSeek and the reasoning models reject it: the adapter
+	// strips it for reasoning models and lets DeepSeek answer with its own 400.
 	LogitBias any `json:"logit_bias,omitempty"`
 	// Prediction is OpenAI's "Predicted Outputs" hint — when the response is
 	// expected to closely match a known string (e.g. minor edits to existing
@@ -169,8 +169,8 @@ type Message struct {
 	// Refusal is OpenAI's explicit refusal explanation, distinct from content.
 	// When the model declines (e.g. policy violation), `content` is null and
 	// `refusal` carries the explanation string. Without binding this field
-	// the gateway would silently drop the refusal reason, leaving clients
-	// with an empty assistant message.
+	// dropping it would leave the caller with an empty assistant message and
+	// no indication of why.
 	Refusal *string `json:"refusal,omitempty"`
 	// RedactedThinking carries Anthropic's `redacted_thinking` blocks, which
 	// appear when the model's thinking is auto-redacted (PII, policy). They
@@ -239,9 +239,9 @@ type ContentPart struct {
 	Type     string    `json:"type"` // "text" / "image_url" / "input_audio" / "file"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
-	// InputAudio is OpenAI's gpt-4o-audio input shape. The gateway forwards
-	// it as inline media to providers that support audio (currently Gemini);
-	// providers without audio support drop it during their part conversion.
+	// InputAudio is OpenAI's gpt-4o-audio input shape. Adapters forward it as
+	// inline media to providers that support audio (currently Gemini); the rest
+	// drop it during part conversion.
 	InputAudio *InputAudio `json:"input_audio,omitempty"`
 	// File is OpenAI's gpt-4o file content type — either a previously
 	// uploaded file_id or an inline file_data + mime_type. Gemini accepts
@@ -262,9 +262,9 @@ type ImageURL struct {
 }
 
 // InputAudio represents OpenAI's gpt-4o-audio input format —
-// {data: "<base64>", format: "wav"|"mp3"|"flac"|"opus"}. The gateway maps
-// this to provider-native audio inputs (Gemini inlineData with audio/<format>
-// mime type).
+// {data: "<base64>", format: "wav"|"mp3"|"flac"|"opus"}. Adapters map it to
+// provider-native audio inputs (Gemini inlineData with an audio/<format> mime
+// type).
 type InputAudio struct {
 	Data   string `json:"data"`             // base64-encoded audio bytes
 	Format string `json:"format,omitempty"` // "wav" / "mp3" / "flac" / "opus" / etc
@@ -382,22 +382,22 @@ type Usage struct {
 	PromptCacheMissTokens   int                      `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
-	// Cost is the upstream-reported request cost in USD. Currently emitted by
-	// OpenRouter (which routes across vendors and aggregates their actual
-	// charges); other providers leave it zero and omitempty hides it. The
-	// gateway's own cost computation in usage_logs is independent — both can
-	// coexist (gateway uses its price table for billing dashboards, the
-	// passthrough field exposes upstream's number to clients that care).
+	// Cost is the upstream-reported request cost in USD, as the vendor
+	// calculated it. Currently only OpenRouter reports one — it routes across
+	// vendors and aggregates their actual charges. Everyone else leaves it zero.
 	Cost float64 `json:"cost,omitempty"`
-	// ImageCount / DurationMs / RequestCount 是非 token 计费维度的统一容量字段。
-	// 由 provider 各自填充（图像类填 ImageCount、音视频填 DurationMs）；
-	// NormalizeUsage 兜底把 RequestCount 升到至少 1，保证 per_request 策略
-	// 在上游不报 usage 时仍能按 1 次结算。
+	// ImageCount / DurationMs / RequestCount are the non-token billing
+	// dimensions, for models priced per image, per second, or per call rather
+	// than per token. Each adapter fills what applies to it: image endpoints set
+	// ImageCount, audio and video set DurationMs.
+	//
+	// NormalizeUsage floors RequestCount at 1, so per-call pricing still has a
+	// quantity to multiply when the vendor reports no usage block at all.
 	ImageCount   int `json:"image_count,omitempty"`
 	DurationMs   int `json:"duration_ms,omitempty"`
 	RequestCount int `json:"request_count,omitempty"`
-	// MediaCount 是输出资产总数（跨 image/video/audio）；与 ImageCount 不应相加。
-	// 由媒体 handler / chat 解析路径填充，主要用于日志统一聚合。
+	// MediaCount 是输出资产总数（跨 image/video/audio），由媒体端点和 chat 解析
+	// 路径填充。它与 ImageCount 是同一批资产的两种口径，不要相加。
 	MediaCount int `json:"media_count,omitempty"`
 }
 
@@ -532,7 +532,9 @@ func NormalizeUsage(usage *Usage) {
 	if usage.ReasoningTokens == 0 && usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
 		usage.ReasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
 	}
-	if usage.RequestCount == 0 {
+	// < 1 rather than == 0: a vendor sending a negative count would otherwise
+	// pass straight through into per-request cost arithmetic.
+	if usage.RequestCount < 1 {
 		usage.RequestCount = 1
 	}
 }

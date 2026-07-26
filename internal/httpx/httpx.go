@@ -45,13 +45,18 @@ func NewTransport() *http.Transport {
 }
 
 // NewOutbound returns a transport that, on every RoundTrip, applies any
-// context-supplied extra headers and then strips client IP disclosure headers.
-// This is what providers should use.
+// context-supplied extra headers, strips client IP disclosure headers, and then
+// dials through either a caller-supplied transport (see WithBaseTransport) or
+// the tuned default. This is what providers should use.
 //
-// Order matters: extras go on first, IP stripping runs last, so a caller cannot
-// re-introduce a forwarding header that would disclose an end user's address.
+// Order matters: extras go on first, IP stripping runs next, and the swappable
+// base runs last. A caller therefore cannot re-introduce a forwarding header
+// that would disclose an end user's address — not through extra headers, and
+// not by installing their own transport.
 func NewOutbound() http.RoundTripper {
-	return headerTransport{base: ipprivacy.NewTransport(NewTransport())}
+	return headerTransport{
+		base: ipprivacy.NewTransport(switchableTransport{fallback: NewTransport()}),
+	}
 }
 
 type headerTransport struct {
@@ -59,11 +64,19 @@ type headerTransport struct {
 }
 
 func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req == nil || len(extraHeaders(req.Context())) == 0 {
+	if req == nil {
 		return t.base.RoundTrip(req)
 	}
-	clone := req.Clone(req.Context())
-	applyExtraHeaders(req.Context(), clone.Header)
+	ctx := req.Context()
+	if len(extraHeaders(ctx)) == 0 && !hasRequestID(ctx) {
+		return t.base.RoundTrip(req)
+	}
+	// RoundTrip must not mutate the request it is handed, and the request ID is
+	// regenerated here rather than upstream so that each attempt of a retried
+	// call gets its own.
+	clone := req.Clone(ctx)
+	applyExtraHeaders(ctx, clone.Header)
+	applyRequestID(ctx, clone.Header)
 	return t.base.RoundTrip(clone)
 }
 

@@ -46,6 +46,22 @@ func DefaultRetry() RetryConfig {
 // NoRetry disables automatic retries.
 func NoRetry() RetryConfig { return RetryConfig{MaxAttempts: 1} }
 
+// replaySafeOnly returns a copy of rc that additionally requires IsSafeToReplay,
+// so it retries only errors proving the upstream never took the work. This is
+// what billable, non-idempotent creation calls use.
+//
+// Attempt count and backoff are untouched, so a caller who configured NoRetry()
+// still gets no retries — this narrows the policy, it never widens it.
+func (rc RetryConfig) replaySafeOnly() RetryConfig {
+	inner := rc.ShouldRetry
+	if inner == nil {
+		inner = IsRetryable
+	}
+	out := rc
+	out.ShouldRetry = func(err error) bool { return inner(err) && IsSafeToReplay(err) }
+	return out
+}
+
 func (rc RetryConfig) attempts() int {
 	if rc.MaxAttempts < 1 {
 		return 1

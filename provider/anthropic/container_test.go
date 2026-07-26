@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestConvertResponse_ContainerSurfacedToOpenAIResponse(t *testing.T) {
 			"expires_at": "2026-05-06T12:00:00Z",
 		},
 	}
-	out := convertResponse(resp, nil, "")
+	out := convertResponse(context.Background(), resp, nil, "")
 	if out.Container == nil {
 		t.Fatal("ChatCompletionResponse.Container lost — multi-turn sandbox round-trip broken")
 	}

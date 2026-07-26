@@ -141,16 +141,55 @@ func IsRetryable(err error) bool {
 			return false
 		}
 	}
-	// Not an API error — network layer. Timeouts and temporary failures are
-	// worth another attempt; a DNS NXDOMAIN or refused connection to a
-	// misconfigured base URL is not, but distinguishing those reliably costs
-	// more than the occasional wasted retry.
+	// Not an API error — network layer. Only timeouts are worth another attempt.
+	// A refused connection or a DNS NXDOMAIN almost always means a misconfigured
+	// base URL, which no number of retries will fix.
+	//
+	// Note that *net.OpError and *net.DNSError both satisfy net.Error, so this
+	// one check covers them: they reach it and report Timeout() == false.
 	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return netErr.Timeout()
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// IsSafeToReplay reports whether err proves the upstream never took the work,
+// so replaying the request cannot produce a second billable operation.
+//
+// This asks a different question from IsRetryable, and the two are orthogonal.
+// IsRetryable asks "is another attempt likely to succeed"; this asks "is another
+// attempt certain not to charge twice". Both must hold before a billable call is
+// replayed:
+//
+//   - A read timeout is retryable but NOT replay-safe — the vendor may have
+//     accepted the job and only the response was lost.
+//   - A refused connection is replay-safe but NOT retryable — nothing was
+//     charged, but a misconfigured base URL won't fix itself on attempt two.
+//   - A 429 is both, so it is the case that actually gets replayed.
+//
+// This is the default retry gate for GenerateImage and CreateVideo, where a
+// duplicate attempt costs real money. See WithMediaRetry to override it.
+func IsSafeToReplay(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if status := StatusCode(err); status != 0 {
+		// A status code means the request was delivered and the vendor answered.
+		// Only an explicit refusal to take the work is safe: 429 is a quota
+		// decision made before generation starts. 5xx is not — an overloaded
+		// backend may have started the job and then failed to answer.
+		return status == http.StatusTooManyRequests
+	}
+	// Network layer: only a connection that was never established proves the
+	// request bytes never left. Anything after dial — a write, a read timeout,
+	// a peer reset — may have arrived and been acted on.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
 	}
 	var opErr *net.OpError
-	return errors.As(err, &opErr)
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 // translateUnsupported converts an adapter-level provider.ErrUnsupported into

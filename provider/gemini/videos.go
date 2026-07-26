@@ -117,10 +117,10 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	return parseVeoOperation(respBody, job)
 }
 
-// CancelVideoJob Veo 不支持 operation cancel 端点，handler 标 cancel_requested。
-func (p *Provider) CancelVideoJob(ctx context.Context, apiKey string, job *provider.VideoJob) (*provider.VideoJob, error) {
-	return nil, &provider.ErrUnsupported{Provider: "gemini", Op: "cancel_video_job"}
-}
+// Veo 没有 operation cancel 端点，所以本 adapter 只实现 VideoCreator，
+// 不实现 VideoCanceller —— 让 Client.SupportsVideoCancellation 如实返回 false。
+// 任务提交后只能等它跑到终态，或者放弃轮询。
+var _ provider.VideoCreator = (*Provider)(nil)
 
 func parseVeoOperation(raw []byte, prev *provider.VideoJob) (*provider.VideoJob, error) {
 	var aux struct {

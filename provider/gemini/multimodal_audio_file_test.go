@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -146,7 +147,7 @@ func TestContentToParts_DecodesFileFromJSONArray(t *testing.T) {
 }
 
 func TestBuildRequest_AudioMessageEndToEnd_WiresAsInlineData(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{
 			Role: "user",
 			Content: []provider.ContentPart{

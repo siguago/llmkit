@@ -8,3 +8,21 @@ type Provider interface {
 	ChatCompletion(ctx context.Context, apiKey, model string, req *ChatCompletionRequest) (*ChatCompletionResponse, error)
 	ChatCompletionStream(ctx context.Context, apiKey, model string, req *ChatCompletionRequest) (StreamReader, error)
 }
+
+// NonChatProvider is implemented by adapters that exist only for non-chat
+// endpoints — a vendor whose API this SDK covers for video generation but which
+// has no chat endpoint here at all (DashScope, Volcengine).
+//
+// Chat cannot be made optional the way images and video are: it is on Provider
+// itself, so every adapter has the methods and a type assertion can never tell
+// the difference. Such adapters return ErrUnsupported from both chat methods and
+// implement this interface to say so up front, which is what lets
+// llmkit.Client.SupportsChat answer before the call rather than after.
+//
+// Not implementing it means "this adapter does chat", which is the common case.
+type NonChatProvider interface {
+	Provider
+	// ChatUnsupported is a marker. Its body is irrelevant; implementing the
+	// method at all is the declaration.
+	ChatUnsupported()
+}

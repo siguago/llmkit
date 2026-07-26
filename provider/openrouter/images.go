@@ -74,11 +74,12 @@ func (p *Provider) GenerateImage(ctx context.Context, apiKey, model string, req 
 	return out, nil
 }
 
-// EditImage 一期不支持——OpenRouter chat/completions 没有标准的图像编辑入口。
-// 客户端需要图像编辑时应直连 OpenAI Images。
-func (p *Provider) EditImage(ctx context.Context, apiKey, model string, req *provider.ImageEditRequest) (*provider.ImageGenerationResponse, error) {
-	return nil, &provider.ErrUnsupported{Provider: "openrouter", Op: "image_edit"}
-}
+// 本 adapter 有意只实现 ImageGenerator，不实现 ImageEditor：OpenRouter 的
+// chat/completions 没有标准的图像编辑入口，需要编辑请直连 OpenAI Images。
+//
+// 不写一个只返回 ErrUnsupported 的 EditImage 空方法，是因为那样会满足接口，
+// 让 Client.SupportsImageEditing 谎报能力；调用方只能在运行时撞上错误。
+var _ provider.ImageGenerator = (*Provider)(nil)
 
 func openrouterImageConfigExtras(opts map[string]any) map[string]any {
 	if opts == nil {
