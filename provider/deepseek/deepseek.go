@@ -126,7 +126,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	// behavior, but with both pointing at the same flag we never accidentally
 	// drop a chunk the client asked for.
 	return &streamReader{
-		inner:          compat.NewStreamReader(resp.Body, name, emitUsageChunk),
+		inner:          compat.NewStreamReader(ctx, resp.Body, name, emitUsageChunk),
 		emitUsageChunk: emitUsageChunk,
 	}, nil
 }

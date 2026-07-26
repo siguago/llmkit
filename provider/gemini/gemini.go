@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/siguago/llmkit/internal/httpx"
+	"github.com/siguago/llmkit/internal/logging"
 	"github.com/siguago/llmkit/internal/safehttp"
 	"github.com/siguago/llmkit/provider"
 )
@@ -64,7 +64,7 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
-	geminiReq, err := buildRequest(req)
+	geminiReq, err := buildRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 }
 
 func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (provider.StreamReader, error) {
-	geminiReq, err := buildRequest(req)
+	geminiReq, err := buildRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
 	}
 
-	return NewStreamReader(resp.Body, model), nil
+	return NewStreamReader(ctx, resp.Body, model), nil
 }
 
 // ListModels fetches available models from the Gemini API.
@@ -211,7 +211,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	return allModels, nil
 }
 
-func buildRequest(req *provider.ChatCompletionRequest) (*request, error) {
+func buildRequest(ctx context.Context, req *provider.ChatCompletionRequest) (*request, error) {
 	r := &request{}
 
 	// Build tool_call_id → function_name map for Gemini functionResponse Name field.
@@ -443,7 +443,7 @@ func buildRequest(req *provider.ChatCompletionRequest) (*request, error) {
 				enableCodeExecution = true
 			case "function", "":
 				if t.Function.Name == "" {
-					slog.Warn("gemini: dropping function tool with empty name",
+					logging.From(ctx).Warn("llmkit: dropping function tool with empty name",
 						"tool_index", len(declarations))
 					continue
 				}
@@ -457,7 +457,8 @@ func buildRequest(req *provider.ChatCompletionRequest) (*request, error) {
 				// are silently dropped — Gemini has no equivalent built-in and
 				// dropping is preferable to an opaque upstream 400. Log so
 				// operators can spot misconfigured clients in the gateway logs.
-				slog.Warn("gemini: dropping unsupported tool type", "type", t.Type)
+				logging.From(ctx).Warn("llmkit: dropping unsupported tool type",
+					"provider", "gemini", "type", t.Type)
 			}
 		}
 		if len(declarations) > 0 {

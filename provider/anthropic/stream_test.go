@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -44,7 +45,7 @@ func TestStreamReader_MessageStartCaptureFullPromptTokens(t *testing.T) {
 		``,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	drainStream(t, sr)
 
 	usage := sr.GetUsage()
@@ -80,7 +81,7 @@ func TestStreamReader_MessageDeltaUsageUpgradesStart(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	drainStream(t, sr)
 
 	usage := sr.GetUsage()
@@ -107,7 +108,7 @@ func TestStreamReader_MessageDeltaDoesNotRegressUsage(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	drainStream(t, sr)
 
 	usage := sr.GetUsage()
@@ -142,7 +143,7 @@ func TestStreamReader_SignatureDeltaSurfacesAsReasoningSignature(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	gotSignature := false
 	for {
 		c, err := sr.Recv()
@@ -177,7 +178,7 @@ func TestStreamReader_MidStreamErrorEvent(t *testing.T) {
 		``,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	for {
 		_, err := sr.Recv()
 		if err == io.EOF {
@@ -219,7 +220,7 @@ func TestStreamReader_EmptySignatureDeltaDropped(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 	}, "\n")
 
-	sr := NewStreamReader(newFakeBody(body), "")
+	sr := NewStreamReader(context.Background(), newFakeBody(body), "")
 	chunks := 0
 	for {
 		c, err := sr.Recv()

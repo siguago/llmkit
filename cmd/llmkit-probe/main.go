@@ -128,6 +128,19 @@ COST
 `)
 }
 
+// providerDoesChat reports whether a provider has a chat endpoint at all.
+//
+// New only builds the adapter — it sends nothing — so a placeholder credential
+// is enough to ask, and -list keeps working before any key is configured.
+func providerDoesChat(name string) bool {
+	c, err := llmkit.New(name, llmkit.WithAPIKey("list-only-placeholder"))
+	if err != nil {
+		// Unknown provider: say yes rather than mislabel it as video-only.
+		return true
+	}
+	return c.SupportsChat()
+}
+
 func listProviders() {
 	fmt.Println("provider      env var                     default chat model")
 	fmt.Println(strings.Repeat("─", 76))
@@ -136,7 +149,11 @@ func listProviders() {
 		if os.Getenv(llmkit.EnvVar(name)) != "" {
 			configured = "✓"
 		}
-		fmt.Printf("%s %-12s %-27s %s\n", configured, name, llmkit.EnvVar(name), defaultChatModel(name))
+		model := defaultChatModel(name)
+		if !providerDoesChat(name) {
+			model = "— (仅视频)"
+		}
+		fmt.Printf("%s %-12s %-27s %s\n", configured, name, llmkit.EnvVar(name), model)
 	}
 	fmt.Println("\n✓ = key found in the environment")
 }

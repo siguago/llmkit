@@ -269,17 +269,16 @@ func TestLiveImage(t *testing.T) {
 	for _, name := range Providers() {
 		t.Run(name, func(t *testing.T) {
 			c := liveClient(t, name, WithTimeout(180*time.Second))
-			if !c.SupportsImages() {
-				t.Skip("no image endpoint")
+			if !c.SupportsImageGeneration() {
+				t.Skip("no image generation endpoint")
 			}
 			model := os.Getenv("LLMKIT_TEST_IMAGE_MODEL_" + strings.ToUpper(name))
 			if model == "" {
 				t.Skip("set LLMKIT_TEST_IMAGE_MODEL_" + strings.ToUpper(name) + " to run")
 			}
 			resp, err := c.GenerateImage(context.Background(), &ImageRequest{
-				Model:    model,
-				Prompt:   "a single red circle on white, flat vector",
-				Delivery: "inline",
+				Model:  model,
+				Prompt: "a single red circle on white, flat vector",
 			})
 			if err != nil {
 				t.Fatalf("GenerateImage: %v", err)

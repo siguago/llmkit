@@ -378,9 +378,10 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	return out, nil
 }
 
-func (p *Provider) CancelVideoJob(ctx context.Context, apiKey string, job *provider.VideoJob) (*provider.VideoJob, error) {
-	return nil, &provider.ErrUnsupported{Provider: "easyrouter", Op: "cancel_video_job"}
-}
+// EasyRouter 没有取消端点，所以本 adapter 只实现 VideoCreator，不实现
+// VideoCanceller —— 让 Client.SupportsVideoCancellation 如实返回 false，
+// 而不是让调用方在运行时才撞上 ErrUnsupported。
+var _ provider.VideoCreator = (*Provider)(nil)
 
 func (p *Provider) postJSON(ctx context.Context, apiKey, endpoint string, body any) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)

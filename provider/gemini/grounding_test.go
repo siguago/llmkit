@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestBuildRequest_GoogleSearchToolBecomesBuiltinMarker(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 		Tools: []provider.Tool{
 			{Type: "google_search"},
@@ -43,7 +44,7 @@ func TestBuildRequest_GoogleSearchToolBecomesBuiltinMarker(t *testing.T) {
 }
 
 func TestBuildRequest_UnknownToolTypesSilentlyDropped(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 		Tools: []provider.Tool{
 			{Type: "web_search"},   // OpenAI built-in — Gemini has no equivalent
@@ -114,7 +115,7 @@ func TestBuildGroundingAnnotations_InvalidIndicesIgnored(t *testing.T) {
 }
 
 func TestBuildRequest_URLContextToolBecomesBuiltinMarker(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "summarize https://x.com/a"}},
 		Tools: []provider.Tool{
 			{Type: "url_context"},
@@ -141,7 +142,7 @@ func TestBuildRequest_URLContextToolBecomesBuiltinMarker(t *testing.T) {
 }
 
 func TestBuildRequest_CodeExecutionToolBecomesBuiltinMarker(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "compute fibonacci 20"}},
 		Tools: []provider.Tool{
 			{Type: "code_execution"},
@@ -171,7 +172,7 @@ func TestBuildRequest_CodeExecutionToolBecomesBuiltinMarker(t *testing.T) {
 func TestBuildRequest_AllThreeBuiltinToolsCanCoexist(t *testing.T) {
 	// Per Gemini docs, code_execution can be combined with google_search;
 	// url_context also coexists with the others on Gemini 3.
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 		Tools: []provider.Tool{
 			{Type: "google_search"},
@@ -192,7 +193,7 @@ func TestBuildRequest_JSONSchemaRoutesThroughResponseJSONSchema(t *testing.T) {
 	// (responseSchema) rejects. The gateway routes json_schema through
 	// responseJsonSchema so the full spec lands on Gemini 2.5+ verbatim.
 	strict := true
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 		ResponseFormat: &provider.ResponseFormat{
 			Type: "json_schema",
@@ -245,7 +246,7 @@ func TestBuildRequest_JSONSchemaRoutesThroughResponseJSONSchema(t *testing.T) {
 func TestBuildRequest_JSONObjectStillUsesResponseMimeType(t *testing.T) {
 	// json_object (no schema) still goes through responseMimeType only —
 	// don't accidentally populate either schema field.
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages:       []provider.Message{{Role: "user", Content: "x"}},
 		ResponseFormat: &provider.ResponseFormat{Type: "json_object"},
 	})
@@ -261,7 +262,7 @@ func TestBuildRequest_JSONObjectStillUsesResponseMimeType(t *testing.T) {
 }
 
 func TestBuildRequest_LabelsForwarded(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 		Labels:   map[string]string{"team": "platform", "env": "prod"},
 	})
@@ -281,7 +282,7 @@ func TestBuildRequest_LabelsForwarded(t *testing.T) {
 }
 
 func TestBuildRequest_NoLabelsOmitsField(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{{Role: "user", Content: "x"}},
 	})
 	if err != nil {
@@ -294,7 +295,7 @@ func TestBuildRequest_NoLabelsOmitsField(t *testing.T) {
 }
 
 func TestBuildRequest_CachedContentForwarded(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages:      []provider.Message{{Role: "user", Content: "x"}},
 		CachedContent: "cachedContents/abc123",
 	})

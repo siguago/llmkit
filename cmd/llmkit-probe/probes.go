@@ -107,10 +107,17 @@ func probeProvider(ctx context.Context, t target, opts probeOptions) report {
 	// Preflight. Without this, an invalid key produces a full report of
 	// confident-looking nonsense: every capability probe fails or gets
 	// misclassified as "not supported" when the real cause is a 401.
-	if err := preflight(ctx, client, model); err != nil {
-		rep.setupErr = err
-		printPreflightFailure(t.provider, model, err)
-		return rep
+	//
+	// Skipped for the video-only providers: their chat methods return
+	// ErrUnsupported by design, so preflighting with a chat call would abort the
+	// whole report over a capability they never claimed — including the video
+	// probes that are the only reason to run them.
+	if client.SupportsChat() {
+		if err := preflight(ctx, client, model); err != nil {
+			rep.setupErr = err
+			printPreflightFailure(t.provider, model, err)
+			return rep
+		}
 	}
 
 	meter := &tokenMeter{}
@@ -158,7 +165,9 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 		{"多模态图像输入", func(ctx context.Context) result { return probeVision(ctx, c, model) }},
 		{"Embeddings", func(ctx context.Context) result { return probeEmbeddings(ctx, c, t.provider) }},
 		{"图像生成", func(ctx context.Context) result { return probeImage(ctx, c, t.provider, opts.media) }},
+		{"图像编辑", func(context.Context) result { return probeImageEdit(c) }},
 		{"视频生成", func(ctx context.Context) result { return probeVideo(ctx, c, opts.media) }},
+		{"视频取消", func(context.Context) result { return probeVideoCancel(c) }},
 		{"错误分类", func(ctx context.Context) result { return probeErrors(ctx, t.provider, model) }},
 	}
 }
@@ -191,6 +200,9 @@ func probeModels(ctx context.Context, c *llmkit.Client) result {
 }
 
 func probeChat(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	maxTokens := 64
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
@@ -214,6 +226,9 @@ func probeChat(ctx context.Context, c *llmkit.Client, model string) result {
 }
 
 func probeStream(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	var chunks int
 	var firstChunk time.Duration
 	start := time.Now()
@@ -249,6 +264,9 @@ func probeStream(ctx context.Context, c *llmkit.Client, model string) result {
 }
 
 func probeMultiTurn(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	maxTokens := 64
 	first, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
@@ -283,6 +301,9 @@ func probeMultiTurn(ctx context.Context, c *llmkit.Client, model string) result 
 }
 
 func probeTools(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	tools := []llmkit.Tool{llmkit.NewTool("get_temperature", "查询指定城市的当前气温", map[string]any{
 		"type":       "object",
 		"properties": map[string]any{"city": map[string]any{"type": "string", "description": "城市名"}},
@@ -337,6 +358,9 @@ func probeTools(ctx context.Context, c *llmkit.Client, model string) result {
 }
 
 func probeStructured(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -400,6 +424,9 @@ func probeStructured(ctx context.Context, c *llmkit.Client, model string) result
 }
 
 func probeThinking(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	maxTokens := 512
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
@@ -432,6 +459,9 @@ func probeThinking(ctx context.Context, c *llmkit.Client, model string) result {
 }
 
 func probeVision(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsChat() {
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
 	// Generated rather than embedded: a real PNG every time, no base64 blob in
 	// the source, and no dependency on an external URL being reachable.
 	img, err := solidPNG(color.RGBA{R: 220, G: 30, B: 30, A: 255}, 64)
@@ -498,7 +528,7 @@ func probeEmbeddings(ctx context.Context, c *llmkit.Client, providerName string)
 }
 
 func probeImage(ctx context.Context, c *llmkit.Client, providerName string, media bool) result {
-	if !c.SupportsImages() {
+	if !c.SupportsImageGeneration() {
 		return result{outcome: notApplicable, detail: "该 provider 无图像生成接口"}
 	}
 	if !media {
@@ -509,9 +539,8 @@ func probeImage(ctx context.Context, c *llmkit.Client, providerName string, medi
 		return result{outcome: skipped, detail: "未配置默认图像模型"}
 	}
 	resp, err := c.GenerateImage(ctx, &llmkit.ImageRequest{
-		Model:    model,
-		Prompt:   "a single red circle on a white background, flat vector",
-		Delivery: "inline",
+		Model:  model,
+		Prompt: "a single red circle on a white background, flat vector",
 	})
 	if err != nil {
 		return result{outcome: fail, detail: describeErr(err)}
@@ -534,14 +563,38 @@ func probeImage(ctx context.Context, c *llmkit.Client, providerName string, medi
 	}
 }
 
+// probeImageEdit reports the editing endpoint separately from generation: the
+// aggregator gateways forward one and not the other, which a single "images"
+// row would hide.
+func probeImageEdit(c *llmkit.Client) result {
+	if !c.SupportsImageEditing() {
+		return result{outcome: notApplicable, detail: "该 provider 无图像编辑接口"}
+	}
+	// Editing needs a source image to upload, which the probe has no business
+	// inventing — report that the endpoint exists and stop there.
+	return result{outcome: skipped, detail: "需自备源图，见 README"}
+}
+
 func probeVideo(ctx context.Context, c *llmkit.Client, media bool) result {
-	if !c.SupportsVideo() {
+	if !c.SupportsVideoGeneration() {
 		return result{outcome: notApplicable, detail: "该 provider 无视频生成接口"}
 	}
 	if !media {
 		return result{outcome: skipped, detail: "加 -media 启用（耗时数分钟，费用较高）"}
 	}
 	return result{outcome: skipped, detail: "视频探测需指定模型，见 README"}
+}
+
+// probeVideoCancel is a pure capability check — submitting a job just to cancel
+// it would cost real money for no information.
+func probeVideoCancel(c *llmkit.Client) result {
+	if !c.SupportsVideoGeneration() {
+		return result{outcome: notApplicable, detail: "该 provider 无视频生成接口"}
+	}
+	if !c.SupportsVideoCancellation() {
+		return result{outcome: notApplicable, detail: "有视频生成但无取消端点：任务提交后无法中止"}
+	}
+	return result{outcome: pass, detail: "有 cancel 端点"}
 }
 
 // probeErrors deliberately uses an invalid credential, so it costs nothing and
@@ -554,6 +607,12 @@ func probeErrors(ctx context.Context, providerName, model string) result {
 	)
 	if err != nil {
 		return result{outcome: fail, detail: err.Error()}
+	}
+	if !c.SupportsChat() {
+		// This probe asserts that a rejected credential is classified correctly,
+		// and it uses a chat call to provoke the rejection. Without chat there is
+		// nothing to provoke it with.
+		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
 	}
 	maxTokens := 8
 	_, err = c.Chat(ctx, &llmkit.ChatRequest{

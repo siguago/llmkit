@@ -2,10 +2,10 @@ package anthropic
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +32,7 @@ type activeBlock struct {
 type StreamReader struct {
 	reader             io.ReadCloser
 	scanner            *bufio.Scanner
+	diag               provider.StreamDiagnostics
 	usage              *provider.Usage
 	msgID              string
 	model              string
@@ -41,12 +42,13 @@ type StreamReader struct {
 	hasRealToolCalls   bool                 // whether any non-json-schema tool_use blocks exist
 }
 
-func NewStreamReader(reader io.ReadCloser, jsonSchemaToolName string) *StreamReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+func NewStreamReader(ctx context.Context, reader io.ReadCloser, jsonSchemaToolName string) *StreamReader {
+	diag := provider.NewStreamDiagnostics(ctx, "anthropic")
+	scanner := diag.NewScanner(reader)
 	return &StreamReader{
 		reader:             reader,
 		scanner:            scanner,
+		diag:               diag,
 		usage:              &provider.Usage{},
 		activeBlocks:       make(map[int]*activeBlock),
 		jsonSchemaToolName: jsonSchemaToolName,
@@ -72,9 +74,20 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 			continue
 		}
 
+		switch provider.ClassifyFrame(data) {
+		case provider.FrameDone:
+			// Anthropic ends with message_stop, but relays configured with
+			// WithBaseURL routinely append [DONE] to look OpenAI-shaped.
+			return nil, io.EOF
+		case provider.FrameSkip:
+			continue
+		}
+
 		var evt streamEvent
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
-			slog.Warn("anthropic stream: event parse error", "error", err, "data_preview", truncate(data, 200))
+			if err := s.diag.Malformed("event", err, data); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -82,7 +95,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		case "message_start":
 			var e messageStartEvent
 			if err := json.Unmarshal([]byte(data), &e); err != nil {
-				slog.Warn("anthropic stream: message_start parse error", "error", err)
+				if err := s.diag.Malformed("message_start", err, data); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			s.msgID = e.Message.ID
@@ -101,7 +116,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		case "content_block_start":
 			var e contentBlockStartEvent
 			if err := json.Unmarshal([]byte(data), &e); err != nil {
-				slog.Warn("anthropic stream: content_block_start parse error", "error", err)
+				if err := s.diag.Malformed("content_block_start", err, data); err != nil {
+					return nil, err
+				}
 				continue
 			}
 
@@ -220,7 +237,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 			if err := json.Unmarshal([]byte(data), &stopEvt); err != nil {
 				// 解析失败时 Index 是零值，会错删 index=0 的活动块——跳过本事件，
 				// 宁可留一个孤儿块（流结束随 reader 一起释放）也不污染别的块。
-				slog.Warn("anthropic stream: bad content_block_stop event", "error", err)
+				if err := s.diag.Malformed("content_block_stop", err, data); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			block := s.activeBlocks[stopEvt.Index]
@@ -260,7 +279,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		case "content_block_delta":
 			var e contentBlockDeltaEvent
 			if err := json.Unmarshal([]byte(data), &e); err != nil {
-				slog.Warn("anthropic stream: content_block_delta parse error", "error", err)
+				if err := s.diag.Malformed("content_block_delta", err, data); err != nil {
+					return nil, err
+				}
 				continue
 			}
 
@@ -413,7 +434,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		case "message_delta":
 			var e messageDeltaEvent
 			if err := json.Unmarshal([]byte(data), &e); err != nil {
-				slog.Warn("anthropic stream: message_delta parse error", "error", err)
+				if err := s.diag.Malformed("message_delta", err, data); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			if e.Usage != nil {
@@ -501,7 +524,7 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		}
 	}
 
-	if err := s.scanner.Err(); err != nil {
+	if err := s.diag.ScanError(s.scanner.Err()); err != nil {
 		return nil, err
 	}
 	return nil, io.EOF
@@ -513,13 +536,6 @@ func (s *StreamReader) Close() error {
 
 func (s *StreamReader) GetUsage() *provider.Usage {
 	return s.usage
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // extractRetryAfterField pulls a backoff hint out of an upstream error body.

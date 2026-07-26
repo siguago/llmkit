@@ -1,6 +1,7 @@
 package compat
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -39,7 +40,7 @@ func TestStreamReader_FiltersUsageChunkWhenNotRequested(t *testing.T) {
 		`data: {"id":"x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}` + "\n\n" +
 		`data: [DONE]` + "\n\n")
 
-	r := NewStreamReader(io.NopCloser(body), "test", false)
+	r := NewStreamReader(context.Background(), io.NopCloser(body), "test", false)
 	chunks := 0
 	for {
 		c, err := r.Recv()
@@ -67,7 +68,7 @@ func TestStreamReader_ForwardsUsageChunkWhenRequested(t *testing.T) {
 		`data: {"id":"x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}` + "\n\n" +
 		`data: [DONE]` + "\n\n")
 
-	r := NewStreamReader(io.NopCloser(body), "test", true)
+	r := NewStreamReader(context.Background(), io.NopCloser(body), "test", true)
 	gotUsageChunk := false
 	for {
 		c, err := r.Recv()

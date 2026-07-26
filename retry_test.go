@@ -3,7 +3,10 @@ package llmkit
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 )
@@ -250,5 +253,114 @@ func TestBackoff_JitterStaysInBand(t *testing.T) {
 		if got < lo || got > hi {
 			t.Fatalf("jittered backoff %v outside [%v, %v]", got, lo, hi)
 		}
+	}
+}
+
+func TestIsSafeToReplay(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	readErr := &net.OpError{Op: "read", Err: errors.New("connection reset by peer")}
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// Safe: the vendor demonstrably never started work.
+		{"rate limited", apiErr(http.StatusTooManyRequests), true},
+		{"dial failure", dialErr, true},
+		{"wrapped dial failure", fmt.Errorf("post: %w", dialErr), true},
+		{"dns failure", &net.DNSError{Err: "no such host"}, true},
+
+		// Unsafe: the request may have been accepted and billed before the
+		// failure, so a replay could produce a second charge.
+		{"server error", apiErr(http.StatusInternalServerError), false},
+		{"bad gateway", apiErr(http.StatusBadGateway), false},
+		{"service unavailable", apiErr(http.StatusServiceUnavailable), false},
+		{"anthropic overloaded", apiErr(529), false},
+		{"request timeout", apiErr(http.StatusRequestTimeout), false},
+		{"reset mid-response", readErr, false},
+
+		// Not retryable at all, so not replay-safe either.
+		{"nil", nil, false},
+		{"bad request", apiErr(http.StatusBadRequest), false},
+		{"unauthorized", apiErr(http.StatusUnauthorized), false},
+		{"context canceled", context.Canceled, false},
+		{"deadline exceeded", context.DeadlineExceeded, false},
+		{"plain error", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsSafeToReplay(tc.err); got != tc.want {
+				t.Errorf("IsSafeToReplay(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// The two classifications are orthogonal, and the narrowed policy ANDs them.
+// Pinning all four quadrants documents why neither one alone is enough.
+func TestIsSafeToReplay_OrthogonalToIsRetryable(t *testing.T) {
+	cases := []struct {
+		name              string
+		err               error
+		retryable, replay bool
+	}{
+		{"429: both, so it replays", apiErr(http.StatusTooManyRequests), true, true},
+		{"dns timeout: nothing resolved, so nothing was sent",
+			&net.DNSError{Err: "timeout", IsTimeout: true}, true, true},
+		{"5xx: worth retrying, but may already be billed", apiErr(http.StatusInternalServerError), true, false},
+		{"read timeout: the request was already on the wire",
+			&net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}, true, false},
+		{"refused: nothing billed, but retrying won't help",
+			&net.OpError{Op: "dial", Err: errors.New("refused")}, false, true},
+		{"400: neither", apiErr(http.StatusBadRequest), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRetryable(tc.err); got != tc.retryable {
+				t.Errorf("IsRetryable = %v, want %v", got, tc.retryable)
+			}
+			if got := IsSafeToReplay(tc.err); got != tc.replay {
+				t.Errorf("IsSafeToReplay = %v, want %v", got, tc.replay)
+			}
+			want := tc.retryable && tc.replay
+			if got := DefaultRetry().replaySafeOnly().shouldRetry(tc.err); got != want {
+				t.Errorf("narrowed shouldRetry = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestReplaySafeOnly_NarrowsButKeepsShape(t *testing.T) {
+	base := DefaultRetry()
+	narrowed := base.replaySafeOnly()
+
+	if narrowed.MaxAttempts != base.MaxAttempts || narrowed.InitialBackoff != base.InitialBackoff {
+		t.Errorf("replaySafeOnly changed backoff shape: %+v vs %+v", narrowed, base)
+	}
+	if narrowed.shouldRetry(apiErr(http.StatusInternalServerError)) {
+		t.Error("narrowed policy retries a 5xx")
+	}
+	if !narrowed.shouldRetry(apiErr(http.StatusTooManyRequests)) {
+		t.Error("narrowed policy refuses a 429")
+	}
+}
+
+// A caller-supplied ShouldRetry keeps its veto: narrowing intersects with it
+// rather than replacing it.
+func TestReplaySafeOnly_RespectsCustomShouldRetry(t *testing.T) {
+	rc := DefaultRetry()
+	rc.ShouldRetry = func(error) bool { return false }
+
+	if rc.replaySafeOnly().shouldRetry(apiErr(http.StatusTooManyRequests)) {
+		t.Error("narrowed policy overrode a custom ShouldRetry that said no")
+	}
+}
+
+// The default Client must not replay a billable creation call on a 5xx.
+func TestDefaultMediaRetryPolicy_IsReplaySafe(t *testing.T) {
+	cfg := clientConfig{retry: DefaultRetry()}
+	if cfg.mediaRetryPolicy().shouldRetry(apiErr(http.StatusInternalServerError)) {
+		t.Error("default media policy retries a 5xx — a lost response would bill twice")
 	}
 }

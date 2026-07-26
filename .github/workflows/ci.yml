@@ -39,10 +39,68 @@ jobs:
       - run: go build ./...
       - run: go test ./... -race -count=1
 
+  # go.mod declares the oldest Go this module actually compiles under. Testing
+  # only on the newest toolchain would let a newer language feature raise that
+  # floor silently, breaking users on older Go with no signal here.
+  min-go-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - run: go build ./...
+      - run: go test ./... -count=1
+
       # The integration tests carry a build tag, so the run above never compiles
       # them — nothing else would catch a break in that file.
       - name: Vet integration tests
         run: go vet -tags=integration ./...
+
+      # `go test` only runs the seed corpus. A short real fuzz run on every PR
+      # is what actually exercises the parsers against bytes nobody thought to
+      # write down — these targets take raw vendor input, so that is the class
+      # of bug they exist to catch.
+      - name: Fuzz parsers
+        run: |
+          set -e
+          for target in \
+            FuzzStreamReader_Strict \
+            FuzzStreamReader_Tolerant \
+            FuzzStreamReader_ToleranceSkipsParseErrors \
+            FuzzStreamReader_FrameCeiling \
+            FuzzDetectStreamError \
+            FuzzExtractRetryAfter
+          do
+            echo "== $target"
+            go test ./provider/compat/ -run '^$' -fuzz "^${target}$" -fuzztime=20s
+          done
+          for target in \
+            FuzzParseDataURI \
+            FuzzContentToString \
+            FuzzContentToParts \
+            FuzzDecodeToolCalls \
+            FuzzExtractUsageFields \
+            FuzzNormalizeUsage \
+            FuzzRequestIDFromHeader \
+            FuzzTruncateForLog
+          do
+            echo "== $target"
+            go test ./provider/ -run '^$' -fuzz "^${target}$" -fuzztime=20s
+          done
+
+      # A crasher found above is written here. Surface it as an artifact so the
+      # failing input can be added to the seed corpus rather than lost.
+      - name: Upload fuzz failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: |
+            provider/testdata/fuzz/**
+            provider/compat/testdata/fuzz/**
+          if-no-files-found: ignore
 
       - name: Smoke-test llmkit-probe
         run: |

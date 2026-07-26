@@ -340,25 +340,36 @@ func TestStreamChat_InvokesCallbackPerDelta(t *testing.T) {
 	}
 }
 
+type caps struct {
+	chat                  bool
+	models, embeddings    bool
+	imageGen, imageEdit   bool
+	videoGen, videoCancel bool
+}
+
 // TestCapabilityMatrix pins the optional interfaces each adapter implements.
 // It is the executable copy of the capability table in the README: when an
 // adapter gains or loses a capability, this test says so.
+//
+// Image and video are tracked per endpoint, not per feature, because vendor
+// support is per endpoint: the aggregators generate images without being able
+// to edit them, and nobody can cancel a video job. A single images/video column
+// would have to round one way or the other, and either way it lies to callers.
 func TestCapabilityMatrix(t *testing.T) {
-	type caps struct{ models, embeddings, images, video bool }
 	want := map[string]caps{
-		Anthropic:   {models: true},
-		DashScope:   {video: true},
-		DeepSeek:    {models: true},
-		EasyRouter:  {models: true, embeddings: true, images: true, video: true},
-		Gemini:      {models: true, images: true, video: true},
-		MiniMax:     {models: true, embeddings: true},
-		Moonshot:    {models: true, embeddings: true},
-		OpenAI:      {models: true, embeddings: true, images: true},
-		OpenRouter:  {models: true, images: true, video: true},
-		SiliconFlow: {models: true, embeddings: true},
-		Vercel:      {models: true, embeddings: true, images: true},
-		Volcengine:  {video: true},
-		Zhipu:       {models: true, embeddings: true},
+		Anthropic:   {chat: true, models: true},
+		DashScope:   {videoGen: true}, // video-only: no chat endpoint here
+		DeepSeek:    {chat: true, models: true},
+		EasyRouter:  {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
+		Gemini:      {chat: true, models: true, imageGen: true, imageEdit: true, videoGen: true},
+		MiniMax:     {chat: true, models: true, embeddings: true},
+		Moonshot:    {chat: true, models: true, embeddings: true},
+		OpenAI:      {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
+		OpenRouter:  {chat: true, models: true, imageGen: true, videoGen: true},
+		SiliconFlow: {chat: true, models: true, embeddings: true},
+		Vercel:      {chat: true, models: true, embeddings: true, imageGen: true},
+		Volcengine:  {videoGen: true, videoCancel: true}, // video-only
+		Zhipu:       {chat: true, models: true, embeddings: true},
 	}
 	if len(want) != len(factories) {
 		t.Fatalf("matrix covers %d providers, factories has %d", len(want), len(factories))
@@ -368,9 +379,58 @@ func TestCapabilityMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Wrap(%s): %v", name, err)
 		}
-		got := caps{c.SupportsModels(), c.SupportsEmbeddings(), c.SupportsImages(), c.SupportsVideo()}
+		got := caps{
+			chat:        c.SupportsChat(),
+			models:      c.SupportsModels(),
+			embeddings:  c.SupportsEmbeddings(),
+			imageGen:    c.SupportsImageGeneration(),
+			imageEdit:   c.SupportsImageEditing(),
+			videoGen:    c.SupportsVideoGeneration(),
+			videoCancel: c.SupportsVideoCancellation(),
+		}
 		if got != expect {
 			t.Errorf("%s capabilities = %+v, want %+v", name, got, expect)
+		}
+	}
+}
+
+// Volcengine is the only provider with a real cancel endpoint. Every other
+// video provider must report false AND return ErrUnsupported — the two have to
+// agree, because a probe that says "supported" and a call that says otherwise is
+// exactly the mismatch this split was meant to remove.
+func TestVideoCancellation_ProbeMatchesBehavior(t *testing.T) {
+	for name := range factories {
+		c, err := Wrap(factories[name](""), WithAPIKey("sk-test"))
+		if err != nil {
+			t.Fatalf("Wrap(%s): %v", name, err)
+		}
+		wantCancel := name == Volcengine
+		if got := c.SupportsVideoCancellation(); got != wantCancel {
+			t.Errorf("%s: SupportsVideoCancellation = %v, want %v — update the docs on CancelVideo", name, got, wantCancel)
+		}
+		if wantCancel {
+			continue
+		}
+		_, err = c.CancelVideo(context.Background(), &VideoJob{ID: "j1"})
+		if !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: CancelVideo err = %v, want ErrUnsupported", name, err)
+		}
+	}
+}
+
+// The deprecated aliases must keep reporting what they always did for the
+// generation case, so existing callers don't silently change behavior.
+func TestDeprecatedCapabilityAliases(t *testing.T) {
+	for name := range factories {
+		c, err := Wrap(factories[name](""), WithAPIKey("sk-test"))
+		if err != nil {
+			t.Fatalf("Wrap(%s): %v", name, err)
+		}
+		if c.SupportsImages() != c.SupportsImageGeneration() {
+			t.Errorf("%s: SupportsImages diverged from SupportsImageGeneration", name)
+		}
+		if c.SupportsVideo() != c.SupportsVideoGeneration() {
+			t.Errorf("%s: SupportsVideo diverged from SupportsVideoGeneration", name)
 		}
 	}
 }
@@ -498,16 +558,42 @@ func TestEditImage_IsNeverRetried(t *testing.T) {
 	}
 }
 
-func TestGenerateImage_IsRetried(t *testing.T) {
+// fastRetry is DefaultRetry's shape with the waits collapsed, so retry-counting
+// tests don't pay 1.5s of real backoff.
+func fastRetry() RetryConfig {
+	return RetryConfig{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}
+}
+
+// A 5xx does not prove the vendor never took the job: an overloaded backend can
+// start generating and then fail to answer. Replaying would bill twice, so the
+// default policy stops after the first attempt.
+func TestGenerateImage_NotRetriedOnServerError(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}, WithRetry(fastRetry()))
+
+	if _, err := c.GenerateImage(context.Background(), &ImageRequest{Model: "gpt-image-1", Prompt: "cat"}); err == nil {
+		t.Fatal("GenerateImage: want error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1 — a 5xx may mean the image was already generated and billed", got)
+	}
+}
+
+// A 429 is a quota decision made before any generation starts, so replaying it
+// cannot double-charge.
+func TestGenerateImage_RetriedWhenReplaySafe(t *testing.T) {
 	var calls atomic.Int32
 	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) < 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"AAAA"}]}`)
-	}, WithRetry(RetryConfig{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}))
+	}, WithRetry(fastRetry()))
 
 	resp, err := c.GenerateImage(context.Background(), &ImageRequest{Model: "gpt-image-1", Prompt: "cat"})
 	if err != nil {
@@ -517,7 +603,60 @@ func TestGenerateImage_IsRetried(t *testing.T) {
 		t.Errorf("data = %+v", resp.Data)
 	}
 	if got := calls.Load(); got != 2 {
-		t.Errorf("calls = %d, want 2 (prompt-only generation is safe to retry)", got)
+		t.Errorf("calls = %d, want 2 (a rate-limit refusal is safe to replay)", got)
+	}
+}
+
+// WithMediaRetry hands the decision back to the caller, including the unsafe one.
+func TestGenerateImage_MediaRetryOverride(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"AAAA"}]}`)
+	}, WithMediaRetry(fastRetry()))
+
+	if _, err := c.GenerateImage(context.Background(), &ImageRequest{Model: "gpt-image-1", Prompt: "cat"}); err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("calls = %d, want 2 — WithMediaRetry opted back into replaying a 5xx", got)
+	}
+}
+
+// Narrowing must never widen: a caller who disabled retries entirely still gets
+// exactly one attempt, replay-safe error or not.
+func TestGenerateImage_NoRetryStillWins(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, WithRetry(NoRetry()))
+
+	if _, err := c.GenerateImage(context.Background(), &ImageRequest{Model: "gpt-image-1", Prompt: "cat"}); err == nil {
+		t.Fatal("GenerateImage: want error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1", got)
+	}
+}
+
+// WithRetry and WithMediaRetry must compose the same way in either order.
+func TestMediaRetryPolicy_OptionOrderIndependent(t *testing.T) {
+	custom := RetryConfig{MaxAttempts: 7, InitialBackoff: time.Millisecond}
+	forward := clientConfig{}
+	WithRetry(NoRetry())(&forward)
+	WithMediaRetry(custom)(&forward)
+
+	reverse := clientConfig{}
+	WithMediaRetry(custom)(&reverse)
+	WithRetry(NoRetry())(&reverse)
+
+	if a, b := forward.mediaRetryPolicy().MaxAttempts, reverse.mediaRetryPolicy().MaxAttempts; a != b || a != 7 {
+		t.Errorf("MaxAttempts forward=%d reverse=%d, want 7 both", a, b)
 	}
 }
 
@@ -551,5 +690,27 @@ func TestSayWithSystem(t *testing.T) {
 	first, _ := msgs[0].(map[string]any)
 	if first["role"] != "system" || first["content"] != "be terse" {
 		t.Errorf("system message = %+v", first)
+	}
+}
+
+// SupportsChat must agree with what the adapter actually does. A provider that
+// reports chat support and then returns ErrUnsupported is the exact mismatch
+// these capability probes exist to eliminate.
+func TestSupportsChat_MatchesBehavior(t *testing.T) {
+	for name := range factories {
+		c, err := Wrap(factories[name](""), WithAPIKey("sk-test"))
+		if err != nil {
+			t.Fatalf("Wrap(%s): %v", name, err)
+		}
+		if c.SupportsChat() {
+			continue
+		}
+		req := &ChatRequest{Model: "m", Messages: []Message{User("hi")}}
+		if _, err := c.Chat(context.Background(), req); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: SupportsChat is false but Chat returned %v", name, err)
+		}
+		if _, err := c.ChatStream(context.Background(), req); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: SupportsChat is false but ChatStream returned %v", name, err)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -62,7 +63,7 @@ func TestBuildRequest_ThoughtSignatureRoundTripsToFirstAssistantPart(t *testing.
 	// Multi-turn round-trip: client passes back the assistant message with
 	// ThoughtSignature; we land it on the first model-role part.
 	sig := "OPAQUE_SIG_BLOB"
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{
 			{Role: "user", Content: "first turn"},
 			{Role: "assistant", Content: "I thought about it.", ThoughtSignature: &sig},
@@ -103,7 +104,7 @@ func TestBuildRequest_ThoughtSignatureWithToolCalls(t *testing.T) {
 	// the signature should still attach to the leading part of the model
 	// content (the functionCall part).
 	sig := "TOOL_SIG"
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{
 			{Role: "user", Content: "use tool"},
 			{
@@ -140,7 +141,7 @@ func TestBuildRequest_ThoughtSignatureWithToolCalls(t *testing.T) {
 }
 
 func TestBuildRequest_NoSignatureLeavesPartsClean(t *testing.T) {
-	r, err := buildRequest(&provider.ChatCompletionRequest{
+	r, err := buildRequest(context.Background(), &provider.ChatCompletionRequest{
 		Messages: []provider.Message{
 			{Role: "user", Content: "hi"},
 			{Role: "assistant", Content: "hello"},

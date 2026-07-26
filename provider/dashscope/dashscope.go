@@ -48,6 +48,13 @@ func (p *Provider) ChatCompletionStream(context.Context, string, string, *provid
 	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion_stream"}
 }
 
+// ChatUnsupported marks this adapter as non-chat, so Client.SupportsChat can
+// report it before a call instead of the caller discovering it from an error.
+// The chat methods above exist only because provider.Provider requires them.
+func (p *Provider) ChatUnsupported() {}
+
+var _ provider.NonChatProvider = (*Provider)(nil)
+
 func (p *Provider) CreateVideoJob(ctx context.Context, apiKey, model string, req *provider.VideoCreateRequest) (*provider.VideoJob, error) {
 	body := buildCreateBody(model, req)
 	raw, err := p.doJSON(ctx, http.MethodPost, apiKey, p.baseURL+"/api/v1/services/aigc/video-generation/video-synthesis", body)
@@ -79,9 +86,10 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	return out, nil
 }
 
-func (p *Provider) CancelVideoJob(context.Context, string, *provider.VideoJob) (*provider.VideoJob, error) {
-	return nil, &provider.ErrUnsupported{Provider: "dashscope", Op: "cancel_video_job"}
-}
+// DashScope 的视频合成没有取消端点，所以本 adapter 只实现 VideoCreator，
+// 不实现 VideoCanceller。对比 volcengine：它有真正的 cancel 端点，因此实现了
+// 完整的 VideoProvider。
+var _ provider.VideoCreator = (*Provider)(nil)
 
 // buildCreateBody 组装 DashScope 视频合成请求体（wan 系列契约）：
 // 图生视频参考图是 input.img_url，首尾帧是 input.first_frame_url /

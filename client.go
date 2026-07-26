@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/siguago/llmkit/internal/httpx"
+	"github.com/siguago/llmkit/internal/logging"
 	"github.com/siguago/llmkit/provider"
 )
 
@@ -24,10 +25,21 @@ func (c *Client) Provider() string { return c.name }
 // where you need a vendor-specific method the façade does not surface.
 func (c *Client) Adapter() provider.Provider { return c.provider }
 
-// prepare applies per-call context decoration: the configured timeout and any
-// extra headers. Callers must invoke the returned cancel func.
-func (c *Client) prepare(ctx context.Context) (context.Context, context.CancelFunc) {
+// decorate applies the per-call context values every request needs: caller
+// headers, a custom transport, and the logger. Split out from prepare because
+// streams must get all of this without the timeout — see ChatStream.
+func (c *Client) decorate(ctx context.Context) context.Context {
 	ctx = httpx.WithExtraHeaders(ctx, c.cfg.headers)
+	ctx = httpx.WithRequestIDFunc(ctx, c.cfg.requestIDFn, c.cfg.requestIDHdr)
+	ctx = httpx.WithBaseTransport(ctx, c.cfg.transport)
+	ctx = provider.WithStreamPolicy(ctx, c.cfg.streamPolicy)
+	return logging.WithLogger(ctx, c.cfg.logger)
+}
+
+// prepare applies per-call context decoration: the configured timeout on top of
+// everything decorate adds. Callers must invoke the returned cancel func.
+func (c *Client) prepare(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = c.decorate(ctx)
 	if c.cfg.timeout > 0 {
 		return context.WithTimeout(ctx, c.cfg.timeout)
 	}
@@ -51,9 +63,10 @@ func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
 
-	return doValue(ctx, c.cfg.retry, func() (*ChatResponse, error) {
+	resp, err := doValue(ctx, c.cfg.retry, func() (*ChatResponse, error) {
 		return c.provider.ChatCompletion(ctx, c.cfg.apiKey, req.Model, req)
 	})
+	return resp, translateUnsupported(err)
 }
 
 // ChatStream starts a streaming chat completion. Read it with Recv until
@@ -90,11 +103,12 @@ func (c *Client) ChatStream(ctx context.Context, req *ChatRequest) (Stream, erro
 	// return. WithTimeout is therefore not applied to streams — their ceiling is
 	// the provider's own stream timeout. Callers wanting a bound should pass a
 	// context with a deadline.
-	ctx = httpx.WithExtraHeaders(ctx, c.cfg.headers)
+	ctx = c.decorate(ctx)
 
-	return doValue(ctx, c.cfg.retry, func() (Stream, error) {
+	stream, err := doValue(ctx, c.cfg.retry, func() (Stream, error) {
 		return c.provider.ChatCompletionStream(ctx, c.cfg.apiKey, req.Model, req)
 	})
+	return stream, translateUnsupported(err)
 }
 
 // ---------------------------------------------------------------- models
@@ -110,9 +124,23 @@ func (c *Client) Models(ctx context.Context) ([]RemoteModel, error) {
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
 
-	return doValue(ctx, c.cfg.retry, func() ([]RemoteModel, error) {
+	models, err := doValue(ctx, c.cfg.retry, func() ([]RemoteModel, error) {
 		return lister.ListModels(ctx, c.cfg.apiKey)
 	})
+	return models, translateUnsupported(err)
+}
+
+// SupportsChat reports whether Chat / ChatStream / Say / StreamText work on this
+// provider.
+//
+// Almost always true — this SDK is a chat SDK. It is false for the two vendors
+// covered here only for video generation (DashScope, Volcengine), whose chat
+// methods exist to satisfy the provider interface and return ErrUnsupported.
+// Check it if you dispatch across providers by name, since those two cannot
+// serve a chat request at all.
+func (c *Client) SupportsChat() bool {
+	_, nonChat := c.provider.(provider.NonChatProvider)
+	return !nonChat
 }
 
 // SupportsModels reports whether Models is available on this provider.
@@ -142,9 +170,10 @@ func (c *Client) Embed(ctx context.Context, req *EmbeddingRequest) (*EmbeddingRe
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
 
-	return doValue(ctx, c.cfg.retry, func() (*EmbeddingResponse, error) {
+	resp, err := doValue(ctx, c.cfg.retry, func() (*EmbeddingResponse, error) {
 		return embedder.Embeddings(ctx, c.cfg.apiKey, req.Model, req)
 	})
+	return resp, translateUnsupported(err)
 }
 
 // SupportsEmbeddings reports whether Embed is available on this provider.
@@ -157,12 +186,18 @@ func (c *Client) SupportsEmbeddings() bool {
 
 // GenerateImage creates images from a text prompt.
 //
+// This call bills on success, and the vendor gives us no idempotency key to
+// deduplicate with, so it is not retried on the general policy: a lost response
+// would otherwise become a second image and a second charge. Only errors that
+// prove the vendor never took the work are retried — see IsSafeToReplay, and
+// WithMediaRetry to override.
+//
 // Returns ErrUnsupported for providers with no image generation endpoint.
 func (c *Client) GenerateImage(ctx context.Context, req *ImageRequest) (*ImageResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("llmkit: nil request")
 	}
-	imager, ok := c.provider.(provider.ImageProvider)
+	imager, ok := c.provider.(provider.ImageGenerator)
 	if !ok {
 		return nil, unsupportedf(c.name, "image generation")
 	}
@@ -172,7 +207,7 @@ func (c *Client) GenerateImage(ctx context.Context, req *ImageRequest) (*ImageRe
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
 
-	resp, err := doValue(ctx, c.cfg.retry, func() (*ImageResponse, error) {
+	resp, err := doValue(ctx, c.cfg.mediaRetryPolicy(), func() (*ImageResponse, error) {
 		return imager.GenerateImage(ctx, c.cfg.apiKey, req.Model, req)
 	})
 	return resp, translateUnsupported(err)
@@ -189,7 +224,7 @@ func (c *Client) EditImage(ctx context.Context, req *ImageEditRequest) (*ImageRe
 	if req == nil {
 		return nil, fmt.Errorf("llmkit: nil request")
 	}
-	imager, ok := c.provider.(provider.ImageProvider)
+	imager, ok := c.provider.(provider.ImageEditor)
 	if !ok {
 		return nil, unsupportedf(c.name, "image editing")
 	}
@@ -203,11 +238,28 @@ func (c *Client) EditImage(ctx context.Context, req *ImageEditRequest) (*ImageRe
 	return resp, translateUnsupported(err)
 }
 
-// SupportsImages reports whether GenerateImage / EditImage are available.
-func (c *Client) SupportsImages() bool {
-	_, ok := c.provider.(provider.ImageProvider)
+// SupportsImageGeneration reports whether GenerateImage is available.
+func (c *Client) SupportsImageGeneration() bool {
+	_, ok := c.provider.(provider.ImageGenerator)
 	return ok
 }
+
+// SupportsImageEditing reports whether EditImage is available.
+//
+// This is materially rarer than image generation: the aggregator gateways
+// (OpenRouter, Vercel) forward the generation endpoint but have no editing one,
+// so they generate images and cannot edit them.
+func (c *Client) SupportsImageEditing() bool {
+	_, ok := c.provider.(provider.ImageEditor)
+	return ok
+}
+
+// SupportsImages reports whether GenerateImage is available.
+//
+// Deprecated: it could never express that a provider generates images but
+// cannot edit them, which is the common case among the aggregators. Use
+// SupportsImageGeneration or SupportsImageEditing.
+func (c *Client) SupportsImages() bool { return c.SupportsImageGeneration() }
 
 // ---------------------------------------------------------------- video
 
@@ -215,12 +267,17 @@ func (c *Client) SupportsImages() bool {
 // always asynchronous: poll with GetVideo, or use WaitVideo to block until the
 // job reaches a terminal state.
 //
+// Like GenerateImage, this bills on success and is not retried on the general
+// policy — a lost response would otherwise leave you paying for two jobs, only
+// one of which you hold an ID for. Only errors proving the vendor never took the
+// work are retried; see IsSafeToReplay and WithMediaRetry.
+//
 // Returns ErrUnsupported for providers with no video endpoint.
 func (c *Client) CreateVideo(ctx context.Context, req *VideoRequest) (*VideoJob, error) {
 	if req == nil {
 		return nil, fmt.Errorf("llmkit: nil request")
 	}
-	videoer, ok := c.provider.(provider.VideoProvider)
+	videoer, ok := c.provider.(provider.VideoCreator)
 	if !ok {
 		return nil, unsupportedf(c.name, "video generation")
 	}
@@ -230,7 +287,7 @@ func (c *Client) CreateVideo(ctx context.Context, req *VideoRequest) (*VideoJob,
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
 
-	job, err := doValue(ctx, c.cfg.retry, func() (*VideoJob, error) {
+	job, err := doValue(ctx, c.cfg.mediaRetryPolicy(), func() (*VideoJob, error) {
 		return videoer.CreateVideoJob(ctx, c.cfg.apiKey, req.Model, req)
 	})
 	return job, translateUnsupported(err)
@@ -241,7 +298,7 @@ func (c *Client) GetVideo(ctx context.Context, job *VideoJob) (*VideoJob, error)
 	if job == nil {
 		return nil, fmt.Errorf("llmkit: nil job")
 	}
-	videoer, ok := c.provider.(provider.VideoProvider)
+	videoer, ok := c.provider.(provider.VideoCreator)
 	if !ok {
 		return nil, unsupportedf(c.name, "video generation")
 	}
@@ -254,15 +311,22 @@ func (c *Client) GetVideo(ctx context.Context, job *VideoJob) (*VideoJob, error)
 	return out, translateUnsupported(err)
 }
 
-// CancelVideo asks upstream to cancel a running job. Some vendors expose no
-// cancel endpoint and return ErrUnsupported even though they support video.
+// CancelVideo asks upstream to cancel a running job.
+//
+// Cancellation is a separate capability from generation because vendors treat
+// it that way. Of the five providers that generate video, only Volcengine
+// exposes a cancel endpoint; the rest return ErrUnsupported. Check
+// SupportsVideoCancellation first, and design for jobs you cannot call off —
+// elsewhere a submitted job runs to completion and bills accordingly.
+//
+// This call is never retried; see CreateVideo for the reasoning.
 func (c *Client) CancelVideo(ctx context.Context, job *VideoJob) (*VideoJob, error) {
 	if job == nil {
 		return nil, fmt.Errorf("llmkit: nil job")
 	}
-	videoer, ok := c.provider.(provider.VideoProvider)
+	videoer, ok := c.provider.(provider.VideoCanceller)
 	if !ok {
-		return nil, unsupportedf(c.name, "video generation")
+		return nil, unsupportedf(c.name, "video job cancellation")
 	}
 	ctx, cancel := c.prepare(ctx)
 	defer cancel()
@@ -271,11 +335,28 @@ func (c *Client) CancelVideo(ctx context.Context, job *VideoJob) (*VideoJob, err
 	return out, translateUnsupported(err)
 }
 
-// SupportsVideo reports whether the video methods are available.
-func (c *Client) SupportsVideo() bool {
-	_, ok := c.provider.(provider.VideoProvider)
+// SupportsVideoGeneration reports whether CreateVideo / GetVideo / WaitVideo
+// are available.
+func (c *Client) SupportsVideoGeneration() bool {
+	_, ok := c.provider.(provider.VideoCreator)
 	return ok
 }
+
+// SupportsVideoCancellation reports whether CancelVideo is available.
+//
+// Only Volcengine returns true among the built-in providers. Gemini's Veo,
+// DashScope, EasyRouter and OpenRouter all generate video with no way to call a
+// job off, so treat a submitted job there as uninterruptible.
+func (c *Client) SupportsVideoCancellation() bool {
+	_, ok := c.provider.(provider.VideoCanceller)
+	return ok
+}
+
+// SupportsVideo reports whether CreateVideo / GetVideo / WaitVideo are available.
+//
+// Deprecated: it could never express that no provider can actually cancel a job.
+// Use SupportsVideoGeneration or SupportsVideoCancellation.
+func (c *Client) SupportsVideo() bool { return c.SupportsVideoGeneration() }
 
 // WaitOptions tunes WaitVideo's polling.
 type WaitOptions struct {

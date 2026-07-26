@@ -48,6 +48,13 @@ func (p *Provider) ChatCompletionStream(context.Context, string, string, *provid
 	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion_stream"}
 }
 
+// ChatUnsupported marks this adapter as non-chat, so Client.SupportsChat can
+// report it before a call instead of the caller discovering it from an error.
+// The chat methods above exist only because provider.Provider requires them.
+func (p *Provider) ChatUnsupported() {}
+
+var _ provider.NonChatProvider = (*Provider)(nil)
+
 func (p *Provider) CreateVideoJob(ctx context.Context, apiKey, model string, req *provider.VideoCreateRequest) (*provider.VideoJob, error) {
 	body := buildCreateBody(model, req)
 	raw, err := p.doJSON(ctx, http.MethodPost, apiKey, p.baseURL+"/contents/generations/tasks", body)

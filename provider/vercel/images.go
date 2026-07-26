@@ -89,27 +89,30 @@ func (p *Provider) GenerateImage(ctx context.Context, apiKey, model string, req 
 	return resp, nil
 }
 
-// EditImage is unsupported on Vercel AI Gateway. Vercel staff (Pauline P. Narvas)
-// confirmed on the community forum that the gateway "supports image generation
-// through multimodal models... but doesn't yet have endpoints for uploading and
-// editing existing images" — last verified 2026-05.
+// This adapter deliberately implements ImageGenerator but NOT ImageEditor, so
+// that a type assertion — and therefore Client.SupportsImageEditing — reports
+// the truth. An EditImage method that only ever returned ErrUnsupported would
+// satisfy the interface and make the capability check lie.
+//
+// Vercel AI Gateway has no image-editing endpoint. Vercel staff (Pauline P.
+// Narvas) confirmed on the community forum that the gateway "supports image
+// generation through multimodal models... but doesn't yet have endpoints for
+// uploading and editing existing images" — last verified 2026-05.
 //
 //	https://community.vercel.com/t/support-for-image-upload-and-edit-endpoints-for-image-gen-of-gpt-models-like-gpt-image-1-5/34607
 //
 // OpenAI's own /v1/images/edits supports gpt-image-2; the gap is at Vercel's
 // gateway layer, which doesn't transparently forward edits requests. If/when
 // Vercel ships the endpoint, restore the multipart implementation from git
-// history (commit prior to this stub) and flip the seed task_types back. The
-// alternative editing paths Vercel does support today live elsewhere:
-//   - multimodal chat completions (Nano Banana, Gemini image-preview, ...)
-//   - AI SDK's experimental_generateImage with image inputs
-//
-// Neither matches the OpenAI /v1/images/edits wire format this method expects,
-// so there's no useful translation layer to apply here — return ErrUnsupported
-// and let the handler surface a clean 4xx.
-func (p *Provider) EditImage(ctx context.Context, apiKey, model string, req *provider.ImageEditRequest) (*provider.ImageGenerationResponse, error) {
-	return nil, &provider.ErrUnsupported{Provider: name, Op: "image_edit"}
-}
+// history and add provider.ImageEditor to the assertions below. The alternative
+// editing paths Vercel does support today — multimodal chat completions (Nano
+// Banana, Gemini image-preview), AI SDK's experimental_generateImage with image
+// inputs — do not match the OpenAI /v1/images/edits wire format, so there is no
+// useful translation layer to write in the meantime.
+var (
+	_ provider.ImageGenerator = (*Provider)(nil)
+	_ provider.Provider       = (*Provider)(nil)
+)
 
 // postJSON sends a JSON request and returns the raw response body. Treats
 // both 200 and 201 as success — image endpoints occasionally use 201 Created.
@@ -236,7 +239,5 @@ func isTrue(v any) bool {
 	return ok && b
 }
 
-// Compile-time check that *Provider satisfies the ImageProvider contract.
-// Without this, a future signature drift would surface only at runtime when
-// the images handler does the type assertion.
-var _ provider.ImageProvider = (*Provider)(nil)
+// The compile-time capability assertions live with the explanation of why
+// EditImage is absent — see the ImageEditor note above GenerateImage.

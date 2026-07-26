@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ event: message_stop
 data: {"type":"message_stop"}
 
 `
-	r := NewStreamReader(io.NopCloser(strings.NewReader(sse)), "")
+	r := NewStreamReader(context.Background(), io.NopCloser(strings.NewReader(sse)), "")
 	var serverToolBlock map[string]any
 	for {
 		chunk, err := r.Recv()
@@ -83,7 +84,7 @@ event: message_stop
 data: {"type":"message_stop"}
 
 `
-	r := NewStreamReader(io.NopCloser(strings.NewReader(sse)), "")
+	r := NewStreamReader(context.Background(), io.NopCloser(strings.NewReader(sse)), "")
 	var resultBlock map[string]any
 	for {
 		chunk, err := r.Recv()
@@ -159,7 +160,7 @@ event: message_stop
 data: {"type":"message_stop"}
 
 `
-	r := NewStreamReader(io.NopCloser(strings.NewReader(sse)), "")
+	r := NewStreamReader(context.Background(), io.NopCloser(strings.NewReader(sse)), "")
 	var (
 		textChunks        []string
 		providerTurnCount int

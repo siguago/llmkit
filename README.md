@@ -30,7 +30,7 @@ answer, _ := client.Say(ctx, "deepseek-chat", "用一句话解释 CAP 定理。"
 go get github.com/siguago/llmkit
 ```
 
-需要 Go 1.25+。
+需要 Go 1.22+。
 
 ---
 
@@ -56,23 +56,31 @@ go get github.com/siguago/llmkit
 
 不是每家都实现全部能力。调用前用 `Supports*` 探测，或直接处理 `ErrUnsupported`。
 
-| 厂商 | Chat / 流式 | 模型列表 | Embeddings | 图像 | 视频 |
-|------|:---:|:---:|:---:|:---:|:---:|
-| openai | ✅ | ✅ | ✅ | ✅ | — |
-| anthropic | ✅ | ✅ | — | — | — |
-| gemini | ✅ | ✅ | — | ✅ | ✅ |
-| deepseek | ✅ | ✅ | — | — | — |
-| moonshot | ✅ | ✅ | ✅ | — | — |
-| zhipu | ✅ | ✅ | ✅ | — | — |
-| minimax | ✅ | ✅ | ✅ | — | — |
-| siliconflow | ✅ | ✅ | ✅ | — | — |
-| dashscope | ✅ | — | — | — | ✅ |
-| volcengine | ✅ | — | — | — | ✅ |
-| openrouter | ✅ | ✅ | — | ✅ | ✅ |
-| easyrouter | ✅ | ✅ | ✅ | ✅ | ✅ |
-| vercel | ✅ | ✅ | ✅ | ✅ | — |
+能力按**端点**而不是按功能划分，因为厂商的支持就是按端点参差的：聚合类服务能生成图像却没有编辑端点，五家能建视频任务但只有一家能取消。
+
+| 厂商 | Chat / 流式 | 模型列表 | Embeddings | 图像生成 | 图像编辑 | 视频生成 | 视频取消 |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| openai | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
+| anthropic | ✅ | ✅ | — | — | — | — | — |
+| gemini | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
+| deepseek | ✅ | ✅ | — | — | — | — | — |
+| moonshot | ✅ | ✅ | ✅ | — | — | — | — |
+| zhipu | ✅ | ✅ | ✅ | — | — | — | — |
+| minimax | ✅ | ✅ | ✅ | — | — | — | — |
+| siliconflow | ✅ | ✅ | ✅ | — | — | — | — |
+| dashscope | — | — | — | — | — | ✅ | — |
+| volcengine | — | — | — | — | — | ✅ | ✅ |
+| openrouter | ✅ | ✅ | — | ✅ | — | ✅ | — |
+| easyrouter | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| vercel | ✅ | ✅ | ✅ | ✅ | — | — | — |
+
+对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsEmbeddings` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
 
 > 这张表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
+>
+> **dashscope 和 volcengine 在本 SDK 里只接了视频端点**，没有对话能力：调 `Chat` / `ChatStream` 会返回 `ErrUnsupported`。按 provider 名分发时先问 `SupportsChat()`。
+>
+> **除 volcengine 外，视频任务一旦提交就无法中止**，会跑到终态并照常计费 —— 按这个前提设计调用方。
 
 ---
 
@@ -217,6 +225,32 @@ client, err := llmkit.New(llmkit.OpenAI,
 
 **认证头保护**：`WithHeader` 不能覆盖 `Authorization` / `x-api-key` / `x-goog-api-key` 等凭据头，避免误发错 key。
 
+### 接管传输层与可观测性
+
+```go
+client, err := llmkit.New(llmkit.OpenAI,
+    llmkit.WithAPIKey(key),
+    llmkit.WithTransport(myTracingRoundTripper),   // 自定义 TLS / 连接池 / 埋点
+    llmkit.WithLogger(slog.Default()),             // 默认全静默
+    llmkit.WithRequestID(uuidv7),                  // 每个出站请求一个 X-Request-Id
+)
+```
+
+- **`WithTransport`** 只替换链路最底层。凭据头、调用方附加头照常先加上，客户端 IP 头照常先剥掉，然后才轮到你的 `RoundTrip` —— 埋点用的 transport 不该有能力悄悄绕掉隐私处理。超时仍归 `WithTimeout` 管（一次调用含全部重试共享一个预算），所以这里不接受 `*http.Client`。
+- **`WithLogger`** 默认丢弃一切。库往宿主程序的全局 logger 里写东西是越界的，所以不问就不说。开启后能看到的是：被跳过的畸形流帧、被丢弃的非法工具定义这类"绕过去了但你可能想知道"的事；真正影响结果的一律走 error 返回。
+- **`WithRequestID`** 每个**出站 HTTP 请求**调一次（重试的每一次尝试都是新 ID），用于和厂商日志对账。厂商自己生成的那个 ID 走另一条路：`APIError.RequestID`，报障时对方要的是它。
+
+### 流式容错
+
+```go
+llmkit.WithStreamTolerance(llmkit.TolerateMalformedChunks)  // 跳过坏帧并记日志
+llmkit.WithMaxStreamFrameBytes(4 << 20)                      // 抬高单帧上限（默认 1 MiB）
+```
+
+默认是**严格模式**：遇到解析不了的帧直接让流失败。跳过坏帧等于静默丢数据——调用方拿到一个看起来完整、实际少了一段内容或少了一次工具调用的回复，且无从察觉。报错至少可以重试或降级。
+
+单帧超限的错误会直接告诉你该调哪个选项，而不是甩一句 bufio 的 `token too long`。
+
 ---
 
 ## 重试
@@ -238,7 +272,33 @@ llmkit.WithRetry(llmkit.RetryConfig{
 })
 ```
 
-三个边界值得知道：
+### 花钱的调用不会被盲目重放
+
+`GenerateImage` 和 `CreateVideo` 成功即计费，而厂商没有给幂等键，所以它们**不走上面这套通用策略**。默认只重试那些能证明"上游根本没接活"的错误：
+
+```go
+llmkit.IsSafeToReplay(err)   // 429、连接未建立、DNS 失败 → true
+                             // 5xx、读超时、连接中断 → false（可能已经生成并计费了）
+```
+
+区别在于这两个判断回答的是不同问题，且互相正交：
+
+| 错误 | `IsRetryable`（重试有戏吗） | `IsSafeToReplay`（会重复扣费吗） | 实际会重试 |
+|---|:---:|:---:|:---:|
+| 429 限流 | ✅ | ✅ | ✅ |
+| 5xx | ✅ | ❌ 可能已受理 | ❌ |
+| 读超时 | ✅ | ❌ 请求已上路 | ❌ |
+| 连接被拒 | ❌ 配置错了 | ✅ 没花钱 | ❌ |
+| 400 | ❌ | ❌ | ❌ |
+
+想自己拿主意：
+
+```go
+llmkit.WithMediaRetry(llmkit.NoRetry())        // 媒体创建一次都不重试
+llmkit.WithMediaRetry(llmkit.DefaultRetry())   // 按通用策略重试，接受可能重复扣费
+```
+
+### 另外三个边界
 
 - **流式**只重试握手阶段。一旦流建立成功，中途断开不会重试 —— 已经吐给调用方的 token 无法回滚。
 - **`EditImage` 永不重试**。上传的 `io.Reader` 是一次性的，第二次尝试读不到内容。要重试请自己重开文件。
@@ -455,6 +515,25 @@ go test ./... -race
 
 **所有默认测试都是离线的**（`httptest` 打本地服务器），验证的是「请求构造得对不对、响应解析得对不对」，**不验证厂商是否接受**。
 
+这条现在是真的、也是可验证的 —— 把出站流量堵死后整套测试照样通过：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 go test ./...
+```
+
+（会发真实请求的测试一律带 `integration` build tag，`go test ./...` 连编译都不会编到它们。）
+
+### Fuzz
+
+解析器直接吃厂商发来的原始字节，是 SDK 最大的不可信输入面。SSE 帧解析、错误响应解析、多模态内容转换都有 fuzz 目标，CI 每次 PR 都跑一轮短的：
+
+```bash
+go test ./provider/compat/ -run '^$' -fuzz FuzzStreamReader_Strict -fuzztime=30s
+go test ./provider/ -run '^$' -fuzz FuzzParseDataURI -fuzztime=30s
+```
+
+它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
+
 要验证真的能跑通，有两条路，都会发真实请求、产生真实费用（每家几分之一美分，token 都封了顶）：
 
 ```bash
@@ -468,12 +547,15 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
-| 门面层（根包） | 92% | |
-| `internal/httpx` | 91% | |
-| `provider/*` 适配层 | 40–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
-| `cmd/llmkit-probe` | 21% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
+| 门面层（根包） | 93% | |
+| `internal/httpx` | 94% | |
+| `provider`（公共类型与流策略） | 75% | |
+| `provider/*` 适配层 | 41–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
+| `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/vercel` 图像部分 | 0% | 已知空白 |
 | `provider/{minimax,siliconflow}` | 见备注 | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包显示 0% |
+
+总覆盖率 51%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
 ---
 

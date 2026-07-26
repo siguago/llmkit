@@ -190,7 +190,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, provider.NewProviderErrorFromResponse(resp, p.name, respBody)
 	}
 
-	return NewStreamReader(resp.Body, p.name, emitUsageChunk), nil
+	return NewStreamReader(ctx, resp.Body, p.name, emitUsageChunk), nil
 }
 
 // ListModels fetches available models from the provider's /models endpoint.

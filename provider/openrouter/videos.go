@@ -112,11 +112,10 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	return out, nil
 }
 
-// CancelVideoJob OpenRouter 文档当前未明确给出 cancel 端点；返回 ErrUnsupported。
-// handler 会把本地 job 标记为 cancel_requested，等终态推进再释放预占。
-func (p *Provider) CancelVideoJob(ctx context.Context, apiKey string, job *provider.VideoJob) (*provider.VideoJob, error) {
-	return nil, &provider.ErrUnsupported{Provider: "openrouter", Op: "cancel_video_job"}
-}
+// OpenRouter 文档当前未给出 cancel 端点，所以本 adapter 只实现 VideoCreator，
+// 不实现 VideoCanceller。厂商补上端点后，在这里加回 CancelVideoJob 方法即可，
+// Client.SupportsVideoCancellation 会自动跟着变 true。
+var _ provider.VideoCreator = (*Provider)(nil)
 
 func parseOpenRouterVideoJob(raw []byte, networkModel string) (*provider.VideoJob, error) {
 	var aux struct {

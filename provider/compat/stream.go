@@ -2,10 +2,10 @@ package compat
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -16,6 +16,7 @@ import (
 type StreamReader struct {
 	reader  io.ReadCloser
 	scanner *bufio.Scanner
+	diag    provider.StreamDiagnostics
 	usage   *provider.Usage
 	// providerName is forwarded to mid-stream error envelopes so handler.errorBody
 	// can surface the actual upstream provider name (rather than a generic
@@ -30,14 +31,17 @@ type StreamReader struct {
 
 // NewStreamReader creates a StreamReader from an HTTP response body. providerName
 // labels mid-stream error envelopes; pass emitUsageChunk=true to forward the
-// terminal {choices:[], usage:{...}} chunk to the gateway client (the gateway
-// always captures usage internally regardless).
-func NewStreamReader(reader io.ReadCloser, providerName string, emitUsageChunk bool) *StreamReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+// terminal {choices:[], usage:{...}} chunk to the caller.
+//
+// ctx supplies the stream policy and logger. It is read once here rather than
+// held: the returned reader outlives this call, and using a stored context for
+// cancellation would be the wrong lifetime.
+func NewStreamReader(ctx context.Context, reader io.ReadCloser, providerName string, emitUsageChunk bool) *StreamReader {
+	diag := provider.NewStreamDiagnostics(ctx, providerName)
 	return &StreamReader{
 		reader:         reader,
-		scanner:        scanner,
+		scanner:        diag.NewScanner(reader),
+		diag:           diag,
 		providerName:   providerName,
 		emitUsageChunk: emitUsageChunk,
 	}
@@ -60,11 +64,11 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		default:
 			continue
 		}
-		if data == "[DONE]" {
+		switch provider.ClassifyFrame(data) {
+		case provider.FrameDone:
 			return nil, io.EOF
-		}
-		if !strings.HasPrefix(data, "{") {
-			// SSE keep-alive comments / blank pings — skip without warning.
+		case provider.FrameSkip:
+			// Keep-alives, blank pings, non-JSON scalars — never malformed.
 			continue
 		}
 
@@ -78,7 +82,9 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 
 		var chunk provider.ChatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			slog.Warn("compat stream: chunk parse error", "error", err, "data_preview", truncate(data, 200))
+			if err := s.diag.Malformed("chunk", err, data); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		// Lift delta.reasoning → delta.reasoning_content for providers that
@@ -104,7 +110,7 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		return &chunk, nil
 	}
 
-	if err := s.scanner.Err(); err != nil {
+	if err := s.diag.ScanError(s.scanner.Err()); err != nil {
 		return nil, err
 	}
 	return nil, io.EOF
@@ -255,13 +261,6 @@ func isEmptyChunk(chunk *provider.ChatCompletionChunk) bool {
 		}
 	}
 	return true
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // liftReasoningOnChunk re-parses the raw chunk to pull
