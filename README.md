@@ -225,6 +225,9 @@ client, err := llmkit.New(llmkit.OpenAI,
 
 **认证头保护**：`WithHeader` 不能覆盖 `Authorization` / `x-api-key` / `x-goog-api-key` 等凭据头，避免误发错 key。
 
+> 要一份**可直接拷走的完整初始化**（超时预算、两套重试策略、带埋点的 transport、结构化日志、请求 ID、错误分类），
+> 见 [examples/production](examples/production/main.go) —— 每个选项都注释了「不配会出什么事」。
+
 ### 接管传输层与可观测性
 
 ```go
@@ -385,7 +388,7 @@ llmkit/
 │   ├── ipprivacy/       #   剥离客户端 IP 泄露头
 │   └── safehttp/        #   SSRF 安全的图片下载
 ├── cmd/llmkit-probe/    # 能力探测 CLI（配个 key 就能实测厂商支持什么）
-├── examples/            # 9 个可运行示例
+├── examples/            # 10 个可运行示例，含一份生产配置全家桶
 ├── Makefile             # make help 看全部命令
 └── .env.example         # 复制成 .env 填 key，probe 会自动读
 ```
@@ -431,7 +434,13 @@ SILICONFLOW_API_KEY=sk-... go run ./examples/embeddings
 OPENAI_API_KEY=sk-...  go run ./examples/images "一只柴犬"
 GEMINI_API_KEY=...     go run ./examples/videos
 go run ./examples/multiprovider     # 跑所有配了 key 的厂商
+
+DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 ```
+
+[examples/production](examples/production/main.go) 和其他几个不太一样：它不演示某个能力，而是把一个长期运行的服务**该配的都配上**
+—— 超时预算、区分计费调用的两套重试、带埋点的 transport、`slog`、每请求 ID、以及把厂商 request ID 捞出来的错误处理。
+注释写的是「不配会出什么事」而不是「这个选项叫什么」。改完直接拷进你的项目。
 
 ---
 

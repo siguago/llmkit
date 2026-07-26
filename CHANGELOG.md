@@ -45,6 +45,7 @@
 - `provider.ClassifyFrame` —— SSE 帧的统一分类（`[DONE]` 哨兵 / 可跳过 / 应解析）。
 - `provider.StreamPolicy` / `StreamDiagnostics` —— adapter 作者用来遵守流策略的共享组件。
 - `provider` 包新增包文档，写明哪些类型稳定、哪些是厂商专属会增删、哪些是不作保证的 opaque 透传。
+- `examples/production` —— 一份可直接拷走的生产配置。此前 `WithTimeout` / `WithRetry` / `WithMediaRetry` / `WithTransport` / `WithLogger` / `WithRequestID` 各自都有文档，但没有一处把它们装在一起，读者得自己拼。示例里每个选项注释的是「不配会出什么事」，并覆盖两个只有踩过才知道的坑：`WithTransport` 会替换掉 SDK 那个设了 `Proxy: http.ProxyFromEnvironment` 的 transport（自建 `&http.Transport{}` 不设的话 `HTTPS_PROXY` 会静默失效），以及 `RoundTripper` 测到的是响应头到达时间而非最后一字节（流式调用在这里毫秒返回，之后才流一分钟）。
 
 ### 修复
 
