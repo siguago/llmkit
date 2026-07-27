@@ -89,7 +89,7 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -225,7 +225,7 @@ func postJSON(ctx context.Context, client *http.Client, apiKey, url string, body
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(httpReq)
 	if err != nil {

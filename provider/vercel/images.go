@@ -125,7 +125,7 @@ func (p *Provider) postJSON(ctx context.Context, apiKey, endpoint string, body a
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

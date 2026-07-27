@@ -41,16 +41,28 @@ go get github.com/siguago/llmkit
 | `llmkit.OpenAI` | OpenAI | `OPENAI_API_KEY` | compat + reasoning 参数清洗 |
 | `llmkit.Anthropic` | Anthropic Claude | `ANTHROPIC_API_KEY` | 原生 Messages API |
 | `llmkit.Gemini` | Google Gemini | `GEMINI_API_KEY` | 原生 generateContent |
+| `llmkit.XAI` | xAI Grok | `XAI_API_KEY` | compat |
+| `llmkit.Mistral` | Mistral AI | `MISTRAL_API_KEY` | compat |
 | `llmkit.DeepSeek` | DeepSeek | `DEEPSEEK_API_KEY` | 原生 |
 | `llmkit.Moonshot` / `llmkit.Kimi` | 月之暗面 Kimi | `MOONSHOT_API_KEY` | compat + K2.6 thinking 适配 |
 | `llmkit.Zhipu` | 智谱 GLM | `ZHIPU_API_KEY` | compat |
 | `llmkit.MiniMax` | MiniMax | `MINIMAX_API_KEY` | compat |
 | `llmkit.SiliconFlow` | 硅基流动 | `SILICONFLOW_API_KEY` | compat |
-| `llmkit.DashScope` | 阿里百炼 Qwen | `DASHSCOPE_API_KEY` | 原生 |
-| `llmkit.Volcengine` | 火山方舟 豆包 | `VOLCENGINE_API_KEY` | 原生 |
+| `llmkit.DashScope` | 阿里百炼 Qwen | `DASHSCOPE_API_KEY` | 原生视频 + compat 对话 |
+| `llmkit.Volcengine` | 火山方舟 豆包 | `VOLCENGINE_API_KEY` | 原生视频 + compat 对话 |
+| `llmkit.Groq` | Groq | `GROQ_API_KEY` | compat |
+| `llmkit.Together` | Together AI | `TOGETHER_API_KEY` | compat |
+| `llmkit.Fireworks` | Fireworks AI | `FIREWORKS_API_KEY` | compat |
+| `llmkit.Cerebras` | Cerebras | `CEREBRAS_API_KEY` | compat |
+| `llmkit.Ollama` | Ollama（本地） | `OLLAMA_API_KEY`（可选） | compat |
+| `llmkit.VLLM` | vLLM（自建） | `VLLM_API_KEY`（可选） | compat |
 | `llmkit.OpenRouter` | OpenRouter（聚合） | `OPENROUTER_API_KEY` | 原生 |
 | `llmkit.EasyRouter` | EasyRouter（聚合） | `EASYROUTER_API_KEY` | compat |
 | `llmkit.Vercel` | Vercel AI Gateway（聚合） | `VERCEL_AI_GATEWAY_KEY` | compat |
+
+**本地部署**：Ollama 和 vLLM 默认无鉴权，`llmkit.New(llmkit.Ollama)` 不给 key 也能构造；给了就照发（vLLM 起了 `--api-key` 的情况）。其余厂商仍然「缺 key 即报错」——对真实厂商来说，空 key 是配置漏了，不是一种模式。自建的无鉴权网关用 `WithoutAPIKey()`，任何一条路由都不会发凭据头（包括 anthropic 的 `x-api-key`、gemini 的 `x-goog-api-key`）。用 `llmkit.KeyOptional(name)` 可以问某家是否免 key。
+
+实测这两家：`go run ./cmd/llmkit-probe ollama`。**按名字探测**——「探测所有已配置厂商」的无参数模式会跳过它们，因为没有任何迹象能说明本地服务是否起着。
 
 ### 能力矩阵
 
@@ -63,13 +75,21 @@ go get github.com/siguago/llmkit
 | openai | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
 | anthropic | ✅ | ✅ | — | — | — | — | — |
 | gemini | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
+| xai | ✅ | ✅ | — | — | — | — | — |
+| mistral | ✅ | ✅ | ✅ | — | — | — | — |
 | deepseek | ✅ | ✅ | — | — | — | — | — |
-| moonshot | ✅ | ✅ | ✅ | — | — | — | — |
+| moonshot | ✅ | ✅ | — | — | — | — | — |
 | zhipu | ✅ | ✅ | ✅ | — | — | — | — |
-| minimax | ✅ | ✅ | ✅ | — | — | — | — |
+| minimax | ✅ | ✅ | — | — | — | — | — |
 | siliconflow | ✅ | ✅ | ✅ | — | — | — | — |
-| dashscope | — | — | — | — | — | ✅ | — |
-| volcengine | — | — | — | — | — | ✅ | ✅ |
+| dashscope | ✅ | ✅ | ✅ | — | — | ✅ | — |
+| volcengine | ✅ | ✅ | — | — | — | ✅ | ✅ |
+| groq | ✅ | ✅ | — | — | — | — | — |
+| together | ✅ | ✅ | ✅ | — | — | — | — |
+| fireworks | ✅ | ✅ | ✅ | — | — | — | — |
+| cerebras | ✅ | ✅ | — | — | — | — | — |
+| ollama | ✅ | ✅ | ✅ | — | — | — | — |
+| vllm | ✅ | ✅ | ✅ | — | — | — | — |
 | openrouter | ✅ | ✅ | — | ✅ | — | ✅ | — |
 | easyrouter | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | vercel | ✅ | ✅ | ✅ | ✅ | — | — | — |
@@ -78,7 +98,22 @@ go get github.com/siguago/llmkit
 
 > 这张表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
 >
-> **dashscope 和 volcengine 在本 SDK 里只接了视频端点**，没有对话能力：调 `Chat` / `ChatStream` 会返回 `ErrUnsupported`。按 provider 名分发时先问 `SupportsChat()`。
+> **dashscope 和 volcengine 一个 adapter 接两套上游 API**：对话和模型列表走各家的 OpenAI 兼容端点（百炼是 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频走各自的原生异步任务端点。给 `WithBaseURL` 传的是**主机根**，兼容路径由 adapter 自己拼。百炼的 embeddings 一并走兼容端点（`text-embedding-v4`）；方舟的不走，原因见下。
+>
+> **六家不实现 `Embedder`**，都走 `compat.ChatOnly`（该类型存在的唯一目的就是不提升 `Embeddings` 方法），`SupportsEmbeddings()` 如实返回 false，而不是让你调用后才撞上 404 或一堆字段名错误。原因各不相同，全部核对过厂商文档：
+>
+> | 厂商 | 上游实际情况 |
+> |---|---|
+> | xai | API 参考只有 chat / responses / deferred-completion，没有 embeddings 路由 |
+> | groq | API 参考有 chat / audio / models / batches / files / fine-tuning，没有 embeddings |
+> | cerebras | 无 `/embeddings`，实测返回 404 而非 401 |
+> | moonshot | Kimi 开放平台只有 chat / models / tokenizers / balance / files，无 embeddings |
+> | minimax | **路由存在但不是 OpenAI 形状**：要 `GroupId` query 参数，请求体用 `texts` 而非 `input`，必填 `type`（`db`/`query`），响应是顶层 `vectors` 而不是 `data[].embedding` |
+> | volcengine | 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表只剩多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，`input` 是带 `type` 的对象数组 |
+>
+> minimax 和 volcengine 要支持得手写方法，不是把方法提升上来就行。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewChatOnly` 改回 `compat.New` 即可。
+>
+> **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
 >
 > **除 volcengine 外，视频任务一旦提交就无法中止**，会跑到终态并照常计费 —— 按这个前提设计调用方。
 
@@ -458,8 +493,10 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 | Token 计数 | 本地 tokenizer 需要第三方库，与零依赖冲突；Anthropic 的 `count_tokens` 端点也未接 |
 | 余额 / 额度查询 | 未接 |
 | Gemini embeddings | Gemini 有该 API，但适配器还没实现 |
-| 自定义 `http.Client` / `Transport` | mTLS、自签证书场景用不了；代理和超时可以配（见上） |
+| 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 都不是 Bearer 鉴权（`api-key` + `api-version`、SigV4、服务账号 OAuth2），要各自的鉴权实现，目前都没有 |
 | 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，需要自己在上层做 |
+
+> 自定义 `Transport` 曾经在这张表里，现在有了：见上面的 `WithTransport`，mTLS / 自签证书 / 埋点都走它。
 
 ---
 

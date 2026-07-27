@@ -74,10 +74,16 @@ func printPreflightFailure(providerName, model string, err error) {
 		fmt.Printf("    llmkit-probe %s -model <其他模型>\n", providerName)
 	case llmkit.IsRateLimited(err):
 		fmt.Println("  当前被限流，稍后再试。")
+	case llmkit.KeyOptional(providerName):
+		// A local runtime that isn't listening is the overwhelmingly likely cause
+		// here, and "检查 HTTPS_PROXY" would send the reader off in the wrong
+		// direction — the default endpoint is loopback, which no proxy touches.
+		fmt.Printf("  连不上本地运行时。确认它起着，端口对得上；不是默认端口就传 -base-url。\n")
+		fmt.Printf("    llmkit-probe %s -base-url http://localhost:<端口>/v1 -model <你起的模型>\n", providerName)
 	default:
 		fmt.Println("  网络或上游异常。如在国内访问海外厂商，检查 HTTPS_PROXY 是否已设置。")
 	}
-	fmt.Println("\n  （未执行能力探测：凭据不可用时的探测结果没有意义）")
+	fmt.Println("\n  （未执行能力探测：连不上上游时的探测结果没有意义）")
 	fmt.Println()
 }
 
@@ -229,28 +235,69 @@ func isWide(r rune) bool {
 
 // Sensible, cheap, currently-available chat models per provider. Override with
 // -model when you want to probe something else.
+//
+// Vendor catalogs churn: models get retired and IDs get renamed. A
+// "model not found" from this table means the entry went stale, not that the
+// adapter broke — re-run with -model or LLMKIT_MODEL_<PROVIDER>.
 var chatModels = map[string]string{
 	llmkit.OpenAI:      "gpt-5",
 	llmkit.Anthropic:   "claude-sonnet-4-5-20250929",
 	llmkit.Gemini:      "gemini-2.5-flash",
+	llmkit.XAI:         "grok-4.3",
+	llmkit.Mistral:     "mistral-large-latest", // vendor-maintained alias
 	llmkit.DeepSeek:    "deepseek-chat",
-	llmkit.Moonshot:    "kimi-k2-turbo-preview",
+	llmkit.Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	llmkit.Zhipu:       "glm-4.6",
 	llmkit.MiniMax:     "MiniMax-M2",
 	llmkit.SiliconFlow: "Qwen/Qwen3-8B",
 	llmkit.DashScope:   "qwen-plus",
 	llmkit.Volcengine:  "doubao-seed-1-6-250615",
-	llmkit.OpenRouter:  "openai/gpt-5",
-	llmkit.EasyRouter:  "gpt-5",
-	llmkit.Vercel:      "openai/gpt-5",
+	llmkit.Groq:        "openai/gpt-oss-120b",
+	llmkit.Together:    "openai/gpt-oss-120b",
+	llmkit.Fireworks:   "accounts/fireworks/models/gpt-oss-120b",
+	llmkit.Cerebras:    "gpt-oss-120b",
+	// Local runtimes serve whatever you pulled or launched, so these are a
+	// plausible first guess rather than a catalog entry.
+	llmkit.Ollama:     "llama3.2",
+	llmkit.VLLM:       "Qwen/Qwen3-8B",
+	llmkit.OpenRouter: "openai/gpt-5",
+	llmkit.EasyRouter: "gpt-5",
+	llmkit.Vercel:     "openai/gpt-5",
 }
 
+// An adapter that reports SupportsEmbeddings needs an entry here, or its probe
+// comes back SKIP and the claim never gets tested — which is how an adapter ends
+// up advertising a route nobody ever called.
+//
+// A provider absent from both this and embedModelUnknown is a bug, not a SKIP:
+// no model ID is better than a guessed one (a wrong ID reads as "embeddings are
+// broken" when the endpoint is fine), but the gap has to be recorded on purpose.
 var embedModels = map[string]string{
 	llmkit.OpenAI:      "text-embedding-3-small",
 	llmkit.SiliconFlow: "BAAI/bge-m3",
 	llmkit.Zhipu:       "embedding-3",
+	llmkit.Mistral:     "mistral-embed",
+	llmkit.DashScope:   "text-embedding-v4",
+	llmkit.Together:    "BAAI/bge-base-en-v1.5",
+	llmkit.Fireworks:   "nomic-ai/nomic-embed-text-v1.5",
+	llmkit.Ollama:      "nomic-embed-text",
 	llmkit.Vercel:      "openai/text-embedding-3-small",
 	llmkit.EasyRouter:  "text-embedding-3-small",
+}
+
+// embedModelUnknown lists providers that report SupportsEmbeddings but have no
+// entry above, each for a reason. Their embeddings probe reports SKIP.
+//
+// This is a list of known gaps, not an excuse: it exists so that adding a
+// provider forces a decision about its embeddings claim instead of quietly
+// inheriting a SKIP. TestEmbedModelsCoverEmbedders fails when a provider claims
+// embeddings and appears in neither table.
+//
+// A provider whose vendor has no usable embeddings route does not belong here —
+// it belongs on compat.ChatOnly, so it stops claiming the capability. That is
+// where moonshot, minimax and volcengine went.
+var embedModelUnknown = map[string]string{
+	llmkit.VLLM: "一个 vLLM 进程只服务一个模型，没有默认可填",
 }
 
 var imageModels = map[string]string{

@@ -15,11 +15,27 @@ import (
 
 	"github.com/siguago/llmkit/internal/httpx"
 	"github.com/siguago/llmkit/provider"
+	"github.com/siguago/llmkit/provider/compat"
 )
 
 const defaultBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
 
 type Provider struct {
+	// Ark serves chat, streaming and model listing OpenAI-compatible on the same
+	// /api/v3 base the native video endpoints use, so they are delegated
+	// wholesale. Doubao models accept either a model ID or an endpoint ID (ep-...)
+	// in the model field; both are opaque to us.
+	//
+	// Embeddings are deliberately NOT delegated. Ark's OpenAI-shaped text
+	// embeddings API (/api/v3/embeddings, doubao-embedding-text-*) now sits under
+	// the vendor's 下线文档归档 — retired-doc archive — and the current model list
+	// carries only the multimodal doubao-embedding-vision-* models. Those are
+	// served at /api/v3/embeddings/multimodal and take `input` as an array of
+	// typed objects ({"type":"text","text":...} / image_url / video_url), not the
+	// plain strings compat sends. Delegating would advertise a route that is
+	// either retired or shaped differently, so this uses compat.ChatOnly.
+	// Supporting the live surface means a hand-written multimodal method.
+	*compat.ChatOnly
 	baseURL string
 	client  *http.Client
 }
@@ -30,6 +46,10 @@ func New(baseURL string) *Provider {
 		baseURL = defaultBaseURL
 	}
 	return &Provider{
+		ChatOnly: compat.NewChatOnly(compat.Config{
+			ProviderName: "volcengine",
+			BaseURL:      baseURL,
+		}),
 		baseURL: baseURL,
 		client: &http.Client{
 			Timeout:   300 * time.Second,
@@ -39,21 +59,6 @@ func New(baseURL string) *Provider {
 }
 
 func (p *Provider) Name() string { return "volcengine" }
-
-func (p *Provider) ChatCompletion(context.Context, string, string, *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
-	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion"}
-}
-
-func (p *Provider) ChatCompletionStream(context.Context, string, string, *provider.ChatCompletionRequest) (provider.StreamReader, error) {
-	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion_stream"}
-}
-
-// ChatUnsupported marks this adapter as non-chat, so Client.SupportsChat can
-// report it before a call instead of the caller discovering it from an error.
-// The chat methods above exist only because provider.Provider requires them.
-func (p *Provider) ChatUnsupported() {}
-
-var _ provider.NonChatProvider = (*Provider)(nil)
 
 func (p *Provider) CreateVideoJob(ctx context.Context, apiKey, model string, req *provider.VideoCreateRequest) (*provider.VideoJob, error) {
 	body := buildCreateBody(model, req)
@@ -216,7 +221,7 @@ func (p *Provider) doJSON(ctx context.Context, method, apiKey, endpoint string, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(req.Header, apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.client.Do(req)
 	if err != nil {

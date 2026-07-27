@@ -219,7 +219,7 @@ func (p *Provider) EditImage(ctx context.Context, apiKey, model string, req *pro
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
 
 	resp, err := p.client.Do(httpReq)
@@ -355,7 +355,7 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -392,7 +392,7 @@ func (p *Provider) postJSON(ctx context.Context, apiKey, endpoint string, body a
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

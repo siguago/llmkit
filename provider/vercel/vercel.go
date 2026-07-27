@@ -108,9 +108,9 @@ type vercelPricing struct {
 // ListModels overrides compat's default to pull Vercel's richer per-model
 // metadata. Filters to type=language so the chat /v1/models response doesn't
 // surface embedding / image / video models the chat route can't dispatch to.
-// Vercel's endpoint is public, but we still send the Bearer header — Vercel
-// tolerates redundant auth and it keeps the request shape uniform with other
-// providers' ListModels paths.
+// Vercel's endpoint is public, but we still send the Bearer header when there is
+// one — Vercel tolerates redundant auth and it keeps the request shape uniform
+// with other providers' ListModels paths.
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -119,9 +119,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	if err != nil {
 		return nil, err
 	}
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	provider.SetBearer(httpReq.Header, apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

@@ -111,12 +111,17 @@ EXAMPLES
   llmkit-probe deepseek -key sk-... -model deepseek-reasoner
   llmkit-probe openai -media
   llmkit-probe deepseek -base-url https://my-relay.example/v1
+  llmkit-probe ollama                # 本地运行时，无需 key
   llmkit-probe                       # everything configured
   llmkit-probe -list                 # supported providers
 
 KEYS
   Read from -key, then the provider's env var, then a .env file
   (KEY=VALUE per line). See -list for the variable names.
+
+  Ollama / vLLM serve unauthenticated and need no key, but they are only
+  probed when named — nothing tells us whether a local runtime is up, so
+  the no-provider sweep leaves them out.
 
 FLAGS
 `)
@@ -146,8 +151,13 @@ func listProviders() {
 	fmt.Println(strings.Repeat("─", 76))
 	for _, name := range llmkit.Providers() {
 		configured := " "
-		if os.Getenv(llmkit.EnvVar(name)) != "" {
+		switch {
+		case os.Getenv(llmkit.EnvVar(name)) != "":
 			configured = "✓"
+		case llmkit.KeyOptional(name):
+			// Ready to probe without a key, so a blank marker would read as "not
+			// set up yet" for a provider that needs no setting up.
+			configured = "○"
 		}
 		model := defaultChatModel(name)
 		if !providerDoesChat(name) {
@@ -156,6 +166,7 @@ func listProviders() {
 		fmt.Printf("%s %-12s %-27s %s\n", configured, name, llmkit.EnvVar(name), model)
 	}
 	fmt.Println("\n✓ = key found in the environment")
+	fmt.Println("○ = 无需 key（本地/自建运行时）——按名字探测，如 llmkit-probe ollama")
 }
 
 // loadEnvFile reads KEY=VALUE lines into the environment without overwriting
@@ -207,7 +218,13 @@ type target struct {
 }
 
 // resolveTargets figures out which providers to probe. A named provider must
-// have a key; with no name, every provider that has one is probed.
+// have a key unless it serves unauthenticated; with no name, every provider that
+// has one is probed.
+//
+// The key-optional providers (Ollama, vLLM) are reachable only by name, never
+// through the no-name sweep. Nothing observable says whether a local runtime is
+// actually up, so sweeping them in would make `llmkit-probe` with no arguments
+// fail for everyone who isn't currently running one.
 func resolveTargets(args []string, explicitKey string) ([]target, error) {
 	if len(args) > 1 {
 		return nil, fmt.Errorf("probe one provider at a time (got %v)", args)
@@ -222,7 +239,7 @@ func resolveTargets(args []string, explicitKey string) ([]target, error) {
 		if key == "" {
 			key = os.Getenv(llmkit.EnvVar(name))
 		}
-		if key == "" {
+		if key == "" && !llmkit.KeyOptional(name) {
 			return nil, fmt.Errorf("no key for %s — pass -key, set %s, or put it in .env",
 				name, llmkit.EnvVar(name))
 		}
@@ -235,13 +252,16 @@ func resolveTargets(args []string, explicitKey string) ([]target, error) {
 
 	var targets []target
 	for _, name := range llmkit.Providers() {
+		if llmkit.KeyOptional(name) {
+			continue
+		}
 		if key := os.Getenv(llmkit.EnvVar(name)); key != "" {
 			targets = append(targets, target{provider: name, key: key})
 		}
 	}
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no provider keys found — set one (e.g. %s) or pass a provider name with -key",
-			llmkit.EnvVar(llmkit.DeepSeek))
+		return nil, fmt.Errorf("no provider keys found — set one (e.g. %s), or name a provider (%s needs no key)",
+			llmkit.EnvVar(llmkit.DeepSeek), llmkit.Ollama)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].provider < targets[j].provider })
 	return targets, nil

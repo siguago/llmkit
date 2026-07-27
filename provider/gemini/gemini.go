@@ -79,7 +79,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", apiKey)
+	provider.SetKeyHeader(httpReq.Header, "x-goog-api-key", apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -116,7 +116,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", apiKey)
+	provider.SetKeyHeader(httpReq.Header, "x-goog-api-key", apiKey)
 
 	resp, err := p.streamClient.Do(httpReq)
 	if err != nil {
@@ -150,7 +150,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		if err != nil {
 			return nil, err
 		}
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		provider.SetKeyHeader(httpReq.Header, "x-goog-api-key", apiKey)
 
 		resp, err := p.client.Do(httpReq)
 		if err != nil {

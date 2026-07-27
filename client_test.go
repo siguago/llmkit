@@ -357,18 +357,34 @@ type caps struct {
 // would have to round one way or the other, and either way it lies to callers.
 func TestCapabilityMatrix(t *testing.T) {
 	want := map[string]caps{
-		Anthropic:   {chat: true, models: true},
-		DashScope:   {videoGen: true}, // video-only: no chat endpoint here
+		Anthropic: {chat: true, models: true},
+		// No usable embeddings route upstream, so these adapters withhold it
+		// (compat.ChatOnly) rather than answer 404 to a caller who asked first.
+		// Each is a different flavor of "not there", all verified against vendor
+		// docs — see each adapter's New for the specifics:
+		//   xai / groq / cerebras — no /embeddings endpoint published at all
+		//   moonshot             — Kimi publishes no embeddings API
+		//   minimax              — route exists but is not OpenAI-shaped
+		//   volcengine           — text API retired; live one is multimodal-shaped
+		Cerebras:    {chat: true, models: true},
+		Groq:        {chat: true, models: true},
+		XAI:         {chat: true, models: true},
+		Moonshot:    {chat: true, models: true},
+		MiniMax:     {chat: true, models: true},
+		Volcengine:  {chat: true, models: true, videoGen: true, videoCancel: true},
+		DashScope:   {chat: true, models: true, embeddings: true, videoGen: true},
 		DeepSeek:    {chat: true, models: true},
+		Fireworks:   {chat: true, models: true, embeddings: true},
 		EasyRouter:  {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
 		Gemini:      {chat: true, models: true, imageGen: true, imageEdit: true, videoGen: true},
-		MiniMax:     {chat: true, models: true, embeddings: true},
-		Moonshot:    {chat: true, models: true, embeddings: true},
+		Mistral:     {chat: true, models: true, embeddings: true},
+		Ollama:      {chat: true, models: true, embeddings: true},
 		OpenAI:      {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
 		OpenRouter:  {chat: true, models: true, imageGen: true, videoGen: true},
 		SiliconFlow: {chat: true, models: true, embeddings: true},
+		Together:    {chat: true, models: true, embeddings: true},
+		VLLM:        {chat: true, models: true, embeddings: true},
 		Vercel:      {chat: true, models: true, embeddings: true, imageGen: true},
-		Volcengine:  {videoGen: true, videoCancel: true}, // video-only
 		Zhipu:       {chat: true, models: true, embeddings: true},
 	}
 	if len(want) != len(factories) {

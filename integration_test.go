@@ -35,20 +35,35 @@ var runMedia = flag.Bool("media", false, "also run image/video tests (slower and
 
 // liveModels is the model used per provider. Override any of them with
 // LLMKIT_TEST_MODEL_<PROVIDER>, e.g. LLMKIT_TEST_MODEL_DEEPSEEK=deepseek-chat.
+//
+// Vendor catalogs churn: models get retired and IDs get renamed. A "model not
+// found" here means the entry went stale, not that the SDK broke — re-run with
+// LLMKIT_TEST_MODEL_<PROVIDER>. TestLiveModelsCoverAllProviders keeps the table
+// from falling behind the provider list.
 var liveModels = map[string]string{
 	OpenAI:      "gpt-5",
 	Anthropic:   "claude-sonnet-4-5-20250929",
 	Gemini:      "gemini-2.5-flash",
+	XAI:         "grok-4.3",
+	Mistral:     "mistral-large-latest", // vendor-maintained alias
 	DeepSeek:    "deepseek-chat",
-	Moonshot:    "kimi-k2-turbo-preview",
+	Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	Zhipu:       "glm-4.6",
 	MiniMax:     "MiniMax-M2",
 	SiliconFlow: "Qwen/Qwen3-8B",
 	DashScope:   "qwen-plus",
 	Volcengine:  "doubao-seed-1-6-250615",
-	OpenRouter:  "openai/gpt-5",
-	EasyRouter:  "gpt-5",
-	Vercel:      "openai/gpt-5",
+	Groq:        "openai/gpt-oss-120b",
+	Together:    "openai/gpt-oss-120b",
+	Fireworks:   "accounts/fireworks/models/gpt-oss-120b",
+	Cerebras:    "gpt-oss-120b",
+	// Local runtimes serve whatever you pulled or launched, so these are a
+	// plausible first guess rather than a catalog entry.
+	Ollama:     "llama3.2",
+	VLLM:       "Qwen/Qwen3-8B",
+	OpenRouter: "openai/gpt-5",
+	EasyRouter: "gpt-5",
+	Vercel:     "openai/gpt-5",
 }
 
 func liveModel(providerName string) string {
@@ -59,10 +74,31 @@ func liveModel(providerName string) string {
 	return liveModels[providerName]
 }
 
-// liveClient skips the test when no credential is configured for the provider.
+// A provider with no liveModels entry would otherwise be tested with Model: "",
+// which every vendor rejects — reported as a chat failure rather than as the
+// missing table entry it is. Fail once, up front, naming the gap.
+func TestLiveModelsCoverAllProviders(t *testing.T) {
+	for _, name := range Providers() {
+		if liveModels[name] == "" {
+			t.Errorf("liveModels has no entry for %q — add one so TestLive/%s tests something", name, name)
+		}
+	}
+}
+
+// liveClient skips the test when the provider isn't configured to be reached.
+//
+// Providers that need no credential (Ollama, vLLM) can't be gated on one, and
+// nothing observable says whether a local runtime is up. They opt in through
+// LLMKIT_TEST_MODEL_<PROVIDER> instead, which you have to set anyway to name the
+// model you actually pulled or launched.
 func liveClient(t *testing.T, providerName string, opts ...Option) *Client {
 	t.Helper()
-	if os.Getenv(EnvVar(providerName)) == "" {
+	if KeyOptional(providerName) {
+		env := "LLMKIT_TEST_MODEL_" + strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
+		if os.Getenv(env) == "" {
+			t.Skipf("%s not set (local runtime; set it to the model you are serving)", env)
+		}
+	} else if os.Getenv(EnvVar(providerName)) == "" {
 		t.Skipf("%s not set", EnvVar(providerName))
 	}
 	c, err := New(providerName, opts...)

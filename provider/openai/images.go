@@ -172,7 +172,7 @@ func (p *Provider) EditImage(ctx context.Context, apiKey, model string, req *pro
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
 
 	resp, err := p.client.Do(httpReq)
@@ -231,7 +231,7 @@ func callOpenAIJSON(ctx context.Context, client *http.Client, apiKey, url string
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(httpReq)

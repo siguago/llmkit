@@ -125,7 +125,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

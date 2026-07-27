@@ -10,8 +10,13 @@ type Provider interface {
 }
 
 // NonChatProvider is implemented by adapters that exist only for non-chat
-// endpoints — a vendor whose API this SDK covers for video generation but which
-// has no chat endpoint here at all (DashScope, Volcengine).
+// endpoints — a vendor whose API this SDK covers for image or video generation
+// but whose chat endpoint it does not reach at all.
+//
+// No bundled adapter implements it today: DashScope and Volcengine did while
+// they were video-only, and both now delegate chat to their vendors'
+// OpenAI-compatible endpoints. It stays because the situation recurs whenever a
+// vendor is worth adapting for one endpoint before the rest.
 //
 // Chat cannot be made optional the way images and video are: it is on Provider
 // itself, so every adapter has the methods and a type assertion can never tell

@@ -70,7 +70,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.Do(httpReq)
@@ -219,7 +219,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.streamClient.Do(httpReq)
@@ -245,7 +245,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(httpReq.Header, apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
