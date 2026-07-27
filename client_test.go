@@ -500,6 +500,59 @@ func TestEmbed(t *testing.T) {
 	}
 }
 
+// MiniMax is the one provider whose Embeddings is hand-written rather than
+// inherited from the compat layer, so it is the one whose facade path — the
+// Embedder type assertion in Client.Embed, and ProviderOptions surviving the trip
+// — nothing else exercises. TestEmbed above covers the compat path via Zhipu.
+//
+// The request body here is copied verbatim from the "minimax embeddings" example
+// in README.md. That example documents two things a caller cannot guess (the
+// provider-keyed nesting, and that `type` lives there at all), and until this test
+// existed nothing would have caught it going stale.
+func TestEmbed_MiniMaxDocumentedExample(t *testing.T) {
+	var body map[string]any
+	var query string
+	c := newTestClientFor(t, MiniMax, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"vectors":[[0.1,0.2],[0.3,0.4]],"total_tokens":6,"base_resp":{"status_code":0}}`)
+	})
+
+	resp, err := c.Embed(context.Background(), &EmbeddingRequest{
+		Model: "embo-01",
+		Input: []string{"天很蓝", "海很深"},
+		ProviderOptions: map[string]any{"minimax": map[string]any{
+			"type":     "query",
+			"group_id": "182...",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	if body["type"] != "query" {
+		t.Errorf("type = %v, want the ProviderOptions value to reach the wire", body["type"])
+	}
+	if query != "GroupId=182..." {
+		t.Errorf("query = %q, want the group id in the query string", query)
+	}
+	if _, present := body["input"]; present {
+		t.Errorf("sent OpenAI's `input`; MiniMax wants `texts`: %+v", body)
+	}
+	if len(resp.Data) != 2 || resp.Data[1].Index != 1 {
+		t.Fatalf("data = %+v, want two positional items", resp.Data)
+	}
+	// Same assertion llmkit-probe makes, on the one provider that could break it.
+	if _, ok := resp.Data[0].Embedding.([]any); !ok {
+		t.Errorf("Embedding is %T, want []any like every compat provider", resp.Data[0].Embedding)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 6 {
+		t.Errorf("usage = %+v", resp.Usage)
+	}
+}
+
 func TestSay(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
