@@ -359,7 +359,7 @@ func TestCapabilityMatrix(t *testing.T) {
 	want := map[string]caps{
 		Anthropic: {chat: true, models: true},
 		// No usable embeddings route upstream, so these adapters withhold it
-		// (compat.ChatOnly) rather than answer 404 to a caller who asked first.
+		// (compat.NoEmbeddings) rather than answer 404 to a caller who asked first.
 		// Each is a different flavor of "not there", all verified against vendor
 		// docs — see each adapter's New for the specifics:
 		//   xai / groq / cerebras — no /embeddings endpoint published at all

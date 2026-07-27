@@ -276,7 +276,7 @@ func TestUntestedAdapters_Capabilities(t *testing.T) {
 	//
 	// xai / groq / cerebras / minimax report embeddings false on purpose: none has
 	// a usable OpenAI-shaped /embeddings route upstream, so they build on
-	// compat.ChatOnly, which withholds the promoted Embeddings method. MiniMax is
+	// compat.NoEmbeddings, which withholds the promoted Embeddings method. MiniMax is
 	// the interesting one — it does have the route, but with `texts`/`type` instead
 	// of `input` and a `vectors` response, so compat would get every field wrong.
 	// This is the assertion that catches one of them being switched back to

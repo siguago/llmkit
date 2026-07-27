@@ -100,7 +100,7 @@ go get github.com/siguago/llmkit
 >
 > **dashscope 和 volcengine 一个 adapter 接两套上游 API**：对话和模型列表走各家的 OpenAI 兼容端点（百炼是 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频走各自的原生异步任务端点。给 `WithBaseURL` 传的是**主机根**，兼容路径由 adapter 自己拼。百炼的 embeddings 一并走兼容端点（`text-embedding-v4`）；方舟的不走，原因见下。
 >
-> **六家不实现 `Embedder`**，都走 `compat.ChatOnly`（该类型存在的唯一目的就是不提升 `Embeddings` 方法），`SupportsEmbeddings()` 如实返回 false，而不是让你调用后才撞上 404 或一堆字段名错误。原因各不相同，全部核对过厂商文档：
+> **六家不实现 `Embedder`**，都走 `compat.NoEmbeddings`（该类型存在的唯一目的就是不提升 `Embeddings` 方法），`SupportsEmbeddings()` 如实返回 false，而不是让你调用后才撞上 404 或一堆字段名错误。原因各不相同，全部核对过厂商文档：
 >
 > | 厂商 | 上游实际情况 |
 > |---|---|
@@ -111,7 +111,7 @@ go get github.com/siguago/llmkit
 > | minimax | **路由存在但不是 OpenAI 形状**：要 `GroupId` query 参数，请求体用 `texts` 而非 `input`，必填 `type`（`db`/`query`），响应是顶层 `vectors` 而不是 `data[].embedding` |
 > | volcengine | 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表只剩多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，`input` 是带 `type` 的对象数组 |
 >
-> minimax 和 volcengine 要支持得手写方法，不是把方法提升上来就行。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewChatOnly` 改回 `compat.New` 即可。
+> minimax 和 volcengine 要支持得手写方法，不是把方法提升上来就行。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
 >
 > **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
 >

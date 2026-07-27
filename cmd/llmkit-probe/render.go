@@ -294,7 +294,7 @@ var embedModels = map[string]string{
 // embeddings and appears in neither table.
 //
 // A provider whose vendor has no usable embeddings route does not belong here —
-// it belongs on compat.ChatOnly, so it stops claiming the capability. That is
+// it belongs on compat.NoEmbeddings, so it stops claiming the capability. That is
 // where moonshot, minimax and volcengine went.
 var embedModelUnknown = map[string]string{
 	llmkit.VLLM: "一个 vLLM 进程只服务一个模型，没有默认可填",

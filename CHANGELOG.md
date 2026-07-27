@@ -38,7 +38,7 @@
 - **`llmkit.DashScope` 和 `llmkit.Volcengine` 不再是「仅视频」。** 通义千问和豆包是国内调用量第一梯队，此前这两个 adapter 只接了视频端点，`Chat` / `ChatStream` 一律 `ErrUnsupported` —— 名单里有、却调不了对话。现在对话、模型列表、embeddings 走各家的 OpenAI 兼容端点（百炼 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频仍走原生异步任务端点。`SupportsChat()` 对这两家从 false 变 true，`NonChatProvider` 随之没有任何内建实现了（接口保留：下一个只接了单一端点的厂商还会用到）。
 - `llmkit.XAI`（Grok）、`llmkit.Mistral` —— 两家主流前沿模型此前完全缺席。
 - `llmkit.Groq` / `llmkit.Together` / `llmkit.Fireworks` / `llmkit.Cerebras` —— 托管开源权重模型的推理平台。
-- `compat.ChatOnly` —— 只接对话、不声明 embeddings 的 compat 包装。Go 的方法提升没法选择性关闭，内嵌 `compat.Provider` 就一定会把 `Embeddings` 提升上来，所以抽出这个类型专门用来「不提升」。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewChatOnly` 改回 `compat.New` 即可。
+- `compat.NoEmbeddings` —— 与 `compat.Provider` 只差一件事的包装：对话、流式、模型列表照常代理，`Embeddings` 完全不实现，因此不满足 `provider.Embedder`。Go 的方法提升没法选择性关闭，内嵌 `compat.Provider` 就一定会把 `Embeddings` 提升上来，所以抽出这个类型专门用来「不提升」。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
 - `llmkit.Ollama` / `llmkit.VLLM` —— 本地与自建运行时。
 - `WithoutAPIKey()` + 本地运行时的免 key 构造 —— Ollama / vLLM 默认无鉴权，此前 `New` 一律要求凭据，本地部署根本构造不出 Client。现在这两家不给 key 也能构造，给了照发（vLLM 起了 `--api-key` 的情况）；其余厂商仍然缺 key 即 `ErrNoAPIKey` —— 对真实厂商来说空 key 是配置漏了，不是一种模式，静默放行只会换来一个离病因很远的 401。自建的无鉴权网关用 `WithoutAPIKey()` 显式声明。
 - 凭据为空时不再发凭据头。此前会发出字面量 `Bearer `，那不是一个有效凭据，挡在本地运行时前面的代理可能直接拒掉。统一走新增的 `provider.SetBearer` / `provider.SetKeyHeader`，覆盖每一条路由和每种头名（含 anthropic 的 `x-api-key`、gemini 的 `x-goog-api-key`），而不只是对话路由。
@@ -72,7 +72,7 @@
 - `.env.example` 缺 8 个新厂商的环境变量名。`llmkit-probe` 从 `.env` 读 key，这里漏了直接卡住上手路径。
 - `mistral` adapter 的 `PrefillFieldName` 留空，注释还写着「Mistral 没有 prefill 字段」。实际上 Mistral 支持 assistant 消息上的 `prefix: true`（与 DeepSeek 同形），此前 `Message.Prefix` 被静默丢掉。
 - `render.go` 的注释说「没配 embedding 模型的 provider 报 N/A」，实际返回的是 SKIP —— 而 probe 的输出约定里 N/A 表示「厂商不支持，不是缺陷」、SKIP 表示「没尝试」，说反了方向。
-- **六家 provider 的 `SupportsEmbeddings()` 在说谎，全部改为不声明**（走 `compat.ChatOnly`）。逐家核对了厂商文档，原因各不相同：
+- **六家 provider 的 `SupportsEmbeddings()` 在说谎，全部改为不声明**（走 `compat.NoEmbeddings`）。逐家核对了厂商文档，原因各不相同：
   - `xai` —— API 参考只有 chat / responses / deferred-completion，没有 embeddings 路由。
   - `groq` —— API 参考有 chat / audio / models / batches / files / fine-tuning，没有 embeddings。
   - `cerebras` —— 无 `/embeddings`，实测返回 404 而非 401。

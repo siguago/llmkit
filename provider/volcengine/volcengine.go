@@ -33,9 +33,9 @@ type Provider struct {
 	// served at /api/v3/embeddings/multimodal and take `input` as an array of
 	// typed objects ({"type":"text","text":...} / image_url / video_url), not the
 	// plain strings compat sends. Delegating would advertise a route that is
-	// either retired or shaped differently, so this uses compat.ChatOnly.
+	// either retired or shaped differently, so this uses compat.NoEmbeddings.
 	// Supporting the live surface means a hand-written multimodal method.
-	*compat.ChatOnly
+	*compat.NoEmbeddings
 	baseURL string
 	client  *http.Client
 }
@@ -46,7 +46,7 @@ func New(baseURL string) *Provider {
 		baseURL = defaultBaseURL
 	}
 	return &Provider{
-		ChatOnly: compat.NewChatOnly(compat.Config{
+		NoEmbeddings: compat.NewNoEmbeddings(compat.Config{
 			ProviderName: "volcengine",
 			BaseURL:      baseURL,
 		}),
