@@ -80,7 +80,7 @@ go get github.com/siguago/llmkit
 | deepseek | ✅ | ✅ | — | — | — | — | — |
 | moonshot | ✅ | ✅ | — | — | — | — | — |
 | zhipu | ✅ | ✅ | ✅ | — | — | — | — |
-| minimax | ✅ | ✅ | — | — | — | — | — |
+| minimax | ✅ | ✅ | ✅ | — | — | — | — |
 | siliconflow | ✅ | ✅ | ✅ | — | — | — | — |
 | dashscope | ✅ | ✅ | ✅ | — | — | ✅ | — |
 | volcengine | ✅ | ✅ | — | — | — | ✅ | ✅ |
@@ -100,7 +100,7 @@ go get github.com/siguago/llmkit
 >
 > **dashscope 和 volcengine 一个 adapter 接两套上游 API**：对话和模型列表走各家的 OpenAI 兼容端点（百炼是 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频走各自的原生异步任务端点。给 `WithBaseURL` 传的是**主机根**，兼容路径由 adapter 自己拼。百炼的 embeddings 一并走兼容端点（`text-embedding-v4`）；方舟的不走，原因见下。
 >
-> **六家不实现 `Embedder`**，都走 `compat.NoEmbeddings`（该类型存在的唯一目的就是不提升 `Embeddings` 方法），`SupportsEmbeddings()` 如实返回 false，而不是让你调用后才撞上 404 或一堆字段名错误。原因各不相同，全部核对过厂商文档：
+> **五家不实现 `Embedder`**，都走 `compat.NoEmbeddings`（该类型的用途就是不提升 `Embeddings` 方法），`SupportsEmbeddings()` 如实返回 false，而不是让你调用后才撞上 404。原因各不相同，全部核对过厂商文档：
 >
 > | 厂商 | 上游实际情况 |
 > |---|---|
@@ -108,10 +108,30 @@ go get github.com/siguago/llmkit
 > | groq | API 参考有 chat / audio / models / batches / files / fine-tuning，没有 embeddings |
 > | cerebras | 无 `/embeddings`，实测返回 404 而非 401 |
 > | moonshot | Kimi 开放平台只有 chat / models / tokenizers / balance / files，无 embeddings |
-> | minimax | **路由存在但不是 OpenAI 形状**：要 `GroupId` query 参数，请求体用 `texts` 而非 `input`，必填 `type`（`db`/`query`），响应是顶层 `vectors` 而不是 `data[].embedding` |
-> | volcengine | 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表只剩多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，`input` 是带 `type` 的对象数组 |
+> | volcengine | 见下，**这一家不是「没有」，是「不是同一个操作」** |
 >
-> minimax 和 volcengine 要支持得手写方法，不是把方法提升上来就行。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
+> **volcengine 的 embeddings 不接，是因为语义对不上，不是因为字段名对不上。** 方舟的文本 embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」；当前在线的是多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，它的 `input` 是**一条内容的各个部分**（文本 / 图片 / 视频）融合成**一个**向量，响应的 `data` 是单个对象而不是数组。而 `Embed` 的契约是「N 条输入 → N 个向量，`Data[i]` 对应 `Input[i]`」。硬接就得把一次 `Embed` 扇出成 N 个 HTTP 请求 —— 100 个 chunk 变成 100 次计费。这种成本悬崖不该藏在一个回答「支持」的能力探测后面，所以如实回答不支持。多模态向量化值得单独一套接口（融合输入本来就是它的卖点），不该硬塞进这一个。
+>
+> **minimax 的 embeddings 是手写的，不是白拿的。** 它的路由同样不是 OpenAI 形状（要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp` 报错），但**批量语义是对得上的**（N 条进、N 个向量出、顺序一致），所以 adapter 里写了一层翻译。用法见下面「minimax embeddings」。
+>
+> 哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
+
+#### minimax embeddings
+
+`type` 决定这批文本是「入库」还是「检索」用 —— 同一段文字两种用法算出的向量不同，配对使用才是模型训练时的意图。它在统一请求里没有对应字段，所以走 `ProviderOptions`，默认 `db`：
+
+```go
+resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
+    Model: "embo-01",
+    Input: []string{"天很蓝", "海很深"},
+    ProviderOptions: map[string]any{"minimax": map[string]any{
+        "type":     "query",   // 省略则为 "db"
+        "group_id": "182...",  // 只在你的端点要求时才需要（国内 endpoint）
+    }},
+})
+```
+
+`Dimensions` 和 `EncodingFormat` 会**报错而不是被忽略** —— embo-01 的向量宽度固定，你要了 256 维却拿到 1536 维是察觉不到的。
 >
 > **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
 >

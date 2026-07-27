@@ -274,15 +274,19 @@ func TestUntestedAdapters_Capabilities(t *testing.T) {
 	// regression guard against someone "completing" the interface with an
 	// ErrUnsupported stub, which would make the capability check lie.
 	//
-	// xai / groq / cerebras / minimax report embeddings false on purpose: none has
-	// a usable OpenAI-shaped /embeddings route upstream, so they build on
-	// compat.NoEmbeddings, which withholds the promoted Embeddings method. MiniMax is
-	// the interesting one — it does have the route, but with `texts`/`type` instead
-	// of `input` and a `vectors` response, so compat would get every field wrong.
-	// This is the assertion that catches one of them being switched back to
-	// compat.New without the route actually being compatible.
+	// xai / groq / cerebras report embeddings false on purpose: none publishes an
+	// /embeddings route, so they build on compat.NoEmbeddings, which withholds the
+	// promoted Embeddings method. This is the assertion that catches one of them
+	// being switched back to compat.New without the route actually existing.
+	//
+	// minimax reports true without going through compat: it also builds on
+	// NoEmbeddings — its route wants `texts`/`type` and answers with `vectors`, so
+	// compat would get every field wrong — and then supplies its own translating
+	// Embeddings. Both halves matter here, and this assertion covers the seam: drop
+	// the hand-written method and it flips to false; embed compat.Provider instead
+	// and it goes true for the wrong implementation.
 	want := map[string]smokeCaps{
-		"minimax":     {models: true},
+		"minimax":     {models: true, embeddings: true},
 		"siliconflow": {models: true, embeddings: true},
 		"vercel":      {models: true, embeddings: true, imageGen: true},
 		"mistral":     {models: true, embeddings: true},

@@ -358,25 +358,29 @@ type caps struct {
 func TestCapabilityMatrix(t *testing.T) {
 	want := map[string]caps{
 		Anthropic: {chat: true, models: true},
-		// No usable embeddings route upstream, so these adapters withhold it
-		// (compat.NoEmbeddings) rather than answer 404 to a caller who asked first.
-		// Each is a different flavor of "not there", all verified against vendor
-		// docs — see each adapter's New for the specifics:
+		// No embeddings route this SDK can reach, so these adapters withhold the
+		// capability (compat.NoEmbeddings) rather than answer 404 to a caller who
+		// asked first. Each is a different flavor of "not there", all verified
+		// against vendor docs — see each adapter's New for the specifics:
 		//   xai / groq / cerebras — no /embeddings endpoint published at all
 		//   moonshot             — Kimi publishes no embeddings API
-		//   minimax              — route exists but is not OpenAI-shaped
-		//   volcengine           — text API retired; live one is multimodal-shaped
+		//   volcengine           — text API retired; the live one embeds a whole
+		//                          multimodal input into ONE vector, so it is a
+		//                          different operation, not a different spelling
+		//
+		// MiniMax is the counter-example below: its route is not OpenAI-shaped
+		// either, but the batch semantics do line up, so the adapter translates.
 		Cerebras:    {chat: true, models: true},
 		Groq:        {chat: true, models: true},
 		XAI:         {chat: true, models: true},
 		Moonshot:    {chat: true, models: true},
-		MiniMax:     {chat: true, models: true},
 		Volcengine:  {chat: true, models: true, videoGen: true, videoCancel: true},
 		DashScope:   {chat: true, models: true, embeddings: true, videoGen: true},
 		DeepSeek:    {chat: true, models: true},
 		Fireworks:   {chat: true, models: true, embeddings: true},
 		EasyRouter:  {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
 		Gemini:      {chat: true, models: true, imageGen: true, imageEdit: true, videoGen: true},
+		MiniMax:     {chat: true, models: true, embeddings: true}, // hand-written, not compat's
 		Mistral:     {chat: true, models: true, embeddings: true},
 		Ollama:      {chat: true, models: true, embeddings: true},
 		OpenAI:      {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},

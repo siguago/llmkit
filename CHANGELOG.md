@@ -39,6 +39,11 @@
 - `llmkit.XAI`（Grok）、`llmkit.Mistral` —— 两家主流前沿模型此前完全缺席。
 - `llmkit.Groq` / `llmkit.Together` / `llmkit.Fireworks` / `llmkit.Cerebras` —— 托管开源权重模型的推理平台。
 - `compat.NoEmbeddings` —— 与 `compat.Provider` 只差一件事的包装：对话、流式、模型列表照常代理，`Embeddings` 完全不实现，因此不满足 `provider.Embedder`。Go 的方法提升没法选择性关闭，内嵌 `compat.Provider` 就一定会把 `Embeddings` 提升上来，所以抽出这个类型专门用来「不提升」。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
+- **`minimax` 的 embeddings 接上了**，手写翻译层而非白拿 compat 的实现。MiniMax 的路由不是 OpenAI 形状（请求要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp.status_code` 报错），但**批量语义是对得上的** —— N 条进、N 个向量出、顺序一致 —— 所以翻译是忠实的，不是把一种操作硬掰成另一种。
+
+  几个刻意的取舍：`type`（`db`/`query`，决定这批文本是入库还是检索用，同一段文字两种用法向量不同）在统一请求里没有对应字段，走 `ProviderOptions`，默认 `db`；`GroupId` 是账号配置而不是请求参数，同样走 `ProviderOptions`，且**只在传了才拼进 query**，国际端点因此保持干净；`Dimensions` 和 `EncodingFormat` **报错而不是被忽略** —— embo-01 向量宽度固定，你要了 256 维却静默拿到 1536 维是察觉不到的；向量解码成 `[]any` 而不是 `[]float64`，与所有 compat provider 保持一致（`llmkit-probe` 和调用方断言的就是 `[]any`）；`type` 的取值在本地校验而不是转发给上游 —— 这是对本项目「让调用方看厂商自己的报错」惯例的**有意例外**，因为取值集合是封闭的两个值，万一上游把无法识别的 type 当默认值处理，一个拼写错误就会静默降低检索质量，本地响亮报错好过远端默默耸肩。
+
+  **`volcengine` 没有跟着接**：它的现行端点把整批输入融合成单个向量，是另一种操作而非另一种拼写，硬接需要 1→N 的请求放大。原因写在「修复」一节它那条里。
 - `llmkit.Ollama` / `llmkit.VLLM` —— 本地与自建运行时。
 - `WithoutAPIKey()` + 本地运行时的免 key 构造 —— Ollama / vLLM 默认无鉴权，此前 `New` 一律要求凭据，本地部署根本构造不出 Client。现在这两家不给 key 也能构造，给了照发（vLLM 起了 `--api-key` 的情况）；其余厂商仍然缺 key 即 `ErrNoAPIKey` —— 对真实厂商来说空 key 是配置漏了，不是一种模式，静默放行只会换来一个离病因很远的 401。自建的无鉴权网关用 `WithoutAPIKey()` 显式声明。
 - 凭据为空时不再发凭据头。此前会发出字面量 `Bearer `，那不是一个有效凭据，挡在本地运行时前面的代理可能直接拒掉。统一走新增的 `provider.SetBearer` / `provider.SetKeyHeader`，覆盖每一条路由和每种头名（含 anthropic 的 `x-api-key`、gemini 的 `x-goog-api-key`），而不只是对话路由。
@@ -72,15 +77,14 @@
 - `.env.example` 缺 8 个新厂商的环境变量名。`llmkit-probe` 从 `.env` 读 key，这里漏了直接卡住上手路径。
 - `mistral` adapter 的 `PrefillFieldName` 留空，注释还写着「Mistral 没有 prefill 字段」。实际上 Mistral 支持 assistant 消息上的 `prefix: true`（与 DeepSeek 同形），此前 `Message.Prefix` 被静默丢掉。
 - `render.go` 的注释说「没配 embedding 模型的 provider 报 N/A」，实际返回的是 SKIP —— 而 probe 的输出约定里 N/A 表示「厂商不支持，不是缺陷」、SKIP 表示「没尝试」，说反了方向。
-- **六家 provider 的 `SupportsEmbeddings()` 在说谎，全部改为不声明**（走 `compat.NoEmbeddings`）。逐家核对了厂商文档，原因各不相同：
+- **五家 provider 的 `SupportsEmbeddings()` 在说谎，全部改为不声明**（走 `compat.NoEmbeddings`）。逐家核对了厂商文档，原因各不相同：
   - `xai` —— API 参考只有 chat / responses / deferred-completion，没有 embeddings 路由。
   - `groq` —— API 参考有 chat / audio / models / batches / files / fine-tuning，没有 embeddings。
   - `cerebras` —— 无 `/embeddings`，实测返回 404 而非 401。
   - `moonshot` —— Kimi 开放平台只有 chat / models / tokenizers / balance / files，没有 embeddings 接口（`platform.kimi.ai` 的 API 总览与 `llms.txt` 索引都没有）。**这是既有 bug**，不是本次新增的厂商。
-  - `minimax` —— 路由存在但**不是 OpenAI 形状**：要 `GroupId` query 参数，请求体用 `texts` 而非 `input`，必填 `type`（`db`/`query`），响应是顶层 `vectors` 而不是 `data[].embedding`。compat 的 `Embeddings` 每个字段都会发错、解错，报出来像 SDK 坏了而不是像适配器没实现。**既有 bug。**
-  - `volcengine` —— 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表（2026-07-20 更新）只剩多模态 `doubao-embedding-vision-*`，服务在 `/api/v3/embeddings/multimodal`，`input` 是带 `type` 的对象数组而非字符串。本次刚把它从「仅视频」改成接 compat 时顺手把 embeddings 也带上了，是本次引入的。
+  - `volcengine` —— 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表（2026-07-20 更新）只剩多模态 `doubao-embedding-vision-*`，服务在 `/api/v3/embeddings/multimodal`。**而这个端点不是同一个操作**：它的 `input` 是**一条内容的各个部分**（文本 / 图片 / 视频）融合成**一个**向量，响应的 `data` 是单个对象而不是数组；`Embed` 的契约却是「N 条输入 → N 个向量，`Data[i]` 对应 `Input[i]`」。硬接就得把一次 `Embed` 扇出成 N 个 HTTP 请求，100 个 chunk 变成 100 次计费 —— 这种成本悬崖不该藏在一个回答「支持」的能力探测后面。多模态向量化值得单独一套接口（融合输入本来就是它的卖点），adapter 注释里记了这个结论。本次刚把它从「仅视频」改成接 compat 时顺手把 embeddings 也带上了，是本次引入的。
 
-  minimax 和 volcengine 要真支持得手写方法，不是把方法提升上来就行。`dashscope` 的 embeddings 核对后确认可用（`/compatible-mode/v1/embeddings` + `text-embedding-v4`，标准 OpenAI 形状），保留。
+  `dashscope` 的 embeddings 核对后确认可用（`/compatible-mode/v1/embeddings` + `text-embedding-v4`，标准 OpenAI 形状），保留。`minimax` 的核对结论是「形状不对但语义对得上」，所以走了手写翻译层而不是摘掉能力，见「新增」一节。
 
 ### 测试
 

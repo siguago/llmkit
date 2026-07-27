@@ -277,6 +277,7 @@ var embedModels = map[string]string{
 	llmkit.SiliconFlow: "BAAI/bge-m3",
 	llmkit.Zhipu:       "embedding-3",
 	llmkit.Mistral:     "mistral-embed",
+	llmkit.MiniMax:     "embo-01",
 	llmkit.DashScope:   "text-embedding-v4",
 	llmkit.Together:    "BAAI/bge-base-en-v1.5",
 	llmkit.Fireworks:   "nomic-ai/nomic-embed-text-v1.5",

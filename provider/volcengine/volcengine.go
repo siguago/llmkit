@@ -26,15 +26,25 @@ type Provider struct {
 	// wholesale. Doubao models accept either a model ID or an endpoint ID (ep-...)
 	// in the model field; both are opaque to us.
 	//
-	// Embeddings are deliberately NOT delegated. Ark's OpenAI-shaped text
-	// embeddings API (/api/v3/embeddings, doubao-embedding-text-*) now sits under
-	// the vendor's 下线文档归档 — retired-doc archive — and the current model list
-	// carries only the multimodal doubao-embedding-vision-* models. Those are
-	// served at /api/v3/embeddings/multimodal and take `input` as an array of
-	// typed objects ({"type":"text","text":...} / image_url / video_url), not the
-	// plain strings compat sends. Delegating would advertise a route that is
-	// either retired or shaped differently, so this uses compat.NoEmbeddings.
-	// Supporting the live surface means a hand-written multimodal method.
+	// Embeddings are deliberately NOT delegated, and unlike MiniMax this is not a
+	// translation someone could just sit down and write.
+	//
+	// Ark's OpenAI-shaped text embeddings API (/api/v3/embeddings,
+	// doubao-embedding-text-*) now sits under the vendor's 下线文档归档 —
+	// retired-doc archive — and the current model list carries only the multimodal
+	// doubao-embedding-vision-* models, served at /api/v3/embeddings/multimodal.
+	// That endpoint is a different operation, not a different spelling: its `input`
+	// is the parts of ONE item ({"type":"text"} / image_url / video_url) fused into
+	// a single vector, and it answers with `data` as one object rather than an
+	// array. The unified Embed contract is positional and plural — N inputs, N
+	// vectors, Data[i] describing Input[i].
+	//
+	// Bridging the two would mean fanning one Embed call out into N HTTP requests,
+	// turning a batch of 100 chunks into 100 billed calls. That cost cliff does not
+	// belong hidden behind a capability probe that says "yes", so the honest answer
+	// stays no. The multimodal surface is worth having on its own terms — a
+	// MultimodalEmbedder interface where fused input is the point — not squeezed
+	// through this one.
 	*compat.NoEmbeddings
 	baseURL string
 	client  *http.Client
