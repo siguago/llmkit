@@ -172,6 +172,60 @@ func TestEmbeddings_RejectsUnknownType(t *testing.T) {
 	}
 }
 
+// Forgetting the "minimax" nesting level must not silently fall back to defaults.
+// A dropped `type` means the caller asked for query-side encoding and got
+// corpus-side, which degrades retrieval with nothing to notice — the same harm the
+// local type validation exists to prevent, so it gets the same loud treatment.
+func TestEmbeddings_RejectsMisplacedProviderOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    any
+		wantErr bool
+		wantSub string
+	}{
+		{
+			name:    "flat: nesting level forgotten",
+			opts:    map[string]any{"type": "query", "group_id": "182"},
+			wantErr: true, wantSub: "top level",
+		},
+		{
+			name:    "flat: only group_id",
+			opts:    map[string]any{"group_id": "182"},
+			wantErr: true, wantSub: "top level",
+		},
+		{
+			name:    "sub-map is not a map",
+			opts:    map[string]any{"minimax": "type=query"},
+			wantErr: true, wantSub: "want map[string]any",
+		},
+		{
+			// Generic code that always sets ProviderOptions must keep working: the
+			// field is a passthrough for compat providers.
+			name: "someone else's options are ignored",
+			opts: map[string]any{"vercel": map[string]any{"order": []string{"a"}}},
+		},
+		{name: "nil", opts: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newEmbedStub(t, `{"vectors":[[0.1]],"total_tokens":1,"base_resp":{"status_code":0}}`)
+			_, err := New(s.URL).Embeddings(context.Background(), "sk-test", "embo-01",
+				&provider.EmbeddingRequest{Input: "x", ProviderOptions: tc.opts})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for %#v", tc.opts)
+				}
+				if !strings.Contains(err.Error(), tc.wantSub) {
+					t.Errorf("err = %v, want it to mention %q", err, tc.wantSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("err = %v, want the blob ignored", err)
+			}
+		})
+	}
+}
+
 // GroupId is account configuration the mainland endpoint wants in the query string.
 // Sent only when supplied — the international endpoint does not ask for it, and a
 // stray empty GroupId= is its own kind of malformed request.

@@ -35,7 +35,7 @@
 
 **厂商从 13 家扩到 21 家，并补上 DashScope / Volcengine 缺失的对话能力。**
 
-- **`llmkit.DashScope` 和 `llmkit.Volcengine` 不再是「仅视频」。** 通义千问和豆包是国内调用量第一梯队，此前这两个 adapter 只接了视频端点，`Chat` / `ChatStream` 一律 `ErrUnsupported` —— 名单里有、却调不了对话。现在对话、模型列表、embeddings 走各家的 OpenAI 兼容端点（百炼 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频仍走原生异步任务端点。`SupportsChat()` 对这两家从 false 变 true，`NonChatProvider` 随之没有任何内建实现了（接口保留：下一个只接了单一端点的厂商还会用到）。
+- **`llmkit.DashScope` 和 `llmkit.Volcengine` 不再是「仅视频」。** 通义千问和豆包是国内调用量第一梯队，此前这两个 adapter 只接了视频端点，`Chat` / `ChatStream` 一律 `ErrUnsupported` —— 名单里有、却调不了对话。现在对话和模型列表走各家的 OpenAI 兼容端点（百炼 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频仍走原生异步任务端点。embeddings 只有百炼跟着接了（`text-embedding-v4`）；方舟的没接，原因见「修复」一节。`SupportsChat()` 对这两家从 false 变 true，`NonChatProvider` 随之没有任何内建实现了（接口保留：下一个只接了单一端点的厂商还会用到）。
 - `llmkit.XAI`（Grok）、`llmkit.Mistral` —— 两家主流前沿模型此前完全缺席。
 - `llmkit.Groq` / `llmkit.Together` / `llmkit.Fireworks` / `llmkit.Cerebras` —— 托管开源权重模型的推理平台。
 - `compat.NoEmbeddings` —— 与 `compat.Provider` 只差一件事的包装：对话、流式、模型列表照常代理，`Embeddings` 完全不实现，因此不满足 `provider.Embedder`。Go 的方法提升没法选择性关闭，内嵌 `compat.Provider` 就一定会把 `Embeddings` 提升上来，所以抽出这个类型专门用来「不提升」。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
@@ -57,7 +57,7 @@
 - `APIError.RequestID` —— 厂商自己生成的请求 ID，从响应头解析（认 `X-Request-Id`、`Request-Id`、`Cf-Ray` 等多种写法）。报障时厂商要的就是它，而且响应一旦丢弃就再也拿不回来。
 - `WithStreamTolerance(t)` / `WithMaxStreamFrameBytes(n)` —— 流式容错策略与单帧上限（默认仍是 1 MiB）。
 - `provider.ImageGenerator` / `ImageEditor` / `VideoCreator` / `VideoCanceller` —— 按端点切分的能力接口。`ImageProvider` / `VideoProvider` 保留为二者的组合。
-- `Client.SupportsChat()` 和 `provider.NonChatProvider` —— DashScope 和 Volcengine 在本 SDK 里只接了视频端点，`Chat` / `ChatStream` 一直返回 `ErrUnsupported`，但此前无从事先探测（chat 在 `Provider` 接口上，类型断言分辨不出来），README 的能力表还给它们标了「Chat ✅」。
+- `Client.SupportsChat()` 和 `provider.NonChatProvider` —— 加这两个东西的起因是：DashScope 和 Volcengine **当时**只接了视频端点，`Chat` / `ChatStream` 一律返回 `ErrUnsupported`，却无从事先探测（chat 在 `Provider` 接口上，类型断言分辨不出来），README 的能力表还给它们标了「Chat ✅」。本次这两家都接上了对话，所以 `NonChatProvider` 现在没有任何内建实现 —— 接口保留，下一个只接单一端点的厂商还会用到。
 - `provider.ClassifyFrame` —— SSE 帧的统一分类（`[DONE]` 哨兵 / 可跳过 / 应解析）。
 - `provider.StreamPolicy` / `StreamDiagnostics` —— adapter 作者用来遵守流策略的共享组件。
 - `provider` 包新增包文档，写明哪些类型稳定、哪些是厂商专属会增删、哪些是不作保证的 opaque 透传。
@@ -96,4 +96,4 @@
 - `TestUntestedAdapters_*` 从 3 个 adapter 扩到 11 个，8 家新 provider 全部覆盖默认端点、路径拼接、错误透传与能力断言。默认端点是这种薄封装最容易错的地方：groq 在 `/openai/v1`、fireworks 在 `/inference/v1`，都不是 `/v1`。
 - 新增 `TestUntestedAdapters_Prefill`，双向断言：支持 prefill 的厂商必须收到字段，不支持的必须一个都收不到（多余的 key 会被严格的 compat 服务直接拒掉）。
 - 新增三条防漂移守卫：`TestLiveModelsCoverAllProviders`（集成测试模型表）、`TestChatModelsCoverAllProviders` 与 `TestEmbedModelsCoverEmbedders`（probe 的模型表）。最后一条是双向的：声明了 embeddings 就必须有探测模型或在 `embedModelUnknown` 里写明原因，没声明的也不许有多余条目 —— 否则「声明了能力但从没被探测过」就是 `SupportsEmbeddings()` 开始说谎的方式。
-- 新增覆盖全部 13 家 provider 的流策略测试（此前只测了 4 家）。写出来当场抓到一个自伤：`[DONE]` 哨兵和非 JSON 帧的过滤在四个 reader 里各写了一份，gemini 和 anthropic 那两份缺失，于是「流式改严格」把中转站补的 `data: [DONE]`、以及合法的空 `data:` 行也判成了厂商数据损坏。四份实现已收敛到 `provider.ClassifyFrame`。
+- 新增覆盖全部 provider 的流策略测试（此前只测了 4 家）。测试遍历 `Providers()`，所以本次扩到 21 家后自动跟着覆盖。写出来当场抓到一个自伤：`[DONE]` 哨兵和非 JSON 帧的过滤在四个 reader 里各写了一份，gemini 和 anthropic 那两份缺失，于是「流式改严格」把中转站补的 `data: [DONE]`、以及合法的空 `data:` 行也判成了厂商数据损坏。四份实现已收敛到 `provider.ClassifyFrame`。

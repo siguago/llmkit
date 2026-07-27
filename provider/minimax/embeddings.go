@@ -73,7 +73,10 @@ func (p *Provider) Embeddings(ctx context.Context, apiKey, model string, req *pr
 		return nil, &provider.ErrUnsupported{Provider: "minimax", Op: "embeddings encoding_format=" + *req.EncodingFormat}
 	}
 
-	opts := providerOptions(req.ProviderOptions, "minimax")
+	opts, err := providerOptions(req.ProviderOptions, "minimax")
+	if err != nil {
+		return nil, err
+	}
 	embType := defaultType
 	if v, ok := opts["type"].(string); ok && v != "" {
 		// Validated locally rather than forwarded, which is the exception to this
@@ -234,11 +237,41 @@ func inputTexts(input any) ([]string, error) {
 
 // providerOptions pulls this provider's sub-map out of the unified
 // ProviderOptions blob, matching how the video adapters read theirs.
-func providerOptions(opts any, key string) map[string]any {
-	outer, _ := opts.(map[string]any)
-	if outer == nil {
-		return nil
+//
+// It errors on a blob that was clearly meant for us but is shaped wrong, instead
+// of returning nil and letting the defaults apply. Dropping a misplaced `type`
+// silently is the exact harm the local type validation above exists to prevent —
+// the caller asked for query-side encoding, got corpus-side, and nothing said so.
+//
+// Unrecognizable blobs are still ignored rather than rejected: the field is a
+// passthrough for compat providers (Vercel reads its gateway routing from it), so
+// generic code that always sets it must not break here. That leaves one gap this
+// cannot close — a struct carrying a Type field reads as unrecognizable, since
+// introspecting it would mean reflection. The documented shape is a map.
+func providerOptions(opts any, key string) (map[string]any, error) {
+	if opts == nil {
+		return nil, nil
 	}
-	inner, _ := outer[key].(map[string]any)
-	return inner
+	outer, ok := opts.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	if raw, present := outer[key]; present {
+		inner, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("minimax embeddings: ProviderOptions[%q] is %T, want map[string]any", key, raw)
+		}
+		return inner, nil
+	}
+	// No sub-map, but our own option names at the top level: the nesting level was
+	// forgotten. Say so rather than proceed with defaults.
+	for _, k := range []string{"type", "group_id"} {
+		if _, present := outer[k]; present {
+			return nil, fmt.Errorf(
+				"minimax embeddings: ProviderOptions has %q at the top level; "+
+					"it must be nested under %q, as in map[string]any{%q: map[string]any{%q: ...}}",
+				k, key, key, k)
+		}
+	}
+	return nil, nil
 }
