@@ -15,11 +15,22 @@ import (
 
 	"github.com/siguago/llmkit/internal/httpx"
 	"github.com/siguago/llmkit/provider"
+	"github.com/siguago/llmkit/provider/compat"
 )
 
 const defaultBaseURL = "https://dashscope.aliyuncs.com"
 
+// compatSuffix is the path DashScope serves its OpenAI-compatible endpoints on
+// (/chat/completions, /embeddings, /models). The native video synthesis API
+// lives at a different prefix (/api/v1/services/...), which is why baseURL here
+// is the host root rather than a ready-to-use OpenAI base.
+const compatSuffix = "/compatible-mode/v1"
+
 type Provider struct {
+	// Chat, streaming, model listing and embeddings are plain OpenAI-compatible
+	// on DashScope, so they are delegated wholesale. Qwen's thinking switch
+	// rides along as the `enable_thinking` field compat already forwards.
+	*compat.Provider
 	baseURL string
 	client  *http.Client
 }
@@ -30,6 +41,10 @@ func New(baseURL string) *Provider {
 		baseURL = defaultBaseURL
 	}
 	return &Provider{
+		Provider: compat.New(compat.Config{
+			ProviderName: "dashscope",
+			BaseURL:      compatBaseURL(baseURL),
+		}),
 		baseURL: baseURL,
 		client: &http.Client{
 			Timeout:   300 * time.Second,
@@ -38,22 +53,17 @@ func New(baseURL string) *Provider {
 	}
 }
 
+// compatBaseURL derives the OpenAI-compatible base from the host root. A
+// baseURL that already points at the compatible endpoint is passed through, so
+// configuring either form works instead of silently producing a doubled path.
+func compatBaseURL(baseURL string) string {
+	if strings.Contains(baseURL, "/compatible-mode") {
+		return baseURL
+	}
+	return baseURL + compatSuffix
+}
+
 func (p *Provider) Name() string { return "dashscope" }
-
-func (p *Provider) ChatCompletion(context.Context, string, string, *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
-	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion"}
-}
-
-func (p *Provider) ChatCompletionStream(context.Context, string, string, *provider.ChatCompletionRequest) (provider.StreamReader, error) {
-	return nil, &provider.ErrUnsupported{Provider: p.Name(), Op: "chat_completion_stream"}
-}
-
-// ChatUnsupported marks this adapter as non-chat, so Client.SupportsChat can
-// report it before a call instead of the caller discovering it from an error.
-// The chat methods above exist only because provider.Provider requires them.
-func (p *Provider) ChatUnsupported() {}
-
-var _ provider.NonChatProvider = (*Provider)(nil)
 
 func (p *Provider) CreateVideoJob(ctx context.Context, apiKey, model string, req *provider.VideoCreateRequest) (*provider.VideoJob, error) {
 	body := buildCreateBody(model, req)
@@ -169,7 +179,7 @@ func (p *Provider) doJSON(ctx context.Context, method, apiKey, endpoint string, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	provider.SetBearer(req.Header, apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DashScope-Async", "enable")
 	resp, err := p.client.Do(req)

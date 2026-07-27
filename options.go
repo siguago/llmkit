@@ -26,6 +26,10 @@ type clientConfig struct {
 	requestIDFn  func() string
 	requestIDHdr string
 	streamPolicy provider.StreamPolicy
+	// noAPIKey records that the caller declared this endpoint unauthenticated,
+	// which is what separates "no credential needed" from "the credential went
+	// missing" — the latter must stay an error.
+	noAPIKey bool
 }
 
 // mediaRetryPolicy returns the retry policy for billable creation calls.
@@ -42,12 +46,38 @@ func WithAPIKey(key string) Option {
 	return func(c *clientConfig) { c.apiKey = key }
 }
 
+// WithoutAPIKey declares that the endpoint needs no credential, so New and Wrap
+// accept an empty key instead of returning ErrNoAPIKey, and no credential header
+// is sent on any route — not Authorization, and not a vendor-specific header like
+// Anthropic's x-api-key (see provider.SetBearer).
+//
+// Use it for an unauthenticated endpoint you host yourself — a local runtime, an
+// internal gateway that authenticates by network position. The local-runtime
+// providers (Ollama, vLLM) already default to this, so passing it there is
+// redundant; it exists for Wrap and for custom base URLs.
+//
+// It is deliberately explicit rather than inferred from an empty key: a
+// credential that silently went missing (unset environment variable, typo in a
+// config key) would otherwise turn into unauthenticated requests to a real
+// vendor and a confusing 401 far from its cause.
+func WithoutAPIKey() Option {
+	return func(c *clientConfig) { c.noAPIKey = true }
+}
+
 // WithBaseURL points the client at a custom API root — a relay, a corporate
 // proxy, a regional endpoint, or a test server. Pass the API base without a
 // trailing slash, e.g. "https://api.deepseek.com/v1".
 //
 // Each provider documents the shape it expects on its NewWithBaseURL; the
 // common case is the same URL you would give any OpenAI-compatible client.
+//
+// DashScope and Volcengine are the exceptions, because one adapter serves two
+// unrelated upstream APIs: pass the host root, not an OpenAI base. The adapter
+// appends the vendor's compat path itself (DashScope's /compatible-mode/v1;
+// Volcengine's /api/v3 already is one) and keeps the native video endpoints on
+// the root. A DashScope base that already contains /compatible-mode is passed
+// through rather than doubled, so either form of the vendor's own URL works — but
+// a plain OpenAI-compatible relay URL is not a valid DashScope base.
 func WithBaseURL(url string) Option {
 	return func(c *clientConfig) { c.baseURL = url }
 }

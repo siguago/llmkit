@@ -108,10 +108,10 @@ func probeProvider(ctx context.Context, t target, opts probeOptions) report {
 	// confident-looking nonsense: every capability probe fails or gets
 	// misclassified as "not supported" when the real cause is a 401.
 	//
-	// Skipped for the video-only providers: their chat methods return
-	// ErrUnsupported by design, so preflighting with a chat call would abort the
-	// whole report over a capability they never claimed — including the video
-	// probes that are the only reason to run them.
+	// Skipped for an adapter covering only non-chat endpoints: its chat methods
+	// return ErrUnsupported by design, so preflighting with a chat call would
+	// abort the whole report over a capability it never claimed — including the
+	// probes that are the only reason to run it.
 	if client.SupportsChat() {
 		if err := preflight(ctx, client, model); err != nil {
 			rep.setupErr = err

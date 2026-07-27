@@ -163,7 +163,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		if err != nil {
 			return nil, err
 		}
-		httpReq.Header.Set("x-api-key", apiKey)
+		provider.SetKeyHeader(httpReq.Header, "x-api-key", apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 		resp, err := p.client.Do(httpReq)
@@ -218,7 +218,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 }
 
 func setHeaders(req *http.Request, apiKey string) {
-	req.Header.Set("x-api-key", apiKey)
+	provider.SetKeyHeader(req.Header, "x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
 }

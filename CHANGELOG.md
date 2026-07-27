@@ -33,6 +33,17 @@
 
 ### 新增
 
+**厂商从 13 家扩到 21 家，并补上 DashScope / Volcengine 缺失的对话能力。**
+
+- **`llmkit.DashScope` 和 `llmkit.Volcengine` 不再是「仅视频」。** 通义千问和豆包是国内调用量第一梯队，此前这两个 adapter 只接了视频端点，`Chat` / `ChatStream` 一律 `ErrUnsupported` —— 名单里有、却调不了对话。现在对话、模型列表、embeddings 走各家的 OpenAI 兼容端点（百炼 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频仍走原生异步任务端点。`SupportsChat()` 对这两家从 false 变 true，`NonChatProvider` 随之没有任何内建实现了（接口保留：下一个只接了单一端点的厂商还会用到）。
+- `llmkit.XAI`（Grok）、`llmkit.Mistral` —— 两家主流前沿模型此前完全缺席。
+- `llmkit.Groq` / `llmkit.Together` / `llmkit.Fireworks` / `llmkit.Cerebras` —— 托管开源权重模型的推理平台。
+- `compat.ChatOnly` —— 只接对话、不声明 embeddings 的 compat 包装。Go 的方法提升没法选择性关闭，内嵌 `compat.Provider` 就一定会把 `Embeddings` 提升上来，所以抽出这个类型专门用来「不提升」。哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewChatOnly` 改回 `compat.New` 即可。
+- `llmkit.Ollama` / `llmkit.VLLM` —— 本地与自建运行时。
+- `WithoutAPIKey()` + 本地运行时的免 key 构造 —— Ollama / vLLM 默认无鉴权，此前 `New` 一律要求凭据，本地部署根本构造不出 Client。现在这两家不给 key 也能构造，给了照发（vLLM 起了 `--api-key` 的情况）；其余厂商仍然缺 key 即 `ErrNoAPIKey` —— 对真实厂商来说空 key 是配置漏了，不是一种模式，静默放行只会换来一个离病因很远的 401。自建的无鉴权网关用 `WithoutAPIKey()` 显式声明。
+- 凭据为空时不再发凭据头。此前会发出字面量 `Bearer `，那不是一个有效凭据，挡在本地运行时前面的代理可能直接拒掉。统一走新增的 `provider.SetBearer` / `provider.SetKeyHeader`，覆盖每一条路由和每种头名（含 anthropic 的 `x-api-key`、gemini 的 `x-goog-api-key`），而不只是对话路由。
+- `llmkit.KeyOptional(name)` —— 问某家是否免 key 构造。导出的原因是包外工具需要它：`llmkit-probe` 的目标选择就是「这家配了 key 吗」，不导出就只能把名单硬编码一遍，或者干脆探测不了免 key 的那两家。
+
 - `IsSafeToReplay(err)` —— 判断重放会不会重复计费。与 `IsRetryable` 正交：前者问「会不会多花钱」，后者问「重试有没有戏」，两者都为真才会重放。
 - `WithMediaRetry(rc)` —— 单独设定媒体创建的重试策略。
 - `WithTransport(rt)` —— 替换底层 `http.RoundTripper`，用于自定义 TLS、连接池、埋点。你的 transport 在链路最底层：凭据头和调用方附加头已经加好、客户端 IP 头已经剥掉，才轮到它，所以埋点用的 transport 无法绕开隐私处理。
@@ -54,6 +65,22 @@
 - 单帧上限低于 64 KiB 时不生效：`bufio.Scanner` 的最大 token 取 `max(max, cap(buf))`，而初始缓冲固定 64 KiB。（fuzz 目标写出来后立刻暴露）
 - `Chat` / `ChatStream` / `Models` / `Embed` 漏了 `ErrUnsupported` 的归一化，adapter 抛出的 `provider.ErrUnsupported` 到调用方手里 `errors.Is(err, llmkit.ErrUnsupported)` 是 false —— 而 README 的错误处理示例正是这么写的。只有媒体路径做了翻译。
 - `probe` 会先用一次 chat 调用验活，对纯视频厂商必然失败，导致整份报告变成 setup 错误，连它们真正支持的视频能力都测不到；`-list` 还会给它们显示一个不存在的默认对话模型。
+- README 的「尚未覆盖」表还写着自定义 `Transport` 用不了，而同一份 README 上面就在演示 `WithTransport` —— 该行早已过时，删掉。
+- `WithoutAPIKey()` 承诺「不发凭据头」，但只有走 compat 的对话路由做到了。`openai.ListModels` / openai 图像 / openrouter / easyrouter / anthropic / gemini 仍无条件拼接凭据，于是这个选项的**主要用例**（内网无鉴权网关）一调 `Models()` 就发出畸形的 `Authorization: Bearer `。
+- `llmkit-probe` 探测不了 ollama / vllm：具名探测强制要求非空 key，无 key 直接退出；`-list` 也永远不给它们打标记。本次新增的两家免 key provider，恰好用不了仓库里唯一的实测工具。无参数的「探测全部」模式仍然跳过它们（没法知道本地服务是否起着），但按名字探测现在能用了，`-list` 用 `○` 标出免 key。
+- 集成测试的 `liveModels` 没跟着扩，8 家新 provider 全部落空 —— `liveModel()` 返回 `""`，`TestLive` 会带 `Model: ""` 发请求，再把上游的拒绝报成对话失败。同时 moonshot 的模型 ID 在 probe 那张表里已更新到 `kimi-k2.6`、在集成测试里还是下线了的 `kimi-k2-turbo-preview`。两张平行的表现在都补齐，并各有一条守卫测试。
+- `.env.example` 缺 8 个新厂商的环境变量名。`llmkit-probe` 从 `.env` 读 key，这里漏了直接卡住上手路径。
+- `mistral` adapter 的 `PrefillFieldName` 留空，注释还写着「Mistral 没有 prefill 字段」。实际上 Mistral 支持 assistant 消息上的 `prefix: true`（与 DeepSeek 同形），此前 `Message.Prefix` 被静默丢掉。
+- `render.go` 的注释说「没配 embedding 模型的 provider 报 N/A」，实际返回的是 SKIP —— 而 probe 的输出约定里 N/A 表示「厂商不支持，不是缺陷」、SKIP 表示「没尝试」，说反了方向。
+- **六家 provider 的 `SupportsEmbeddings()` 在说谎，全部改为不声明**（走 `compat.ChatOnly`）。逐家核对了厂商文档，原因各不相同：
+  - `xai` —— API 参考只有 chat / responses / deferred-completion，没有 embeddings 路由。
+  - `groq` —— API 参考有 chat / audio / models / batches / files / fine-tuning，没有 embeddings。
+  - `cerebras` —— 无 `/embeddings`，实测返回 404 而非 401。
+  - `moonshot` —— Kimi 开放平台只有 chat / models / tokenizers / balance / files，没有 embeddings 接口（`platform.kimi.ai` 的 API 总览与 `llms.txt` 索引都没有）。**这是既有 bug**，不是本次新增的厂商。
+  - `minimax` —— 路由存在但**不是 OpenAI 形状**：要 `GroupId` query 参数，请求体用 `texts` 而非 `input`，必填 `type`（`db`/`query`），响应是顶层 `vectors` 而不是 `data[].embedding`。compat 的 `Embeddings` 每个字段都会发错、解错，报出来像 SDK 坏了而不是像适配器没实现。**既有 bug。**
+  - `volcengine` —— 方舟的**文本** embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」，当前模型列表（2026-07-20 更新）只剩多模态 `doubao-embedding-vision-*`，服务在 `/api/v3/embeddings/multimodal`，`input` 是带 `type` 的对象数组而非字符串。本次刚把它从「仅视频」改成接 compat 时顺手把 embeddings 也带上了，是本次引入的。
+
+  minimax 和 volcengine 要真支持得手写方法，不是把方法提升上来就行。`dashscope` 的 embeddings 核对后确认可用（`/compatible-mode/v1/embeddings` + `text-embedding-v4`，标准 OpenAI 形状），保留。
 
 ### 测试
 
@@ -61,4 +88,8 @@
 - EasyRouter 的 live 测试补上 `integration` build tag（此前靠环境变量守卫，实际不会联网，但与仓库其余 live 测试的约定不一致）。
 - 新增 14 个 fuzz 目标，覆盖 SSE 帧解析、错误响应解析、多模态内容转换，CI 每次 PR 跑一轮短的，崩溃输入作为 artifact 上传。
 - 能力矩阵测试改为逐端点断言，并新增一条：能力探测的结果必须与实际调用行为一致。
+- 凭据头的两个方向都钉住了：`WithoutAPIKey()` 下 openai / anthropic / openrouter / gemini / deepseek 的 `Models()` 一个凭据头都不发；给了 key 则每条都照发。只测前者是不够的 —— 把空头压掉的同时压掉真头，测试一样绿。
+- `TestUntestedAdapters_*` 从 3 个 adapter 扩到 11 个，8 家新 provider 全部覆盖默认端点、路径拼接、错误透传与能力断言。默认端点是这种薄封装最容易错的地方：groq 在 `/openai/v1`、fireworks 在 `/inference/v1`，都不是 `/v1`。
+- 新增 `TestUntestedAdapters_Prefill`，双向断言：支持 prefill 的厂商必须收到字段，不支持的必须一个都收不到（多余的 key 会被严格的 compat 服务直接拒掉）。
+- 新增三条防漂移守卫：`TestLiveModelsCoverAllProviders`（集成测试模型表）、`TestChatModelsCoverAllProviders` 与 `TestEmbedModelsCoverEmbedders`（probe 的模型表）。最后一条是双向的：声明了 embeddings 就必须有探测模型或在 `embedModelUnknown` 里写明原因，没声明的也不许有多余条目 —— 否则「声明了能力但从没被探测过」就是 `SupportsEmbeddings()` 开始说谎的方式。
 - 新增覆盖全部 13 家 provider 的流策略测试（此前只测了 4 家）。写出来当场抓到一个自伤：`[DONE]` 哨兵和非 JSON 帧的过滤在四个 reader 里各写了一份，gemini 和 anthropic 那两份缺失，于是「流式改严格」把中转站补的 `data: [DONE]`、以及合法的空 `data:` 行也判成了厂商数据损坏。四份实现已收敛到 `provider.ClassifyFrame`。

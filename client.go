@@ -133,11 +133,11 @@ func (c *Client) Models(ctx context.Context) ([]RemoteModel, error) {
 // SupportsChat reports whether Chat / ChatStream / Say / StreamText work on this
 // provider.
 //
-// Almost always true — this SDK is a chat SDK. It is false for the two vendors
-// covered here only for video generation (DashScope, Volcengine), whose chat
-// methods exist to satisfy the provider interface and return ErrUnsupported.
-// Check it if you dispatch across providers by name, since those two cannot
-// serve a chat request at all.
+// True for every provider currently bundled — this SDK is a chat SDK. It exists
+// for adapters that cover a vendor's non-chat endpoints only (see
+// provider.NonChatProvider): their chat methods satisfy the interface and return
+// ErrUnsupported, which a type assertion alone cannot distinguish from a working
+// one. Check it if you dispatch across providers by name.
 func (c *Client) SupportsChat() bool {
 	_, nonChat := c.provider.(provider.NonChatProvider)
 	return !nonChat

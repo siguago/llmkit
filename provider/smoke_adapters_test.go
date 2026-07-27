@@ -11,15 +11,27 @@ import (
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
+	"github.com/siguago/llmkit/provider/cerebras"
+	"github.com/siguago/llmkit/provider/fireworks"
+	"github.com/siguago/llmkit/provider/groq"
 	"github.com/siguago/llmkit/provider/minimax"
+	"github.com/siguago/llmkit/provider/mistral"
+	"github.com/siguago/llmkit/provider/ollama"
 	"github.com/siguago/llmkit/provider/siliconflow"
+	"github.com/siguago/llmkit/provider/together"
 	"github.com/siguago/llmkit/provider/vercel"
+	"github.com/siguago/llmkit/provider/vllm"
+	"github.com/siguago/llmkit/provider/xai"
 )
 
-// These three adapters are thin compat wrappers and previously had no tests at
-// all. The wrapper itself is what can break — a wrong base-URL join, a dropped
-// prefill field name, a missing capability — so drive each one end to end
-// against a stub server.
+// These adapters are thin compat wrappers with no logic of their own to test in
+// isolation. The wrapper itself is what can break — a wrong base-URL join, a
+// dropped prefill field name, a capability it does not actually have — so drive
+// each one end to end against a stub server.
+//
+// Every new compat wrapper belongs in adapters() below. A default endpoint typo
+// sends requests to the wrong vendor or to no host at all, and nothing else in
+// the suite would notice.
 
 const smokeChatResponse = `{
 	"id":"c1","object":"chat.completion","model":"m",
@@ -55,6 +67,14 @@ func adapters(baseURL string) map[string]provider.Provider {
 		"minimax":     minimax.New(baseURL),
 		"siliconflow": siliconflow.New(baseURL),
 		"vercel":      vercel.New(baseURL),
+		"xai":         xai.New(baseURL),
+		"mistral":     mistral.New(baseURL),
+		"groq":        groq.New(baseURL),
+		"together":    together.New(baseURL),
+		"fireworks":   fireworks.New(baseURL),
+		"cerebras":    cerebras.New(baseURL),
+		"ollama":      ollama.New(baseURL),
+		"vllm":        vllm.New(baseURL),
 	}
 }
 
@@ -66,6 +86,14 @@ var chatPath = map[string]string{
 	"minimax":     "/chat/completions",
 	"siliconflow": "/chat/completions",
 	"vercel":      "/v1/chat/completions",
+	"xai":         "/chat/completions",
+	"mistral":     "/chat/completions",
+	"groq":        "/chat/completions",
+	"together":    "/chat/completions",
+	"fireworks":   "/chat/completions",
+	"cerebras":    "/chat/completions",
+	"ollama":      "/chat/completions",
+	"vllm":        "/chat/completions",
 }
 
 func TestUntestedAdapters_Chat(t *testing.T) {
@@ -182,18 +210,89 @@ func TestUntestedAdapters_ErrorsCarryStatusAndRetryAfter(t *testing.T) {
 	}
 }
 
+// prefillField is the JSON key each adapter uses to carry Message.Prefix, or ""
+// for a vendor with no prefill mechanism.
+//
+// Both directions matter. A vendor that supports prefill and gets "" silently
+// drops the caller's intent — the assistant just doesn't continue the text it was
+// handed. A vendor that doesn't support it and gets a field name has an unknown
+// key in its request body, which strict compat servers reject outright.
+var prefillField = map[string]string{
+	"mistral": "prefix", // same shape DeepSeek uses
+}
+
+func TestUntestedAdapters_Prefill(t *testing.T) {
+	yes := true
+	for name := range adapters("") {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, smokeChatResponse)
+			p := adapters(s.URL)[name]
+
+			_, err := p.ChatCompletion(context.Background(), "sk-test", "m",
+				&provider.ChatCompletionRequest{
+					Model: "m",
+					Messages: []provider.Message{
+						{Role: "user", Content: "count: 1, 2,"},
+						{Role: "assistant", Content: "3,", Prefix: &yes},
+					},
+				})
+			if err != nil {
+				t.Fatalf("ChatCompletion: %v", err)
+			}
+
+			msgs, ok := s.body["messages"].([]any)
+			if !ok || len(msgs) != 2 {
+				t.Fatalf("messages not forwarded: %+v", s.body)
+			}
+			assistant, ok := msgs[1].(map[string]any)
+			if !ok {
+				t.Fatalf("assistant message = %T", msgs[1])
+			}
+
+			field := prefillField[name]
+			if field == "" {
+				for k := range assistant {
+					if k == "prefix" || k == "partial" {
+						t.Errorf("%s sent a prefill field %q it has no support for: %+v", name, k, assistant)
+					}
+				}
+				return
+			}
+			if assistant[field] != true {
+				t.Errorf("%s dropped prefill: want %q=true, got %+v", name, field, assistant)
+			}
+		})
+	}
+}
+
 type smokeCaps struct{ models, embeddings, imageGen, imageEdit bool }
 
 func TestUntestedAdapters_Capabilities(t *testing.T) {
-	// All three ride the compat layer, so all three get models + embeddings.
-	// Only vercel adds images — and only generation: its gateway has no editing
-	// endpoint, so it must NOT satisfy provider.ImageEditor. Pinning imageEdit
-	// false is the regression guard against someone "completing" the interface
-	// with an ErrUnsupported stub, which would make the capability check lie.
+	// Riding the compat layer gets an adapter models + embeddings. Only vercel
+	// adds images — and only generation: its gateway has no editing endpoint, so
+	// it must NOT satisfy provider.ImageEditor. Pinning imageEdit false is the
+	// regression guard against someone "completing" the interface with an
+	// ErrUnsupported stub, which would make the capability check lie.
+	//
+	// xai / groq / cerebras / minimax report embeddings false on purpose: none has
+	// a usable OpenAI-shaped /embeddings route upstream, so they build on
+	// compat.ChatOnly, which withholds the promoted Embeddings method. MiniMax is
+	// the interesting one — it does have the route, but with `texts`/`type` instead
+	// of `input` and a `vectors` response, so compat would get every field wrong.
+	// This is the assertion that catches one of them being switched back to
+	// compat.New without the route actually being compatible.
 	want := map[string]smokeCaps{
-		"minimax":     {models: true, embeddings: true},
+		"minimax":     {models: true},
 		"siliconflow": {models: true, embeddings: true},
 		"vercel":      {models: true, embeddings: true, imageGen: true},
+		"mistral":     {models: true, embeddings: true},
+		"together":    {models: true, embeddings: true},
+		"fireworks":   {models: true, embeddings: true},
+		"ollama":      {models: true, embeddings: true},
+		"vllm":        {models: true, embeddings: true},
+		"xai":         {models: true},
+		"groq":        {models: true},
+		"cerebras":    {models: true},
 	}
 	for name, p := range adapters("") {
 		var got smokeCaps
@@ -213,6 +312,19 @@ var defaultChatURL = map[string]string{
 	"minimax":     "https://api.minimax.io/v1/chat/completions",
 	"siliconflow": "https://api.siliconflow.cn/v1/chat/completions",
 	"vercel":      "https://ai-gateway.vercel.sh/v1/chat/completions",
+	"xai":         "https://api.x.ai/v1/chat/completions",
+	"mistral":     "https://api.mistral.ai/v1/chat/completions",
+	// Not /v1: Groq and Fireworks each serve their OpenAI-compatible surface under
+	// a vendor-specific prefix, which is the single easiest thing to get wrong in a
+	// wrapper this thin.
+	"groq":      "https://api.groq.com/openai/v1/chat/completions",
+	"fireworks": "https://api.fireworks.ai/inference/v1/chat/completions",
+	"together":  "https://api.together.xyz/v1/chat/completions",
+	"cerebras":  "https://api.cerebras.ai/v1/chat/completions",
+	// Local runtimes: plain http, loopback. Nothing in the outbound path may
+	// upgrade the scheme or refuse the host.
+	"ollama": "http://localhost:11434/v1/chat/completions",
+	"vllm":   "http://localhost:8000/v1/chat/completions",
 }
 
 func TestUntestedAdapters_DefaultBaseURLs(t *testing.T) {

@@ -107,6 +107,58 @@ func TestResolveTargets_AllConfigured(t *testing.T) {
 	}
 }
 
+// A local runtime has no key to configure, so requiring one would make the two
+// providers that need none the only two this tool cannot probe.
+func TestResolveTargets_KeyOptionalProviderNeedsNoKey(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		t.Setenv(llmkit.EnvVar(name), "")
+	}
+
+	got, err := resolveTargets([]string{llmkit.Ollama}, "")
+	if err != nil {
+		t.Fatalf("resolveTargets(ollama) with no key = %v, want success", err)
+	}
+	if len(got) != 1 || got[0].provider != llmkit.Ollama || got[0].key != "" {
+		t.Errorf("got %+v", got)
+	}
+
+	// A key is still honored when the runtime sits behind an authenticating proxy.
+	t.Setenv("VLLM_API_KEY", "sk-local")
+	got, err = resolveTargets([]string{llmkit.VLLM}, "")
+	if err != nil {
+		t.Fatalf("resolveTargets(vllm): %v", err)
+	}
+	if got[0].key != "sk-local" {
+		t.Errorf("key = %q, want the configured one", got[0].key)
+	}
+}
+
+// The no-argument sweep must not reach for a local runtime: nothing says whether
+// one is up, so including it would make the bare command fail for everyone who
+// isn't running one.
+func TestResolveTargets_SweepSkipsKeyOptional(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		t.Setenv(llmkit.EnvVar(name), "")
+	}
+	t.Setenv("DEEPSEEK_API_KEY", "sk-d")
+	// Set even the optional keys, so exclusion is by policy and not by absence.
+	t.Setenv("OLLAMA_API_KEY", "sk-o")
+	t.Setenv("VLLM_API_KEY", "sk-v")
+
+	got, err := resolveTargets(nil, "")
+	if err != nil {
+		t.Fatalf("resolveTargets: %v", err)
+	}
+	for _, target := range got {
+		if llmkit.KeyOptional(target.provider) {
+			t.Errorf("sweep included %q, which must be probed only by name", target.provider)
+		}
+	}
+	if len(got) != 1 || got[0].provider != llmkit.DeepSeek {
+		t.Errorf("got %+v, want deepseek only", got)
+	}
+}
+
 func TestLoadEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
@@ -237,13 +289,53 @@ func TestSolidPNG(t *testing.T) {
 
 func testRed() color.Color { return color.RGBA{R: 220, G: 30, B: 30, A: 255} }
 
-// The two video-only providers must not be advertised as having a chat model,
-// and everyone else must be.
+// Every provider currently does chat — DashScope and Volcengine were the last
+// video-only pair and now delegate chat to their vendors' OpenAI-compatible
+// endpoints. The video-only branch in -list stays as the guard for whatever
+// non-chat adapter comes next; this test is what would catch one being added
+// without that branch being exercised.
 func TestProviderDoesChat(t *testing.T) {
-	videoOnly := map[string]bool{"dashscope": true, "volcengine": true}
+	videoOnly := map[string]bool{}
 	for _, name := range llmkit.Providers() {
 		if got, want := providerDoesChat(name), !videoOnly[name]; got != want {
 			t.Errorf("providerDoesChat(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// Every provider needs a default chat model, or `llmkit-probe <name>` opens with
+// a model-not-found that looks like a broken adapter.
+func TestChatModelsCoverAllProviders(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		if !providerDoesChat(name) {
+			continue
+		}
+		if defaultChatModel(name) == "" {
+			t.Errorf("chatModels has no entry for %q", name)
+		}
+	}
+}
+
+// A provider that claims embeddings must either have a default model to probe
+// with, or be recorded in embedModelUnknown with a reason. Neither means the
+// claim ships untested, which is how SupportsEmbeddings starts lying.
+func TestEmbedModelsCoverEmbedders(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		c, err := llmkit.New(name, llmkit.WithAPIKey("list-only-placeholder"))
+		if err != nil {
+			t.Fatalf("New(%s): %v", name, err)
+		}
+		if !c.SupportsEmbeddings() {
+			// The inverse also has to hold: a table entry for a provider that
+			// doesn't implement Embedder is dead weight that reads as coverage.
+			if defaultEmbedModel(name) != "" {
+				t.Errorf("embedModels has an entry for %q, which does not implement Embedder", name)
+			}
+			continue
+		}
+		if defaultEmbedModel(name) == "" && embedModelUnknown[name] == "" {
+			t.Errorf("%q claims embeddings but has no probe model — add one to embedModels, "+
+				"or record why not in embedModelUnknown", name)
 		}
 	}
 }

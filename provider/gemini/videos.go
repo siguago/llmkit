@@ -101,7 +101,7 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("x-goog-api-key", apiKey)
+	provider.SetKeyHeader(httpReq.Header, "x-goog-api-key", apiKey)
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, err

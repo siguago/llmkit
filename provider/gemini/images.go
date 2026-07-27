@@ -181,7 +181,7 @@ func (p *Provider) callGeminiJSON(ctx context.Context, apiKey, pathSegment strin
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", apiKey)
+	provider.SetKeyHeader(httpReq.Header, "x-goog-api-key", apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
