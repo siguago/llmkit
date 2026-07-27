@@ -8,7 +8,7 @@ const defaultBaseURL = "https://api.minimax.io/v1"
 // status codes. The legacy /v1/text/chatcompletion_v2 endpoint used a base_resp
 // in-body envelope, but we don't target that surface.
 //
-// Chat-only, and for a different reason than the vendors that simply lack the
+// No embeddings, and for a different reason than the vendors that simply lack the
 // route: MiniMax has /v1/embeddings, but it is not OpenAI-shaped. It wants a
 // GroupId query parameter, takes `texts` rather than `input`, requires a `type`
 // of "db" or "query", and answers with a top-level `vectors` array instead of
@@ -20,11 +20,11 @@ const defaultBaseURL = "https://api.minimax.io/v1"
 //
 // Pass an empty baseURL to use the international default; mainland China users
 // typically pass https://api.minimaxi.com/v1.
-func New(baseURL string) *compat.ChatOnly {
+func New(baseURL string) *compat.NoEmbeddings {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	return compat.NewChatOnly(compat.Config{
+	return compat.NewNoEmbeddings(compat.Config{
 		ProviderName: "minimax",
 		BaseURL:      baseURL,
 	})

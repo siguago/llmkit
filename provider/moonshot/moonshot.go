@@ -19,11 +19,11 @@ const defaultBaseURL = "https://api.moonshot.ai/v1"
 // (benefits all OpenAI-compatible providers), so this wrapper only handles
 // the request-side rewrite.
 //
-// It builds on compat.ChatOnly: the Kimi platform publishes chat completions,
+// It builds on compat.NoEmbeddings: the Kimi platform publishes chat completions,
 // models, tokenizers, balance and files, and no embeddings route at all, so
 // SupportsEmbeddings must not report true for a path that answers 404.
 type Provider struct {
-	*compat.ChatOnly
+	*compat.NoEmbeddings
 }
 
 // New constructs a Moonshot/Kimi provider. Pass an empty baseURL to use the
@@ -34,7 +34,7 @@ func New(baseURL string) *Provider {
 		baseURL = defaultBaseURL
 	}
 	return &Provider{
-		ChatOnly: compat.NewChatOnly(compat.Config{
+		NoEmbeddings: compat.NewNoEmbeddings(compat.Config{
 			ProviderName:     "moonshot",
 			BaseURL:          baseURL,
 			PrefillFieldName: "partial", // Kimi/Moonshot's assistant prefill key
@@ -102,9 +102,9 @@ func transform(model string, req *provider.ChatCompletionRequest) *provider.Chat
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
-	return p.ChatOnly.ChatCompletion(ctx, apiKey, model, transform(model, req))
+	return p.NoEmbeddings.ChatCompletion(ctx, apiKey, model, transform(model, req))
 }
 
 func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (provider.StreamReader, error) {
-	return p.ChatOnly.ChatCompletionStream(ctx, apiKey, model, transform(model, req))
+	return p.NoEmbeddings.ChatCompletionStream(ctx, apiKey, model, transform(model, req))
 }

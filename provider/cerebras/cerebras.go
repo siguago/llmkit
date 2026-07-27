@@ -9,18 +9,18 @@ const defaultBaseURL = "https://api.cerebras.ai/v1"
 // New constructs a Cerebras provider. Pass an empty baseURL to use the default
 // endpoint.
 //
-// Chat-only: Cerebras has no /embeddings endpoint — it answers 404, not 401 — so
-// SupportsEmbeddings reports false instead of promising a route that does not
-// exist. See compat.ChatOnly.
+// No embeddings: Cerebras has no /embeddings endpoint — it answers 404, not 401 —
+// so SupportsEmbeddings reports false instead of promising a route that does not
+// exist. See compat.NoEmbeddings.
 //
 // Known upstream constraints, forwarded rather than pre-empted so the caller
 // sees Cerebras's own error: frequency_penalty / presence_penalty / logit_bias
 // are rejected on most models.
-func New(baseURL string) *compat.ChatOnly {
+func New(baseURL string) *compat.NoEmbeddings {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	return compat.NewChatOnly(compat.Config{
+	return compat.NewNoEmbeddings(compat.Config{
 		ProviderName: "cerebras",
 		BaseURL:      baseURL,
 	})
