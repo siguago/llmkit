@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/siguago/llmkit)](https://goreportcard.com/report/github.com/siguago/llmkit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-一套 Go SDK，用同一套 OpenAI 兼容接口调用 13 家主流大模型厂商。**零第三方依赖**，只用标准库。
+一套 Go SDK，用同一套 OpenAI 兼容接口调用 21 家主流大模型厂商。**零第三方依赖**，只用标准库。
 
 ```go
 client, _ := llmkit.New(llmkit.DeepSeek)          // key 取自 DEEPSEEK_API_KEY
@@ -112,9 +112,13 @@ go get github.com/siguago/llmkit
 >
 > **volcengine 的 embeddings 不接，是因为语义对不上，不是因为字段名对不上。** 方舟的文本 embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」；当前在线的是多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，它的 `input` 是**一条内容的各个部分**（文本 / 图片 / 视频）融合成**一个**向量，响应的 `data` 是单个对象而不是数组。而 `Embed` 的契约是「N 条输入 → N 个向量，`Data[i]` 对应 `Input[i]`」。硬接就得把一次 `Embed` 扇出成 N 个 HTTP 请求 —— 100 个 chunk 变成 100 次计费。这种成本悬崖不该藏在一个回答「支持」的能力探测后面，所以如实回答不支持。多模态向量化值得单独一套接口（融合输入本来就是它的卖点），不该硬塞进这一个。
 >
-> **minimax 的 embeddings 是手写的，不是白拿的。** 它的路由同样不是 OpenAI 形状（要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp` 报错），但**批量语义是对得上的**（N 条进、N 个向量出、顺序一致），所以 adapter 里写了一层翻译。用法见下面「minimax embeddings」。
+> **minimax 的 embeddings 是手写的，不是白拿的。** 它的路由同样不是 OpenAI 形状（要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp` 报错），但**批量语义是对得上的**（N 条进、N 个向量出、顺序一致），所以 adapter 里写了一层翻译，用法见本节下面的「minimax embeddings」。
+>
+> **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
 >
 > 哪家上线了 OpenAI 形状的 embeddings，把它的 `New` 从 `compat.NewNoEmbeddings` 改回 `compat.New` 即可。
+>
+> **除 volcengine 外，视频任务一旦提交就无法中止**，会跑到终态并照常计费 —— 按这个前提设计调用方。
 
 #### minimax embeddings
 
@@ -131,11 +135,7 @@ resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
 })
 ```
 
-`Dimensions` 和 `EncodingFormat` 会**报错而不是被忽略** —— embo-01 的向量宽度固定，你要了 256 维却拿到 1536 维是察觉不到的。
->
-> **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
->
-> **除 volcengine 外，视频任务一旦提交就无法中止**，会跑到终态并照常计费 —— 按这个前提设计调用方。
+`Dimensions` 和 `EncodingFormat` 会**报错而不是被忽略** —— embo-01 的向量宽度固定，你要了 256 维却拿到 1536 维是察觉不到的。忘了嵌 `"minimax"` 那层 key 同样会报错，而不是静默按默认值发出去。
 
 ---
 
@@ -619,7 +619,8 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 | `provider/*` 适配层 | 41–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
 | `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/vercel` 图像部分 | 0% | 已知空白 |
-| `provider/{minimax,siliconflow}` | 见备注 | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包显示 0% |
+| `provider/siliconflow` | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0%。新增的 8 家薄封装同理 |
+| `provider/minimax` | 87% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
 
 总覆盖率 51%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
