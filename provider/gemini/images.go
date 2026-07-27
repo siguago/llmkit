@@ -168,8 +168,9 @@ func parseGeminiImageResponse(raw []byte, model string) (*provider.ImageGenerati
 	return resp, nil
 }
 
-// callGeminiJSON 是 POST application/json + ?key=APIKEY 的统一入口。
-// Gemini 用 query parameter 传 API key，不是 Bearer header。
+// callGeminiJSON 是 POST application/json 的统一入口。
+// Gemini 用 x-goog-api-key 头传 API key，不是 Bearer header，也不是（曾经的）
+// ?key= query parameter —— 凭据放在 URL 里会漏进日志和 Referer。
 func (p *Provider) callGeminiJSON(ctx context.Context, apiKey, pathSegment string, body any) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
