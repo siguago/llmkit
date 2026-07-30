@@ -2,9 +2,29 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## Unreleased
+## v0.2.0 — 2026-07-30
 
-这一轮针对的是「生产网关代码公开成 SDK」遗留的三类问题：花钱的调用被盲目重放、能力探测说谎、测试偷偷联网。
+这一轮针对的是「生产网关代码公开成 SDK」遗留的三类问题：花钱的调用被盲目重放、能力探测说谎、测试偷偷联网。同时厂商从 13 家扩到 21 家。
+
+### 从 v0.1.0 升级
+
+多数调用方不用改代码。按这张表自查，左列命中了才需要动：
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| 依赖 `GenerateImage` / `CreateVideo` 失败后自动重试 | 只重试能证明「上游没接活」的错误 | 要旧行为：`WithMediaRetry(llmkit.DefaultRetry())` |
+| 流式读取时依赖畸形帧被静默跳过 | 畸形帧直接让流失败 | 要旧行为：`WithStreamTolerance(llmkit.TolerateMalformedChunks)`，配 `WithLogger` 才看得到跳过记录 |
+| `SupportsImages()` / `SupportsVideo()` | 仍可用，已废弃 | 换成 `SupportsImageGeneration()` / `SupportsImageEditing()` / `SupportsVideoGeneration()` / `SupportsVideoCancellation()` |
+| `ImageGenerationRequest.Delivery`、`ImageEditRequest.Delivery` | **编译失败** | 删掉即可 —— 它本来就没有任何效果；读返回的 `MediaAsset` 判断拿到的是 URL 还是 base64 |
+| `provider.Registry` | **编译失败** | `llmkit.New(name)` / `llmkit.Providers()` |
+| `provider.FrameJSON` | **编译失败** | 改名为 `provider.FramePayload` |
+| 自己写的 adapter 调 `provider.NewStreamReader` | **编译失败** | 加 `ctx` 作首参 |
+| 依赖公共类型上的 `binding:"required"` tag | tag 没了 | 必填字段改看文档注释 |
+| Go 运行时低于 1.22 | 编译失败 | `go.mod` 声明的下限是 1.22，CI 有一个 1.22 的 job 守着 |
+
+**编译能过，就只剩三条行为变化需要留意**（媒体重试、流式严格、能力探测），而且每条都有一行开关能恢复旧行为。
+
+三条里最该确认的是第一条：如果你的代码依赖「图像/视频创建失败会自动重试」，现在它只在能证明上游根本没受理时才重放 —— 这正是它存在的理由（旧行为会重复计费），但如果你的上游有幂等保证、原本就靠重试兜底，需要显式把它调回来。
 
 ### 破坏性变更
 
@@ -114,3 +134,19 @@
 - **`internal/safehttp` 的 SSRF 拦截此前一行没测**（44.6% → 96.4%）。旧测试的三个用例全是纯函数（`isBlockedIP` / `ValidateImageBytes` / `schemeAllowed`），没有一条走过 `FetchImage`。也就是说「IP 黑名单判得对」有断言，而「黑名单真的接在了拨号路径上」没有 —— 那才是这个包存在的理由。判定函数全对但 `Dialer.Control` 没挂上去，旧测试一样全绿。新增的 `TestFetchImage_DialerBlocksLoopback` 对一个真实 `httptest` 监听器发起请求并断言 `ErrBlockedIP`，且刻意放开 scheme 限制，好让失败只可能来自 `Dialer.Control`。其余补齐：大小上限的两条路径（声明的 `Content-Length` 与 chunked 下的实际字节，含边界值恰好等于上限）、重定向跳数上限、https→http 的降级重定向、Content-Type 伪造、body 读取中断、请求构造失败。
 - **`provider/vercel` 从 0% 到 99%**，README 里挂了一轮的「已知空白」清掉。243 行手写的图像层此前完全没有断言：请求字段映射、`stream=true` 必须在发 HTTP 之前就被拒（否则就是为一次被丢弃的响应付费）、201 视同成功、`ProviderOptions` 只透传 `vercel` 命名空间且返回副本。同时补上 `vercel.go` 一侧的 `normalizeBaseURL`、`ListModels` 的过滤规则与 `vercelModelImportable` 的按计费方式分流。其中 `TestVercel_CapabilitySurface` 在运行期断言该类型**不**满足 `provider.ImageEditor` —— 它嵌了 `*compat.Provider`，将来给 compat 加一个 `EditImage` 会被自动提升上来，悄悄让 `SupportsImageEditing()` 开始说谎。
 - **`internal/logging` 0% → 100%。** 覆盖 ctx 往返、nil logger 不得覆盖已设值、零值 ctx 不得 panic、嵌套时内层优先，以及 discard 是共享单例（它在每个流式 chunk 上被查）。顺带钉住一处文档与实现的落差，**它现在正让一处真实的守卫失效**：`Enabled` 的注释说它可以用来「在默认静默路径上跳过构建昂贵的日志参数」，但 discard 用的是 `slog.NewTextHandler(io.Discard, nil)`，`nil` 选项把级别默认成 Info，于是 Info/Warn/Error 三档都返回 true。`provider.StreamDiagnostics.Malformed` 正是用这个条件守着它的 warn（注释写着「skip it when nothing is listening — which is the default」），而它的 logger 来自 `logging.From(ctx)`：没装调用方 logger 时那就是 discard，守卫恒为真，容错模式下每个畸形帧都会照跑一次 `TruncateForLog(payload, 200)` —— 正是注释声称省掉的那次拷贝。修法在 `internal/logging` 而不在调用点：discard 需要一个 `Enabled` 恒假的 handler（级别提到 Error 以上，或自定义一个；`slog.DiscardHandler` 可以但要 Go 1.24，而 `go.mod` 声明的是 1.22）。本轮只钉行为不改实现，测试注释里写明了修法与届时该翻哪半边断言。
+
+### 已知问题
+
+- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性；详见上面「测试」一节最后一条。
+- `provider/vercel` 不实现 `EditImage`：Vercel AI Gateway 没有图像编辑端点（厂商侧确认，2026-05）。`SupportsImageEditing()` 如实返回 false。
+- `provider/volcengine` 不实现 `Embeddings`：方舟现行端点是多模态融合向量，与 `Embed` 的「N 进 N 出」契约不是同一个操作。详见「修复」一节。
+
+---
+
+## v0.1.0 — 2026-07-25
+
+首个公开版本：13 家厂商的统一 Go SDK，零第三方依赖，只用标准库。
+
+对话 / 流式 / 模型列表 / embeddings / 图像 / 视频六类端点收在一套 OpenAI 兼容接口下，换厂商只改一个常量。
+
+> 这个版本存在上面 v0.2.0「破坏性变更」一节列出的全部问题 —— 尤其是**图像和视频创建失败后会盲目重放，可能重复计费**，以及能力探测会对实际调不通的端点回答「支持」。不建议继续使用。
