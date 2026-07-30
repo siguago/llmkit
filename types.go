@@ -93,6 +93,19 @@ type (
 	RemoteModel = provider.RemoteModel
 	// APIError is an error returned by an upstream vendor API.
 	APIError = provider.ProviderError
+	// ErrorCategory is a provider-independent classification for vendors whose
+	// API reports failures inside an HTTP 200 response body.
+	ErrorCategory = provider.ErrorCategory
+)
+
+// Provider-independent API error categories. Most adapters rely on HTTP status;
+// these values cover vendors that carry the actual failure in a response body.
+const (
+	ErrorCategoryAuth           = provider.ErrorCategoryAuth
+	ErrorCategoryRateLimit      = provider.ErrorCategoryRateLimit
+	ErrorCategoryInvalidRequest = provider.ErrorCategoryInvalidRequest
+	ErrorCategoryNotFound       = provider.ErrorCategoryNotFound
+	ErrorCategoryServer         = provider.ErrorCategoryServer
 )
 
 // Video job states. Use IsTerminalVideoStatus to test for completion.

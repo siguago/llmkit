@@ -112,13 +112,16 @@ func (d StreamDiagnostics) NewScanner(r io.Reader) *bufio.Scanner {
 type FrameKind int
 
 const (
-	// FrameJSON looks like a JSON object and should be unmarshalled. It is the
-	// only kind that can be malformed.
-	FrameJSON FrameKind = iota
+	// FramePayload is a non-empty protocol payload and must be unmarshalled.
+	// The name describes the wire contract rather than a pre-validation result:
+	// payloads that cannot be JSON at all still come here, so strict mode can
+	// report malformed vendor data instead of silently dropping it.
+	FramePayload FrameKind = iota
 	// FrameDone is the [DONE] sentinel: the stream is over.
 	FrameDone
-	// FrameSkip is a payload that was never meant to be parsed — an empty data
-	// line, a keep-alive, a non-JSON scalar. Skip it and read on.
+	// FrameSkip is a known benign relay payload that was never meant to produce
+	// a chunk: an empty data line, JSON null, a JSON blank string, or a relayed
+	// SSE comment.
 	FrameSkip
 )
 
@@ -126,21 +129,37 @@ const (
 //
 // Every adapter must run this before unmarshalling, so that "malformed" means
 // what it says: a frame that claims to be JSON and isn't. Without it a relay
-// appending OpenAI's [DONE] sentinel, or an empty `data:` line — both legal and
-// both common — would be reported as vendor corruption and fail the stream
+// appending OpenAI's [DONE] sentinel, or an empty/null `data:` line — all common
+// relay behavior — would be reported as vendor corruption and fail the stream
 // under the strict policy.
+//
+// Payloads beginning with ":" are relayed SSE comments. A comment line is
+// normally dropped by the reader before it gets here, but some relays repackage
+// it as `data: : ping` or `data: :ping` — per the SSE grammar the space after
+// the colon is optional, so both forms occur and both must be skipped. Matching
+// the leading colon rather than a list of known ping texts is what makes that
+// total: no JSON value can start with ":", so this cannot swallow real data, and
+// an allowlist of exact strings would keep failing streams over whichever
+// keep-alive wording was not on it.
+//
+// Everything else must reach json.Unmarshal. Classifying non-object text as a
+// keep-alive in general would let `data: garbage` bypass strict mode and
+// recreate the silent data loss this policy exists to prevent.
 //
 // This lives here rather than in each reader because it was open-coded in four
 // of them and two had drifted, which is exactly the bug it now prevents.
 func ClassifyFrame(data string) FrameKind {
-	switch {
-	case data == "[DONE]":
+	normalized := strings.TrimSpace(data)
+	switch normalized {
+	case "[DONE]":
 		return FrameDone
-	case strings.HasPrefix(data, "{"):
-		return FrameJSON
-	default:
+	case "", "null", `""`, `" "`:
 		return FrameSkip
 	}
+	if strings.HasPrefix(normalized, ":") {
+		return FrameSkip
+	}
+	return FramePayload
 }
 
 // Malformed reports a frame that could not be parsed.

@@ -15,9 +15,13 @@ const defaultBaseURL = "https://api.x.ai/v1"
 // compat.NoEmbeddings — if xAI ships embeddings, this becomes compat.New again.
 //
 // Grok's reasoning models read the standard `reasoning_effort` field, which the
-// compat layer already forwards. Live Search is a vendor extension carried on
-// the request as `search_parameters`; it is not a first-class field here, so
-// route it through ProviderOptions if you need it.
+// compat layer already forwards.
+//
+// This adapter targets the legacy-compatible /chat/completions surface and does
+// not expose xAI's current server-side Web/X Search tools. Those tools live on
+// the Responses API; ProviderOptions cannot enable them here (compat serializes
+// that field as Vercel's `providerOptions`, not xAI request parameters). Use
+// xAI's Responses API directly when server-side search is required.
 func New(baseURL string) *compat.NoEmbeddings {
 	if baseURL == "" {
 		baseURL = defaultBaseURL

@@ -31,6 +31,8 @@
 
 **`go.mod` 从 `go 1.25.6` 降到 `go 1.22`。** 1.22 是实测的真实下限（`examples/` 用到整数 range）。CI 增加一个 1.22 的构建 job，防止将来无意中抬高门槛。
 
+**`provider.FrameJSON` 改名为 `provider.FramePayload`。** 只影响自己写 adapter 的人（四个内建 reader 都只用 `FrameDone` / `FrameSkip`）。旧名字是错的：这个分支收的是「非空协议载荷」，包括根本不可能是 JSON 的字节 —— 正因为要让严格模式报出厂商数据损坏，而不是静默丢掉。名字暗示「已经验证过是 JSON」，会引导 adapter 作者跳过错误处理。
+
 ### 新增
 
 **厂商从 13 家扩到 21 家，并补上 DashScope / Volcengine 缺失的对话能力。**
@@ -55,6 +57,9 @@
 - `WithLogger(l)` —— 接收 SDK 的非致命诊断。**默认全静默**，库不该往宿主程序的日志里写东西。
 - `WithRequestID(fn)` / `WithRequestIDHeader(name)` —— 每个出站请求打一个自己的 ID（重试的每次尝试都是新 ID）。
 - `APIError.RequestID` —— 厂商自己生成的请求 ID，从响应头解析（认 `X-Request-Id`、`Request-Id`、`Cf-Ray` 等多种写法）。报障时厂商要的就是它，而且响应一旦丢弃就再也拿不回来。
+- `ProviderCode(err)` / `ErrorCategoryOf(err)` —— 保留厂商体内错误码，并将 HTTP 200 错误归一为 `auth` / `rate_limit` / `invalid_request` / `not_found` / `server`。元数据通过可解包错误附加，不改变稳定的 `APIError` / `provider.ProviderError` 结构；`StatusCode` 仍忠实返回真实 HTTP 状态，`IsAuthError` / `IsRateLimited` / `IsRetryable` 等辅助函数同时理解体内分类。
+  认不出的分类会被丢弃而不是照用。分类一旦非空就会短路掉 HTTP 状态判断，所以留着一个拼错的值（`ratelimit` 少个下划线）会让上游的 500 既不算服务器错误也不可重试 —— 一个字符串常量的笔误静默关掉重试，而 `ErrorCategory` 是 string 类型，编译器不会拦。厂商码仍然保留，`ProviderCode` 照常可用，分类交回 HTTP 状态。
+  写 adapter 的人要注意 `ErrorCategoryRateLimit` 比另外四类多带一层断言：它同时声明「上游在开始干活之前就拒了，没产生计费」，因为 `IsSafeToReplay` 会据此重放图像 / 视频创建 —— 那是真金白银。HTTP 429 自己就够格；一家返回 200 再在体内报限流的厂商不自动够格，除非厂商文档写明这种响应不计费。拿不准就别分类：留空则由 HTTP 状态决定，而 200 既不可重试也不可重放，是安全的那一侧。该约束写在常量的文档注释上。
 - `WithStreamTolerance(t)` / `WithMaxStreamFrameBytes(n)` —— 流式容错策略与单帧上限（默认仍是 1 MiB）。
 - `provider.ImageGenerator` / `ImageEditor` / `VideoCreator` / `VideoCanceller` —— 按端点切分的能力接口。`ImageProvider` / `VideoProvider` 保留为二者的组合。
 - `Client.SupportsChat()` 和 `provider.NonChatProvider` —— 加这两个东西的起因是：DashScope 和 Volcengine **当时**只接了视频端点，`Chat` / `ChatStream` 一律返回 `ErrUnsupported`，却无从事先探测（chat 在 `Provider` 接口上，类型断言分辨不出来），README 的能力表还给它们标了「Chat ✅」。本次这两家都接上了对话，所以 `NonChatProvider` 现在没有任何内建实现 —— 接口保留，下一个只接单一端点的厂商还会用到。
@@ -72,6 +77,11 @@
 - `probe` 会先用一次 chat 调用验活，对纯视频厂商必然失败，导致整份报告变成 setup 错误，连它们真正支持的视频能力都测不到；`-list` 还会给它们显示一个不存在的默认对话模型。
 - README 的「尚未覆盖」表还写着自定义 `Transport` 用不了，而同一份 README 上面就在演示 `WithTransport` —— 该行早已过时，删掉。
 - `WithoutAPIKey()` 承诺「不发凭据头」，但只有走 compat 的对话路由做到了。`openai.ListModels` / openai 图像 / openrouter / easyrouter / anthropic / gemini 仍无条件拼接凭据，于是这个选项的**主要用例**（内网无鉴权网关）一调 `Models()` 就发出畸形的 `Authorization: Bearer `。
+- `WithoutAPIKey()` 仍会回退读取环境变量，甚至会被后置的 `WithAPIKey` 填回凭据，导致真实厂商 key 被发送给原本声明无鉴权的内网网关。现在它是顺序无关的强抑制：环境变量和显式 key 都不会发送。这件事倒转了 Option 通常的「后者胜」读法，所以压掉一个**显式** `WithAPIKey` 时会经 `WithLogger` 报一条 warn（不含凭据本身）；环境变量被压掉不报，那是这个选项的主要用例，报了就是噪音。`New` 和 `Wrap` 两处的凭据判定也收敛到一个 `resolveCredential`：这里两个构造函数漂移就是凭据泄漏，不是风格不一致。
+- 严格流模式此前只尝试解析 `{` 开头的帧，`data: garbage` 会被当成 keep-alive 静默跳过。现在只跳过空帧 / `null` / 空字符串 / `[DONE]` / 被中继重包的 SSE 注释，其余非空 payload 都进入解析并按严格/容错策略处理。
+- MiniMax embeddings 的 `base_resp.status_code` 错误虽然会返回 `APIError`，但 HTTP 状态仍是 200，导致鉴权、限流和重试分类全部失效。现在同时保留真实 HTTP 状态、厂商错误码和归一分类。
+- 请求 ID 提取补上 Google 的 `X-Guploader-Uploadid`、OpenRouter 的 `X-Generation-Id` 与 MiniMax 的 `trace_id` / `Trace-Id` / `Minimax-Request-Id`，MiniMax 体内 `trace_id` 也作为响应头缺失时的兜底；同步修正 xAI Live Search 和 `VideoCanceller` 的失真注释。
+- 严格流模式继续拒绝未知非 JSON `data:`，但放行空白、`null`、`[DONE]` 和被中继重包成 `data:` 的 SSE 注释；避免修复 `data: garbage` 静默丢帧时，把 OpenRouter 的保活帧变成流中断。**放行条件是「载荷以 `:` 开头」，不是一张已知 ping 文案的白名单。** 白名单只认了 `: ping` 这种冒号后带空格的写法，而 SSE 语法里那个空格是可选的 —— `data: :ping` 同样合法且中继会发，却会被判成厂商数据损坏，在默认严格模式下中断整条流。改用前缀判断是完备的：合法 JSON 值不可能以 `:` 开头，所以放行注释不会吞掉真实数据，也不再让某家中继的保活措辞在不在名单上决定流能不能跑完。
 - `llmkit-probe` 探测不了 ollama / vllm：具名探测强制要求非空 key，无 key 直接退出；`-list` 也永远不给它们打标记。本次新增的两家免 key provider，恰好用不了仓库里唯一的实测工具。无参数的「探测全部」模式仍然跳过它们（没法知道本地服务是否起着），但按名字探测现在能用了，`-list` 用 `○` 标出免 key。
 - 集成测试的 `liveModels` 没跟着扩，8 家新 provider 全部落空 —— `liveModel()` 返回 `""`，`TestLive` 会带 `Model: ""` 发请求，再把上游的拒绝报成对话失败。同时 moonshot 的模型 ID 在 probe 那张表里已更新到 `kimi-k2.6`、在集成测试里还是下线了的 `kimi-k2-turbo-preview`。两张平行的表现在都补齐，并各有一条守卫测试。
 - `.env.example` 缺 8 个新厂商的环境变量名。`llmkit-probe` 从 `.env` 读 key，这里漏了直接卡住上手路径。
@@ -93,6 +103,10 @@
 - 新增 14 个 fuzz 目标，覆盖 SSE 帧解析、错误响应解析、多模态内容转换，CI 每次 PR 跑一轮短的，崩溃输入作为 artifact 上传。
 - 能力矩阵测试改为逐端点断言，并新增一条：能力探测的结果必须与实际调用行为一致。
 - 凭据头的两个方向都钉住了：`WithoutAPIKey()` 下 openai / anthropic / openrouter / gemini / deepseek 的 `Models()` 一个凭据头都不发；给了 key 则每条都照发。只测前者是不够的 —— 把空头压掉的同时压掉真头，测试一样绿。
+- 新增环境变量、显式 key 与 Option 正反顺序组合测试，保证 `WithoutAPIKey()` 始终强制不发凭据；新增非 JSON SSE 帧的严格/容错双向测试；新增 MiniMax 体内鉴权/限流错误穿过 Client 门面后的分类测试。
+- 凭据抑制的 warn 也是双向断言的：压掉显式 key 必须报出来、且日志里不能出现被压掉的凭据；压掉环境变量必须完全安静。
+- 被中继重包的 SSE 注释补上三条用例：冒号后无空格（`data: :ping`）、无空格且带文案（`data: :OPENROUTER PROCESSING`）、以及一条谁都没登记过的保活措辞。最后一条是防回归的重点 —— 它保证放行条件不会退回成一张文案白名单。
+- `minimaxErrorCategory` 的错误码表改成双向守卫。此前实现里 11 个 `invalid_request` 码只有 3 个进了测试表。`switch` 没法反射枚举，所以反向断言用扫码空间实现：任何被分类却没登记在 `classifiedCodes` 里的码都会让测试失败（已实测这条守卫抓得住）。
 - `TestUntestedAdapters_*` 从 3 个 adapter 扩到 11 个，8 家新 provider 全部覆盖默认端点、路径拼接、错误透传与能力断言。默认端点是这种薄封装最容易错的地方：groq 在 `/openai/v1`、fireworks 在 `/inference/v1`，都不是 `/v1`。
 - 新增 `TestUntestedAdapters_Prefill`，双向断言：支持 prefill 的厂商必须收到字段，不支持的必须一个都收不到（多余的 key 会被严格的 compat 服务直接拒掉）。
 - 新增三条防漂移守卫：`TestLiveModelsCoverAllProviders`（集成测试模型表）、`TestChatModelsCoverAllProviders` 与 `TestEmbedModelsCoverEmbedders`（probe 的模型表）。最后一条是双向的：声明了 embeddings 就必须有探测模型或在 `embedModelUnknown` 里写明原因，没声明的也不许有多余条目 —— 否则「声明了能力但从没被探测过」就是 `SupportsEmbeddings()` 开始说谎的方式。

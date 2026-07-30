@@ -220,11 +220,7 @@ func New(providerName string, opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.apiKey == "" {
-		if env := envVars[providerName]; env != "" {
-			cfg.apiKey = os.Getenv(env)
-		}
-	}
+	cfg.resolveCredential(providerName)
 	if cfg.apiKey == "" && !cfg.noAPIKey && !keyOptional[providerName] {
 		return nil, fmt.Errorf("%w: provider %q (env %s)", ErrNoAPIKey, providerName, envVars[providerName])
 	}
@@ -251,13 +247,42 @@ func Wrap(p provider.Provider, opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.apiKey == "" {
-		if env := envVars[p.Name()]; env != "" {
-			cfg.apiKey = os.Getenv(env)
-		}
-	}
+	cfg.resolveCredential(p.Name())
 	if cfg.apiKey == "" && !cfg.noAPIKey && !keyOptional[p.Name()] {
 		return nil, fmt.Errorf("%w: provider %q", ErrNoAPIKey, p.Name())
 	}
 	return &Client{name: p.Name(), provider: p, cfg: cfg}, nil
+}
+
+// resolveCredential applies the credential precedence New and Wrap share:
+// WithoutAPIKey suppresses every source, otherwise an explicit WithAPIKey wins
+// over the provider's conventional environment variable.
+//
+// It lives in one place because the two constructors drifting apart here would
+// be a credential leak rather than a cosmetic inconsistency.
+func (cfg *clientConfig) resolveCredential(providerName string) {
+	if !cfg.noAPIKey {
+		if cfg.apiKey == "" {
+			if env := envVars[providerName]; env != "" {
+				cfg.apiKey = os.Getenv(env)
+			}
+		}
+		return
+	}
+	// WithoutAPIKey is a suppression guarantee, not merely permission to
+	// construct with an empty key. It must dominate every credential source
+	// (including an ambient vendor key and WithAPIKey in either option order),
+	// otherwise pointing an adapter at an unauthenticated internal gateway can
+	// leak a real vendor credential to that gateway.
+	//
+	// Suppressing an *explicit* key is the one case worth reporting: it is the
+	// only one where the caller expressed two incompatible intents in the same
+	// call, and Option order — normally last-wins — does not decide it. An
+	// ambient environment key is this option's main use case, so reporting that
+	// would be noise. The credential itself is never logged.
+	if cfg.apiKey != "" && cfg.logger != nil {
+		cfg.logger.Warn("llmkit: WithoutAPIKey suppresses WithAPIKey; no credential will be sent",
+			"provider", providerName)
+	}
+	cfg.apiKey = ""
 }

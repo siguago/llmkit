@@ -251,7 +251,7 @@ resp, _ := client.Embed(ctx, &llmkit.EmbeddingRequest{Model: "BAAI/bge-m3", Inpu
 
 // 图像
 img, _ := client.GenerateImage(ctx, &llmkit.ImageRequest{
-    Model: "gpt-image-1", Prompt: "一只柴犬", Size: "1024x1024", Delivery: "inline",
+    Model: "gpt-image-1", Prompt: "一只柴犬", Size: "1024x1024",
 })
 
 // 视频（异步 job）
@@ -367,19 +367,30 @@ llmkit.WithMediaRetry(llmkit.DefaultRetry())   // 按通用策略重试，接受
 ## 错误处理
 
 ```go
-resp, err := client.Chat(ctx, req)
+_, err := client.Chat(ctx, req)
 switch {
 case err == nil:
-case llmkit.IsAuthError(err):        // 401 / 403
-case llmkit.IsRateLimited(err):      // 429，配合 llmkit.RetryAfter(err)
+case llmkit.IsAuthError(err):        // 401 / 403，或厂商体内鉴权错误
+case llmkit.IsRateLimited(err):      // 429 或厂商体内限流，配合 RetryAfter
 case llmkit.IsNotFound(err):         // 404，模型不存在
-case llmkit.IsInvalidRequest(err):   // 400 / 422
-case llmkit.IsServerError(err):      // 5xx
+case llmkit.IsInvalidRequest(err):   // 400 / 422，或等价厂商错误
+case llmkit.IsServerError(err):      // 5xx，或等价厂商错误
 case errors.Is(err, llmkit.ErrUnsupported):  // 该厂商没有这个能力
 }
 
-llmkit.StatusCode(err)   // 上游 HTTP 状态码，非 API 错误返回 0
-llmkit.RetryAfter(err)   // 上游要求的退避时长，秒数和 HTTP 日期两种格式都认
+log.Printf("status=%d retry_after=%s",
+    llmkit.StatusCode(err), // 上游 HTTP 状态码，非 API 错误返回 0
+    llmkit.RetryAfter(err), // 上游要求的退避时长
+)
+
+var apiErr *llmkit.APIError
+if errors.As(err, &apiErr) {
+    log.Printf("vendor_request_id=%s", apiErr.RequestID)
+}
+log.Printf("vendor_code=%s category=%s",
+    llmkit.ProviderCode(err),    // 例如 MiniMax base_resp.status_code
+    llmkit.ErrorCategoryOf(err), // auth / rate_limit / invalid_request / not_found / server
+)
 ```
 
 ---
@@ -474,6 +485,10 @@ func New(baseURL string) *compat.Provider {
 需要**格式转换的**：实现 `provider.Provider` 三个方法 + 自己的 `types.go` / `stream.go`。参考 [anthropic](provider/anthropic/)。
 
 可选能力按需实现 `ModelLister` / `Embedder` / `ImageProvider` / `VideoProvider`，Client 会自动探测。
+
+**如果这家在 HTTP 200 下报错**（国内厂商常见），用 `provider.WithErrorMetadata(err, 厂商码, 分类)` 附加元数据：`StatusCode` 仍忠实返回 200，而 `IsAuthError` / `IsRateLimited` / `IsRetryable` 会按你给的分类回答。参考 [minimax](provider/minimax/embeddings.go) 的 `base_resp` 处理。
+
+一个约束值得单独说：`ErrorCategoryRateLimit` 比另外四类多一层断言 —— 它同时声明**上游没开始干活、没产生计费**，因为 `IsSafeToReplay` 会据此重放图像 / 视频创建。HTTP 429 自己够格；「200 + 体内限流」不自动够格，除非厂商文档写明这种响应不计费。拿不准就传 `""`：留空则由 HTTP 状态决定，而 200 既不可重试也不可重放，是安全的那一侧。
 
 ---
 
@@ -613,14 +628,14 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
-| 门面层（根包） | 93% | |
+| 门面层（根包） | 94% | |
 | `internal/httpx` | 94% | |
 | `provider`（公共类型与流策略） | 75% | |
 | `provider/*` 适配层 | 41–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
 | `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/vercel` 图像部分 | 0% | 已知空白 |
 | `provider/siliconflow` | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0%。新增的 8 家薄封装同理 |
-| `provider/minimax` | 87% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
+| `provider/minimax` | 89% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
 
 总覆盖率 51%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 

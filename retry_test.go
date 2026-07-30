@@ -9,6 +9,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/siguago/llmkit/provider"
 )
 
 func apiErr(status int) error {
@@ -73,6 +75,66 @@ func TestErrorClassification(t *testing.T) {
 	}
 	if StatusCode(errors.New("plain")) != 0 {
 		t.Error("StatusCode should be 0 for non-API errors")
+	}
+}
+
+func TestBodyErrorClassificationPreservesHTTPStatus(t *testing.T) {
+	cases := []struct {
+		name       string
+		category   ErrorCategory
+		rateLimit  bool
+		auth       bool
+		notFound   bool
+		invalid    bool
+		server     bool
+		retryable  bool
+		replaySafe bool
+	}{
+		{"rate limit", ErrorCategoryRateLimit, true, false, false, false, false, true, true},
+		{"auth", ErrorCategoryAuth, false, true, false, false, false, false, false},
+		{"not found", ErrorCategoryNotFound, false, false, true, false, false, false, false},
+		{"invalid", ErrorCategoryInvalidRequest, false, false, false, true, false, false, false},
+		{"server", ErrorCategoryServer, false, false, false, false, true, true, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := provider.WithErrorMetadata(
+				&APIError{StatusCode: http.StatusOK, Message: "body error"},
+				"vendor-code",
+				tc.category,
+			)
+			if got := StatusCode(err); got != http.StatusOK {
+				t.Errorf("StatusCode = %d, want the real HTTP 200", got)
+			}
+			if got := ProviderCode(err); got != "vendor-code" {
+				t.Errorf("ProviderCode = %q, want vendor-code", got)
+			}
+			if got := ErrorCategoryOf(err); got != tc.category {
+				t.Errorf("ErrorCategoryOf = %q, want %q", got, tc.category)
+			}
+			if got := IsRateLimited(err); got != tc.rateLimit {
+				t.Errorf("IsRateLimited = %v, want %v", got, tc.rateLimit)
+			}
+			if got := IsAuthError(err); got != tc.auth {
+				t.Errorf("IsAuthError = %v, want %v", got, tc.auth)
+			}
+			if got := IsNotFound(err); got != tc.notFound {
+				t.Errorf("IsNotFound = %v, want %v", got, tc.notFound)
+			}
+			if got := IsInvalidRequest(err); got != tc.invalid {
+				t.Errorf("IsInvalidRequest = %v, want %v", got, tc.invalid)
+			}
+			if got := IsServerError(err); got != tc.server {
+				t.Errorf("IsServerError = %v, want %v", got, tc.server)
+			}
+			if got := IsRetryable(err); got != tc.retryable {
+				t.Errorf("IsRetryable = %v, want %v", got, tc.retryable)
+			}
+			if got := IsSafeToReplay(err); got != tc.replaySafe {
+				t.Errorf("IsSafeToReplay = %v, want %v", got, tc.replaySafe)
+			}
+		})
 	}
 }
 

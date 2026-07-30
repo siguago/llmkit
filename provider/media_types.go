@@ -213,9 +213,9 @@ type VideoCreator interface {
 	GetVideoJob(ctx context.Context, apiKey string, job *VideoJob) (*VideoJob, error)
 }
 
-// VideoCanceller 支持请求上游取消运行中的任务。目前没有任何内置 adapter 实现
-// 它 —— Gemini 和 OpenRouter 都没有取消端点。接口留在这里是为了让自定义
-// adapter 能声明该能力，也为了厂商补上端点时有位置可接。
+// VideoCanceller 支持请求上游取消运行中的任务。内置 adapter 中目前只有
+// Volcengine 实现；Gemini、DashScope、EasyRouter 和 OpenRouter 都没有取消
+// 端点。调用前可通过 Client.SupportsVideoCancellation 探测。
 type VideoCanceller interface {
 	Name() string
 	CancelVideoJob(ctx context.Context, apiKey string, job *VideoJob) (*VideoJob, error)

@@ -272,7 +272,16 @@ func TestAPIError_CarriesUpstreamRequestID(t *testing.T) {
 }
 
 func TestAPIError_RequestIDAlternateHeaders(t *testing.T) {
-	for _, header := range []string{"Request-Id", "Cf-Ray", "X-Amzn-Requestid"} {
+	for _, header := range []string{
+		"Request-Id",
+		"Cf-Ray",
+		"X-Amzn-Requestid",
+		"X-Guploader-Uploadid",
+		"X-Generation-Id",
+		"Minimax-Request-Id",
+		"trace_id",
+		"Trace-Id",
+	} {
 		t.Run(header, func(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set(header, "id-from-"+header)

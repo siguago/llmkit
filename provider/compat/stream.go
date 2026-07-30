@@ -68,7 +68,8 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		case provider.FrameDone:
 			return nil, io.EOF
 		case provider.FrameSkip:
-			// Keep-alives, blank pings, non-JSON scalars — never malformed.
+			// Blank frames and relayed SSE comments — never malformed. Unknown
+			// non-JSON data still reaches the strict/tolerant policy below.
 			continue
 		}
 

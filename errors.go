@@ -51,29 +51,62 @@ func StatusCode(err error) int {
 	return 0
 }
 
+func errorCategory(err error) ErrorCategory {
+	return provider.ErrorCategoryOf(err)
+}
+
+// ProviderCode returns the vendor's own error code, or "" when the error only
+// carries an HTTP status.
+func ProviderCode(err error) string { return provider.ProviderCode(err) }
+
+// ErrorCategoryOf returns a provider-independent classification attached to an
+// in-body vendor error, or "" when HTTP status is the classification source.
+func ErrorCategoryOf(err error) ErrorCategory { return provider.ErrorCategoryOf(err) }
+
 // IsRateLimited reports whether the upstream rejected the request for exceeding
-// a quota or rate limit (HTTP 429). Pair it with RetryAfter to back off.
-func IsRateLimited(err error) bool { return StatusCode(err) == http.StatusTooManyRequests }
+// a quota or rate limit (HTTP 429 or a provider body error with the same
+// meaning). Pair it with RetryAfter to back off.
+func IsRateLimited(err error) bool {
+	if category := errorCategory(err); category != "" {
+		return category == ErrorCategoryRateLimit
+	}
+	return StatusCode(err) == http.StatusTooManyRequests
+}
 
 // IsAuthError reports an invalid, expired, or insufficiently privileged
-// credential (HTTP 401 / 403). Retrying will not help.
+// credential (HTTP 401 / 403 or an equivalent provider body error). Retrying
+// will not help.
 func IsAuthError(err error) bool {
+	if category := errorCategory(err); category != "" {
+		return category == ErrorCategoryAuth
+	}
 	s := StatusCode(err)
 	return s == http.StatusUnauthorized || s == http.StatusForbidden
 }
 
 // IsNotFound reports that the model or resource does not exist (HTTP 404).
-func IsNotFound(err error) bool { return StatusCode(err) == http.StatusNotFound }
+func IsNotFound(err error) bool {
+	if category := errorCategory(err); category != "" {
+		return category == ErrorCategoryNotFound
+	}
+	return StatusCode(err) == http.StatusNotFound
+}
 
 // IsInvalidRequest reports a malformed or rejected request (HTTP 400 / 422) —
 // e.g. an unsupported parameter for the chosen model. Retrying will not help.
 func IsInvalidRequest(err error) bool {
+	if category := errorCategory(err); category != "" {
+		return category == ErrorCategoryInvalidRequest
+	}
 	s := StatusCode(err)
 	return s == http.StatusBadRequest || s == http.StatusUnprocessableEntity
 }
 
 // IsServerError reports an upstream-side failure (HTTP 5xx).
 func IsServerError(err error) bool {
+	if category := errorCategory(err); category != "" {
+		return category == ErrorCategoryServer
+	}
 	s := StatusCode(err)
 	return s >= 500 && s <= 599
 }
@@ -130,6 +163,14 @@ func IsRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if category := errorCategory(err); category != "" {
+		switch category {
+		case ErrorCategoryRateLimit, ErrorCategoryServer:
+			return true
+		default:
+			return false
+		}
+	}
 	if status := StatusCode(err); status != 0 {
 		switch {
 		case status == http.StatusTooManyRequests, // 429 rate limited
@@ -173,6 +214,14 @@ func IsSafeToReplay(err error) bool {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	if category := errorCategory(err); category != "" {
+		// A rate-limit decision explicitly refused the work; other categorized
+		// failures may have happened after the operation was accepted. Adapters
+		// must only attach ErrorCategoryRateLimit when nothing billable ran —
+		// that requirement is documented on the constant, because this is the
+		// line where getting it wrong bills the caller twice.
+		return category == ErrorCategoryRateLimit
 	}
 	if status := StatusCode(err); status != 0 {
 		// A status code means the request was delivered and the vendor answered.

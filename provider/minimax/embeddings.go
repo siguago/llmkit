@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/siguago/llmkit/provider"
 )
@@ -141,6 +142,7 @@ func (p *Provider) Embeddings(ctx context.Context, apiKey, model string, req *pr
 type minimaxEmbeddingResponse struct {
 	Vectors     [][]any `json:"vectors"`
 	TotalTokens int     `json:"total_tokens"`
+	TraceID     string  `json:"trace_id"`
 	BaseResp    *struct {
 		StatusCode int    `json:"status_code"`
 		StatusMsg  string `json:"status_msg"`
@@ -166,11 +168,27 @@ func parseEmbeddings(resp *http.Response, body []byte, model string, wantN int) 
 		if msg == "" {
 			msg = "unknown error"
 		}
-		return nil, &provider.ProviderError{
+		requestID := provider.RequestIDFromHeader(resp.Header)
+		if requestID == "" {
+			// Some MiniMax surfaces put trace_id in the JSON envelope rather
+			// than (or in addition to) the response header.
+			requestID = out.TraceID
+		}
+		apiErr := &provider.ProviderError{
+			// Preserve the real HTTP status for observability while carrying the
+			// body metadata separately. MiniMax commonly returns 200 for auth,
+			// rate-limit and server failures; replacing 200 with a synthetic
+			// status would make StatusCode lie.
 			StatusCode: resp.StatusCode,
 			Message:    fmt.Sprintf("minimax api error (base_resp %d): %s", out.BaseResp.StatusCode, msg),
-			RequestID:  provider.RequestIDFromHeader(resp.Header),
+			RetryAfter: resp.Header.Get("Retry-After"),
+			RequestID:  requestID,
 		}
+		return nil, provider.WithErrorMetadata(
+			apiErr,
+			strconv.Itoa(out.BaseResp.StatusCode),
+			minimaxErrorCategory(out.BaseResp.StatusCode),
+		)
 	}
 	if len(out.Vectors) != wantN {
 		return nil, fmt.Errorf("minimax embeddings: got %d vectors for %d inputs", len(out.Vectors), wantN)
@@ -188,6 +206,26 @@ func parseEmbeddings(resp *http.Response, body []byte, model string, wantN int) 
 		Model:  model,
 		Usage:  usage,
 	}, nil
+}
+
+// minimaxErrorCategory maps stable, documented base_resp codes to the common
+// error semantics exposed by llmkit. Unknown codes deliberately stay
+// unclassified: guessing that a new vendor code is retryable can amplify an
+// invalid request, while provider.ProviderCode and the message still reach
+// callers.
+func minimaxErrorCategory(code int) provider.ErrorCategory {
+	switch code {
+	case 1004, 2038, 2042, 2049:
+		return provider.ErrorCategoryAuth
+	case 1002, 1041, 2045:
+		return provider.ErrorCategoryRateLimit
+	case 1000, 1001, 1013, 1024, 1033:
+		return provider.ErrorCategoryServer
+	case 1026, 1027, 1039, 1042, 1043, 1044, 2013, 20132, 2037, 2039, 2048:
+		return provider.ErrorCategoryInvalidRequest
+	default:
+		return ""
+	}
 }
 
 // inputTexts narrows the unified Input to the []string MiniMax accepts.

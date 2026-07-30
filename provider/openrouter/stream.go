@@ -43,9 +43,10 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		if line == "" {
 			continue
 		}
-		// OpenRouter occasionally injects keep-alive comment lines; data: " " or
-		// data: : ping. The "[DONE]" sentinel and any non-JSON payload after the
-		// prefix should not panic the decoder. Accept both "data: foo" and
+		// OpenRouter injects SSE comment keep-alives, which the default branch
+		// below ignores. Some relays repackage them as data: " " or data: : ping;
+		// ClassifyFrame skips relayed comments while leaving unknown non-JSON
+		// data to the strict/tolerant policy. Accept both "data: foo" and
 		// "data:foo" to tolerate proxies that strip the optional space.
 		var data string
 		switch {

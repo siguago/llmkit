@@ -1,10 +1,13 @@
 package llmkit
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/siguago/llmkit/provider/compat"
@@ -44,6 +47,98 @@ func TestWithoutAPIKey_AllowsAnyProvider(t *testing.T) {
 	if _, err := Wrap(p, WithoutAPIKey()); err != nil {
 		t.Errorf("Wrap(custom, WithoutAPIKey()) = %v, want success", err)
 	}
+}
+
+// WithoutAPIKey is a suppression guarantee, not only an escape hatch for a
+// missing credential. An ambient vendor key is common in development and CI; if
+// a caller points the adapter at an unauthenticated internal gateway, that key
+// must never follow the request there. The explicit option must dominate
+// WithAPIKey in either order as well, so refactoring option assembly cannot turn
+// credential suppression back on accidentally.
+func TestWithoutAPIKey_DominatesEveryCredentialSource(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-ambient-secret")
+
+	cases := []struct {
+		name  string
+		build func(string) (*Client, error)
+	}{
+		{"New/ambient", func(baseURL string) (*Client, error) {
+			return New(OpenAI, WithoutAPIKey(), WithBaseURL(baseURL))
+		}},
+		{"New/explicit-before", func(baseURL string) (*Client, error) {
+			return New(OpenAI, WithAPIKey("sk-explicit-secret"), WithoutAPIKey(), WithBaseURL(baseURL))
+		}},
+		{"New/explicit-after", func(baseURL string) (*Client, error) {
+			return New(OpenAI, WithoutAPIKey(), WithAPIKey("sk-explicit-secret"), WithBaseURL(baseURL))
+		}},
+		{"Wrap/ambient", func(baseURL string) (*Client, error) {
+			p := compat.New(compat.Config{ProviderName: OpenAI, BaseURL: baseURL})
+			return Wrap(p, WithoutAPIKey())
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := make(chan bool, 1)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, present := r.Header[http.CanonicalHeaderKey("Authorization")]
+				seen <- present
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			}))
+			defer ts.Close()
+
+			c, err := tc.build(ts.URL)
+			if err != nil {
+				t.Fatalf("construct client: %v", err)
+			}
+			if _, err := c.Models(context.Background()); err != nil {
+				t.Fatalf("Models: %v", err)
+			}
+			if <-seen {
+				t.Error("WithoutAPIKey sent an Authorization header")
+			}
+		})
+	}
+}
+
+// Suppression wins over an explicit WithAPIKey, which inverts the usual
+// last-option-wins reading. Doing that silently is a trap, so it is reported —
+// and the report must never contain the credential it just dropped.
+func TestWithoutAPIKey_ReportsSuppressedExplicitKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-ambient-secret")
+
+	newLogger := func() (*slog.Logger, *bytes.Buffer) {
+		var buf bytes.Buffer
+		return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), &buf
+	}
+
+	t.Run("explicit key is reported", func(t *testing.T) {
+		logger, buf := newLogger()
+		if _, err := New(OpenAI, WithAPIKey("sk-explicit-secret"), WithoutAPIKey(), WithLogger(logger)); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "WithoutAPIKey") {
+			t.Errorf("log = %q, want a warning naming WithoutAPIKey", out)
+		}
+		if strings.Contains(out, "sk-explicit-secret") {
+			t.Errorf("log leaked the suppressed credential: %q", out)
+		}
+	})
+
+	// The ambient-key case is this option's main use case — pointing an adapter
+	// at an unauthenticated gateway from a machine that happens to have vendor
+	// keys exported. Warning there would fire on every correct use.
+	t.Run("ambient key stays quiet", func(t *testing.T) {
+		logger, buf := newLogger()
+		if _, err := New(OpenAI, WithoutAPIKey(), WithLogger(logger)); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if out := buf.String(); out != "" {
+			t.Errorf("log = %q, want silence for an ambient key", out)
+		}
+	})
 }
 
 // KeyOptional is what lets tooling gate on "is this provider reachable" without

@@ -50,6 +50,11 @@ func WithAPIKey(key string) Option {
 // accept an empty key instead of returning ErrNoAPIKey, and no credential header
 // is sent on any route — not Authorization, and not a vendor-specific header like
 // Anthropic's x-api-key (see provider.SetBearer).
+// It suppresses both environment credentials and WithAPIKey, regardless of
+// option order; do not combine them unless suppression is intentionally the
+// final policy. Because that overrides the usual last-option-wins rule,
+// suppressing an explicit WithAPIKey is reported through WithLogger — silently
+// dropping a credential the caller just passed is too easy to misread.
 //
 // Use it for an unauthenticated endpoint you host yourself — a local runtime, an
 // internal gateway that authenticates by network position. The local-runtime

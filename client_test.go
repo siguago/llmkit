@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -550,6 +551,56 @@ func TestEmbed_MiniMaxDocumentedExample(t *testing.T) {
 	}
 	if resp.Usage == nil || resp.Usage.TotalTokens != 6 {
 		t.Errorf("usage = %+v", resp.Usage)
+	}
+}
+
+// Exercise the whole seam: MiniMax's hand-written adapter creates a categorized
+// HTTP-200 error, Client.Embed preserves it, and the root helpers consume the
+// category. Unit-testing the mapper and helpers separately would not catch the
+// adapter forgetting to attach the category.
+func TestEmbed_MiniMaxInBodyErrorClassification(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        int
+		wantAuth    bool
+		wantLimited bool
+		wantRetry   bool
+	}{
+		{"auth", 1004, true, false, false},
+		{"rate limit", 1002, false, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClientFor(t, MiniMax, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"base_resp":{"status_code":`+
+					fmt.Sprint(tc.code)+`,"status_msg":"vendor failure"}}`)
+			}, WithRetry(NoRetry()))
+
+			_, err := c.Embed(context.Background(), &EmbeddingRequest{Model: "embo-01", Input: "x"})
+			if err == nil {
+				t.Fatal("Embed returned nil error")
+			}
+			if got := StatusCode(err); got != http.StatusOK {
+				t.Errorf("StatusCode = %d, want real HTTP 200", got)
+			}
+			if got := IsAuthError(err); got != tc.wantAuth {
+				t.Errorf("IsAuthError = %v, want %v", got, tc.wantAuth)
+			}
+			if got := IsRateLimited(err); got != tc.wantLimited {
+				t.Errorf("IsRateLimited = %v, want %v", got, tc.wantLimited)
+			}
+			if got := IsRetryable(err); got != tc.wantRetry {
+				t.Errorf("IsRetryable = %v, want %v", got, tc.wantRetry)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Errorf("err = %v, want wrapped APIError", err)
+			}
+			if got := ProviderCode(err); got != fmt.Sprint(tc.code) {
+				t.Errorf("ProviderCode = %q, want %d", got, tc.code)
+			}
+		})
 	}
 }
 

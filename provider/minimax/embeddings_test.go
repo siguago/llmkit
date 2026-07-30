@@ -22,6 +22,7 @@ type embedStub struct {
 	body    map[string]any
 	status  int
 	replies string
+	headers http.Header
 }
 
 func newEmbedStub(t *testing.T, reply string) *embedStub {
@@ -35,6 +36,11 @@ func newEmbedStub(t *testing.T, reply string) *embedStub {
 			_ = json.Unmarshal(raw, &s.body)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		for name, values := range s.headers {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
 		w.WriteHeader(s.status)
 		_, _ = io.WriteString(w, s.replies)
 	}))
@@ -260,7 +266,11 @@ func TestEmbeddings_GroupIDOnlyWhenSupplied(t *testing.T) {
 // MiniMax reports failure in the body under HTTP 200. Treating that as success
 // would hand back an empty vector list as if the call had worked.
 func TestEmbeddings_InBodyErrorUnderHTTP200(t *testing.T) {
-	s := newEmbedStub(t, `{"base_resp":{"status_code":1004,"status_msg":"invalid api key"}}`)
+	s := newEmbedStub(t, `{"trace_id":"body-trace","base_resp":{"status_code":1004,"status_msg":"invalid api key"}}`)
+	s.headers = http.Header{
+		"Retry-After": {"17"},
+		"trace_id":    {"header-trace"},
+	}
 
 	_, err := New(s.URL).Embeddings(context.Background(), "sk-test", "embo-01",
 		&provider.EmbeddingRequest{Input: "x"})
@@ -273,6 +283,101 @@ func TestEmbeddings_InBodyErrorUnderHTTP200(t *testing.T) {
 	}
 	if !strings.Contains(apiErr.Message, "1004") || !strings.Contains(apiErr.Message, "invalid api key") {
 		t.Errorf("message = %q, want the upstream code and text", apiErr.Message)
+	}
+	if apiErr.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want the real HTTP 200", apiErr.StatusCode)
+	}
+	if got := provider.ProviderCode(err); got != "1004" {
+		t.Errorf("ProviderCode = %q, want 1004", got)
+	}
+	if got := provider.ErrorCategoryOf(err); got != provider.ErrorCategoryAuth {
+		t.Errorf("Category = %q, want auth", got)
+	}
+	if apiErr.RetryAfter != "17" {
+		t.Errorf("RetryAfter = %q, want 17", apiErr.RetryAfter)
+	}
+	if apiErr.RequestID != "header-trace" {
+		t.Errorf("RequestID = %q, want header-trace", apiErr.RequestID)
+	}
+}
+
+func TestEmbeddings_InBodyErrorUsesBodyTraceIDFallback(t *testing.T) {
+	s := newEmbedStub(t, `{"trace_id":"body-trace","base_resp":{"status_code":1004}}`)
+
+	_, err := New(s.URL).Embeddings(context.Background(), "sk-test", "embo-01",
+		&provider.EmbeddingRequest{Input: "x"})
+	var apiErr *provider.ProviderError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if apiErr.RequestID != "body-trace" {
+		t.Errorf("RequestID = %q, want body-trace", apiErr.RequestID)
+	}
+}
+
+// classifiedCodes mirrors every base_resp code minimaxErrorCategory maps. The
+// two tests below read it in both directions, so a code added to the
+// implementation without being listed here fails rather than shipping untested —
+// the same drift guard this repo uses for the probe and integration model tables.
+var classifiedCodes = map[int]provider.ErrorCategory{
+	1004:  provider.ErrorCategoryAuth,
+	2038:  provider.ErrorCategoryAuth,
+	2042:  provider.ErrorCategoryAuth,
+	2049:  provider.ErrorCategoryAuth,
+	1002:  provider.ErrorCategoryRateLimit,
+	1041:  provider.ErrorCategoryRateLimit,
+	2045:  provider.ErrorCategoryRateLimit,
+	1000:  provider.ErrorCategoryServer,
+	1001:  provider.ErrorCategoryServer,
+	1013:  provider.ErrorCategoryServer,
+	1024:  provider.ErrorCategoryServer,
+	1033:  provider.ErrorCategoryServer,
+	1026:  provider.ErrorCategoryInvalidRequest,
+	1027:  provider.ErrorCategoryInvalidRequest,
+	1039:  provider.ErrorCategoryInvalidRequest,
+	1042:  provider.ErrorCategoryInvalidRequest,
+	1043:  provider.ErrorCategoryInvalidRequest,
+	1044:  provider.ErrorCategoryInvalidRequest,
+	2013:  provider.ErrorCategoryInvalidRequest,
+	20132: provider.ErrorCategoryInvalidRequest,
+	2037:  provider.ErrorCategoryInvalidRequest,
+	2039:  provider.ErrorCategoryInvalidRequest,
+	2048:  provider.ErrorCategoryInvalidRequest,
+}
+
+func TestMiniMaxErrorCategory(t *testing.T) {
+	for code, want := range classifiedCodes {
+		if got := minimaxErrorCategory(code); got != want {
+			t.Errorf("minimaxErrorCategory(%d) = %q, want %q", code, got, want)
+		}
+	}
+	// Codes left unclassified on purpose. 1008 (insufficient balance) is
+	// documented and terminal, but none of the five categories means "out of
+	// money"; an unclassified error falls back to the HTTP status, and a 200
+	// body error is then neither retryable nor replay-safe — the safe answer.
+	for _, code := range []int{1008, 2056, 999999} {
+		if got := minimaxErrorCategory(code); got != "" {
+			t.Errorf("minimaxErrorCategory(%d) = %q, want unclassified", code, got)
+		}
+	}
+}
+
+// The reverse direction. minimaxErrorCategory is a switch, so there is nothing
+// to enumerate reflectively — scan the plausible code space instead. MiniMax's
+// codes are four to five digits; 100k switch evaluations cost microseconds.
+func TestMiniMaxErrorCategoryTableIsExhaustive(t *testing.T) {
+	for code := 0; code <= 100000; code++ {
+		got := minimaxErrorCategory(code)
+		if got == "" {
+			continue
+		}
+		want, listed := classifiedCodes[code]
+		switch {
+		case !listed:
+			t.Errorf("minimaxErrorCategory(%d) = %q but that code is missing from classifiedCodes", code, got)
+		case got != want:
+			t.Errorf("minimaxErrorCategory(%d) = %q, want %q", code, got, want)
+		}
 	}
 }
 

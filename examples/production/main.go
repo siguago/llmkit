@@ -260,6 +260,12 @@ func report(err error) []any {
 	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
 		attrs = append(attrs, "vendor_request_id", apiErr.RequestID)
 	}
+	if code := llmkit.ProviderCode(err); code != "" {
+		attrs = append(attrs, "vendor_error_code", code)
+	}
+	if category := llmkit.ErrorCategoryOf(err); category != "" {
+		attrs = append(attrs, "error_category", category)
+	}
 	if code := llmkit.StatusCode(err); code != 0 {
 		attrs = append(attrs, "status", code)
 	}

@@ -72,6 +72,54 @@ func TestStream_StrictByDefault(t *testing.T) {
 	}
 }
 
+// Strictness must cover the whole data protocol, not only payloads that happen
+// to start with "{". Otherwise a corrupted frame that lost its opening byte —
+// or plain garbage emitted by a relay — is silently classified as a keep-alive,
+// recreating the incomplete-but-apparently-successful response strict mode was
+// introduced to prevent.
+func TestStream_StrictRejectsNonJSONDataPayload(t *testing.T) {
+	const garbage = "data: garbage-from-upstream"
+
+	t.Run("strict", func(t *testing.T) {
+		c := newTestClient(t, sseHandler(sseBody(goodFrame1, garbage, goodFrame2, "data: [DONE]")))
+		stream, err := c.ChatStream(context.Background(), &ChatRequest{
+			Model: "test-model", Messages: []Message{User("hi")},
+		})
+		if err != nil {
+			t.Fatalf("ChatStream: %v", err)
+		}
+		defer stream.Close()
+
+		text, err := drain(t, stream)
+		if err == nil || errors.Is(err, io.EOF) {
+			t.Fatalf("stream ended cleanly despite non-JSON data; text = %q", text)
+		}
+		if text != "he" {
+			t.Errorf("text before malformed data = %q, want he", text)
+		}
+	})
+
+	t.Run("tolerant", func(t *testing.T) {
+		c := newTestClient(t, sseHandler(sseBody(goodFrame1, garbage, goodFrame2, "data: [DONE]")),
+			WithStreamTolerance(TolerateMalformedChunks))
+		stream, err := c.ChatStream(context.Background(), &ChatRequest{
+			Model: "test-model", Messages: []Message{User("hi")},
+		})
+		if err != nil {
+			t.Fatalf("ChatStream: %v", err)
+		}
+		defer stream.Close()
+
+		text, err := drain(t, stream)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("tolerant stream ended with %v, want EOF", err)
+		}
+		if text != "hello" {
+			t.Errorf("text = %q, want hello", text)
+		}
+	})
+}
+
 // The error must not leak the raw frame: callers forward SDK errors into their
 // own logs and user-facing messages, and a vendor frame can carry prompt or
 // completion content.
@@ -305,6 +353,23 @@ func TestStream_BenignRelayFramesAcrossAdapters(t *testing.T) {
 			"data: \n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
 		{"openrouter/empty data line", OpenRouter,
 			"data: \n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		{"openrouter/spec comment", OpenRouter,
+			": OPENROUTER PROCESSING\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		{"openrouter/relayed data ping", OpenRouter,
+			"data: : ping\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		{"openrouter/quoted whitespace ping", OpenRouter,
+			"data: \" \"\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		// The space after an SSE comment's colon is optional, so a relay
+		// repackaging one emits either form. Matching only ": ping" failed the
+		// stream on the other half of the grammar.
+		{"openrouter/relayed ping without space", OpenRouter,
+			"data: :ping\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		{"openrouter/relayed comment without space", OpenRouter,
+			"data: :OPENROUTER PROCESSING\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
+		// And the wording must not matter: an allowlist of known ping texts is
+		// what made benign relay output depend on being on a list.
+		{"openrouter/unlisted relayed comment", OpenRouter,
+			"data: :heartbeat from some relay nobody enumerated\n\n" + goodFrame1 + "\n\ndata: [DONE]\n\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
