@@ -2,7 +2,9 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## Unreleased
+## v0.3.1 — 2026-08-01
+
+一个性能修复。**没有破坏性变更，也没有 API 变化 —— 升级不需要改任何代码。**
 
 ### 修复
 
@@ -107,7 +109,7 @@ Gemini 的路由不是 OpenAI 形状：走 `models/{model}:batchEmbedContents`�
 
 ### 已知问题
 
-- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性。自 v0.2.0 起未变。**（已在 v0.3.0 之后修复，见顶部 Unreleased）**
+- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性。自 v0.2.0 起未变。**（已在 v0.3.1 修复。）**
 - `Models()` 对 gemini 返回的对话模型与 embedding 模型混在一起，`RemoteModel` 无类型字段可供区分。见「修复」一节的权衡。
 - rerank 只有 siliconflow 一家实现。Cohere 形状的 usage（`meta.billed_units.search_units`）已按契约实现并测试，但**没有厂商实测过** —— 接 Cohere / Jina 时值得先验一遍。
 
