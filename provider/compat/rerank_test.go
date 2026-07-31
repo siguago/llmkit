@@ -210,6 +210,35 @@ func TestRerank_UsageFromTokens(t *testing.T) {
 	}
 }
 
+// Cohere-derived vendors bill per search unit, not per token, and report it
+// under meta.billed_units. Without this the wire struct declares the field and
+// nothing reads it, so a Cohere-shaped response yields an all-zero Usage and
+// per-call pricing silently has nothing to multiply.
+func TestRerank_UsageFromCohereMeta(t *testing.T) {
+	p, _, _, _ := rerankServer(t, http.StatusOK, `{
+		"results":[{"index":0,"relevance_score":0.9}],
+		"meta":{"billed_units":{"search_units":3}}
+	}`)
+
+	resp, err := p.Rerank(context.Background(), "k", "m", &provider.RerankRequest{
+		Query: "q", Documents: []string{"a"},
+	})
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if resp.Usage == nil {
+		t.Fatal("Usage must not be nil")
+	}
+	if resp.Usage.RequestCount != 3 {
+		t.Errorf("RequestCount = %d, want the vendor's 3 search units", resp.Usage.RequestCount)
+	}
+	// Search units are not tokens; inventing token counts from them would be a
+	// fabricated number on someone's bill.
+	if resp.Usage.TotalTokens != 0 {
+		t.Errorf("search units must not be reported as tokens: %+v", resp.Usage)
+	}
+}
+
 // A vendor that reports no tokens still needs a usable Usage for per-call
 // pricing.
 func TestRerank_UsageWithoutTokens(t *testing.T) {
