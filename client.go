@@ -182,6 +182,42 @@ func (c *Client) SupportsEmbeddings() bool {
 	return ok
 }
 
+// ---------------------------------------------------------------- rerank
+
+// Rerank scores req.Documents against req.Query, most relevant first.
+//
+// This is the second stage of a RAG pipeline: embeddings retrieve a coarse
+// candidate set cheaply, a reranker reorders it accurately. Unlike Embed, the
+// response is NOT positional — results come back sorted by score and may be
+// truncated by TopN, so use RerankResult.Index to map back to req.Documents.
+//
+// Returns ErrUnsupported for providers with no rerank endpoint.
+func (c *Client) Rerank(ctx context.Context, req *RerankRequest) (*RerankResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("llmkit: nil request")
+	}
+	reranker, ok := c.provider.(provider.Reranker)
+	if !ok {
+		return nil, unsupportedf(c.name, "rerank")
+	}
+	if req.Model == "" {
+		return nil, fmt.Errorf("llmkit: request.Model is required")
+	}
+	ctx, cancel := c.prepare(ctx)
+	defer cancel()
+
+	resp, err := doValue(ctx, c.cfg.retry, func() (*RerankResponse, error) {
+		return reranker.Rerank(ctx, c.cfg.apiKey, req.Model, req)
+	})
+	return resp, translateUnsupported(err)
+}
+
+// SupportsRerank reports whether Rerank is available on this provider.
+func (c *Client) SupportsRerank() bool {
+	_, ok := c.provider.(provider.Reranker)
+	return ok
+}
+
 // ---------------------------------------------------------------- images
 
 // GenerateImage creates images from a text prompt.

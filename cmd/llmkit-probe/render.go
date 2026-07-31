@@ -274,6 +274,7 @@ var chatModels = map[string]string{
 // broken" when the endpoint is fine), but the gap has to be recorded on purpose.
 var embedModels = map[string]string{
 	llmkit.OpenAI:      "text-embedding-3-small",
+	llmkit.Gemini:      "text-embedding-004",
 	llmkit.SiliconFlow: "BAAI/bge-m3",
 	llmkit.Zhipu:       "embedding-3",
 	llmkit.Mistral:     "mistral-embed",
@@ -301,6 +302,17 @@ var embedModelUnknown = map[string]string{
 	llmkit.VLLM: "一个 vLLM 进程只服务一个模型，没有默认可填",
 }
 
+// rerankModels is embedModels' counterpart for the rerank route. Same rule: a
+// provider claiming SupportsRerank must appear here or in rerankModelUnknown,
+// enforced by TestRerankModelsCoverRerankers.
+var rerankModels = map[string]string{
+	llmkit.SiliconFlow: "BAAI/bge-reranker-v2-m3",
+}
+
+// rerankModelUnknown mirrors embedModelUnknown: providers that claim the
+// capability but have no default model worth guessing, each with a reason.
+var rerankModelUnknown = map[string]string{}
+
 var imageModels = map[string]string{
 	llmkit.OpenAI:     "gpt-image-1",
 	llmkit.Gemini:     "gemini-2.5-flash-image",
@@ -311,9 +323,10 @@ var imageModels = map[string]string{
 
 // Each default is overridable per provider so you can probe a model the table
 // doesn't know about without rebuilding.
-func defaultChatModel(p string) string  { return envOr("LLMKIT_MODEL_", p, chatModels) }
-func defaultEmbedModel(p string) string { return envOr("LLMKIT_EMBED_MODEL_", p, embedModels) }
-func defaultImageModel(p string) string { return envOr("LLMKIT_IMAGE_MODEL_", p, imageModels) }
+func defaultChatModel(p string) string   { return envOr("LLMKIT_MODEL_", p, chatModels) }
+func defaultEmbedModel(p string) string  { return envOr("LLMKIT_EMBED_MODEL_", p, embedModels) }
+func defaultRerankModel(p string) string { return envOr("LLMKIT_RERANK_MODEL_", p, rerankModels) }
+func defaultImageModel(p string) string  { return envOr("LLMKIT_IMAGE_MODEL_", p, imageModels) }
 
 func envOr(prefix, providerName string, table map[string]string) string {
 	key := prefix + strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))

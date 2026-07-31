@@ -2,6 +2,51 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## Unreleased
+
+### 破坏性变更
+
+**`siliconflow.New` 的返回类型从 `*compat.Provider` 变为 `*compat.WithRerank`。** 只影响直接 import `provider/siliconflow` 并显式写出返回类型的代码（`var p *compat.Provider = siliconflow.New("")`）；用 `:=` 或传给 `llmkit.Wrap` 都不受影响，两个类型都实现 `provider.Provider`。这是接上 rerank 的必要代价 —— Go 的方法集没法在不换类型的前提下多长出一个方法。
+
+### 新增
+
+**新增 Rerank 能力**，v0.2.0「尚未覆盖」表里的第二条清掉。
+
+重排序是 RAG 的第二段：embeddings 廉价召回候选，reranker 把 query 和 document 放在一起精确打分。新增 `Client.Rerank` / `SupportsRerank`、`provider.Reranker` 接口，以及 `RerankRequest` / `RerankResponse` / `RerankResult` 三个类型（门面层有别名）。
+
+**这是统一接口里唯一一处刻意打破位置契约的地方。** `Embed` 保证 `Data[i]` 对应 `Input[i]`，而 `Rerank` 的结果**按相关性降序**、还可能被 `TopN` 截断 —— 重排本身就是这个操作的目的。`RerankResult.Index` 是映射回调用方 `Documents` 的唯一凭据，所以越界的 index 直接报错而不是透传：透传出去会变成调用方使用时的下标越界 panic，那时离病因已经很远了。
+
+`RelevanceScore` 的文档里写明量纲不跨厂商也不跨模型可比（有的给 0..1 概率，有的给无界 logit）—— 拿它跨模型比较是这个 API 最容易犯的错。
+
+实现上新增 `compat.WithRerank`，是 `compat.NoEmbeddings` 的镜像：那个类型用组合来**收窄**方法集（不提升 `Embeddings`），这个用嵌入来**扩展**（照常提升全部，再加 `Rerank`）。rerank 不属于 OpenAI API，所以 compat 默认不带它，adapter 得显式选用 `NewWithRerank` —— 否则 21 家 compat 厂商会集体声称支持一条大多数都没有的路由，正是能力探测说谎的老毛病。
+
+目前只有 **siliconflow** 一家启用。实现的是 Cohere 定下、Jina / SiliconFlow / Together 都照抄的事实标准（`POST /rerank`，`{model, query, documents}`）。响应里 `document` 字段两种形状都收：Cohere / SiliconFlow 发 `{"text": "..."}` 对象，部分中转发裸字符串。
+
+**能力矩阵测试当时抓不到这个新能力** —— `caps` 结构里没有 rerank 字段，加了新能力却没人守卫。已补上 `rerank` 字段与断言，补完当场就抓到了 siliconflow 的变化。README 的能力矩阵表相应多了一列。
+
+**gemini 接上 embeddings**，手写翻译层，v0.2.0 的「尚未覆盖」表里点名的那条空白清掉。
+
+Gemini 的路由不是 OpenAI 形状：走 `models/{model}:batchEmbedContents`，每条输入要包成 `content.parts`，模型名在 URL 和每个子请求里各出现一次（且子请求要 `models/` 全名）。但**批量语义是对得上的** —— N 条进、N 个向量出、顺序一致 —— 所以这是信封翻译，不是把一种操作硬掰成另一种。
+
+刻意用批量端点而不是单条的 `:embedContent`：后者会把一次 `Embed` 变成 N 个 HTTP 请求，正是那道成本悬崖让 volcengine 的融合式端点整个被挡在这个接口之外。Gemini 没这个问题，批量路由存在且是位置对应的。
+
+几处取舍：
+
+- **`task_type` 转发，不本地校验** —— 这是与 minimax 那层刻意相反的决定。minimax 的 `type` 只有两个取值、集合封闭，所以本地拦住拼写错误；Gemini 的取值集合还在扩（`CODE_RETRIEVAL_QUERY` 是后加的），本地白名单会挡掉将来新增的合法值，所以退回本项目「让调用方看厂商自己的报错」的默认惯例。`task_type` 和 `title` 都走 `ProviderOptions["gemini"]`，忘了嵌那层 key 会报错而不是静默丢弃 —— 丢掉一个 `task_type` 是看不见的检索质量下降。
+- **`EncodingFormat` 只接受 `float`**，其余报错。Gemini 没有 base64 线格式，静默给调用方 float 是他们直到下游炸掉才会发现的差异。`Dimensions` 作为 `outputDimensionality` 转发，能不能用交给模型自己答。
+- **向量解码成 `[]any` 而不是 `[]float64`**，与所有 compat provider 一致（`llmkit-probe` 和调用方断言的就是 `[]any`）。
+- **Gemini 在这个端点不返回 token 计数**，所以 `Usage` 只有 `RequestCount`（`NormalizeUsage` 兜底为 1），token 字段留 0 而不是估算 —— 按 token 计价的调用方拿到的是「没有数据」，不是一个编出来的数字。
+- 模型名两种写法都收（`text-embedding-004` 与 `models/text-embedding-004`），URL 用裸名、子请求用全名，不会拼出 `models/models/`。
+
+`SupportsEmbeddings()` 对 gemini 从 false 变 true，`TestCapabilityMatrix` 与 `TestEmbedModelsCoverEmbedders` 两道守卫同步更新 —— 加这个功能时它们都如期先变红，probe 的默认探测模型填了 `text-embedding-004`。
+
+### 测试
+
+- 新增 `provider/compat/rerank_test.go` 与根包 `rerank_test.go`：请求形状、结果必须按分数降序而非输入顺序、越界 index 必须报错（两个方向都测）、`document` 字段的五种形态（对象 / 裸字符串 / 缺失 / null / 空对象）、未设的 `top_n` 必须省略（`0` 会被读成「什么都不返回」）、`ProviderOptions` 只透传本厂商命名空间、两种 token 计数位置、空结果集是合法的、以及能力面断言：**朴素的 `compat.Provider` 必须不满足 `Reranker`**，否则每家 compat 厂商都会声称支持。门面层测的是 `ErrUnsupported` 路径与探测/调用两者必须一致。写这批测试时越界守卫当场抓到了我自己测试里的不一致（响应引用 index 2，请求只发了 1 个文档），是它该有的样子。compat 包覆盖率 53.3% → 61.4%。
+- 新增 `provider/gemini/embeddings_test.go`：请求形状（批量端点、鉴权头、子请求全名、输入顺序）、单条输入仍走批量信封、模型名两种写法、`Dimensions` 转发与未设时必须省略（`0` 会被 Gemini 读成「要零宽向量」）、`task_type`/`title` 透传、未知 `task_type` 必须转发而非本地拒绝、base64 拒绝、向量数不匹配、上游错误、截断响应、nil 请求、`Usage` 只有 `RequestCount`、向量元素类型是 `[]any` 的 `float64`，以及 `ProviderOptions` 的嵌套层级检查。gemini 包覆盖率 46.5% → 53.1%。
+
+---
+
 ## v0.2.0 — 2026-07-30
 
 这一轮针对的是「生产网关代码公开成 SDK」遗留的三类问题：花钱的调用被盲目重放、能力探测说谎、测试偷偷联网。同时厂商从 13 家扩到 21 家。

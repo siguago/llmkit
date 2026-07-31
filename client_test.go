@@ -344,6 +344,7 @@ func TestStreamChat_InvokesCallbackPerDelta(t *testing.T) {
 type caps struct {
 	chat                  bool
 	models, embeddings    bool
+	rerank                bool
 	imageGen, imageEdit   bool
 	videoGen, videoCancel bool
 }
@@ -371,22 +372,26 @@ func TestCapabilityMatrix(t *testing.T) {
 		//
 		// MiniMax is the counter-example below: its route is not OpenAI-shaped
 		// either, but the batch semantics do line up, so the adapter translates.
-		Cerebras:    {chat: true, models: true},
-		Groq:        {chat: true, models: true},
-		XAI:         {chat: true, models: true},
-		Moonshot:    {chat: true, models: true},
-		Volcengine:  {chat: true, models: true, videoGen: true, videoCancel: true},
-		DashScope:   {chat: true, models: true, embeddings: true, videoGen: true},
-		DeepSeek:    {chat: true, models: true},
-		Fireworks:   {chat: true, models: true, embeddings: true},
-		EasyRouter:  {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
-		Gemini:      {chat: true, models: true, imageGen: true, imageEdit: true, videoGen: true},
-		MiniMax:     {chat: true, models: true, embeddings: true}, // hand-written, not compat's
-		Mistral:     {chat: true, models: true, embeddings: true},
-		Ollama:      {chat: true, models: true, embeddings: true},
-		OpenAI:      {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
-		OpenRouter:  {chat: true, models: true, imageGen: true, videoGen: true},
-		SiliconFlow: {chat: true, models: true, embeddings: true},
+		Cerebras:   {chat: true, models: true},
+		Groq:       {chat: true, models: true},
+		XAI:        {chat: true, models: true},
+		Moonshot:   {chat: true, models: true},
+		Volcengine: {chat: true, models: true, videoGen: true, videoCancel: true},
+		DashScope:  {chat: true, models: true, embeddings: true, videoGen: true},
+		DeepSeek:   {chat: true, models: true},
+		Fireworks:  {chat: true, models: true, embeddings: true},
+		EasyRouter: {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
+		Gemini:     {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true}, // hand-written, not compat's
+		MiniMax:    {chat: true, models: true, embeddings: true},                                                  // hand-written, not compat's
+		Mistral:    {chat: true, models: true, embeddings: true},
+		Ollama:     {chat: true, models: true, embeddings: true},
+		OpenAI:     {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
+		OpenRouter: {chat: true, models: true, imageGen: true, videoGen: true},
+		// The only bundled adapter with a rerank route. Rerank is not part of the
+		// OpenAI API, so compat does not get it by default — it is opted into via
+		// compat.NewWithRerank, which is why every other compat provider is false
+		// here rather than inheriting a claim it cannot serve.
+		SiliconFlow: {chat: true, models: true, embeddings: true, rerank: true},
 		Together:    {chat: true, models: true, embeddings: true},
 		VLLM:        {chat: true, models: true, embeddings: true},
 		Vercel:      {chat: true, models: true, embeddings: true, imageGen: true},
@@ -404,6 +409,7 @@ func TestCapabilityMatrix(t *testing.T) {
 			chat:        c.SupportsChat(),
 			models:      c.SupportsModels(),
 			embeddings:  c.SupportsEmbeddings(),
+			rerank:      c.SupportsRerank(),
 			imageGen:    c.SupportsImageGeneration(),
 			imageEdit:   c.SupportsImageEditing(),
 			videoGen:    c.SupportsVideoGeneration(),

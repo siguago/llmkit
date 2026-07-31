@@ -164,6 +164,7 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 		{"推理 / thinking", func(ctx context.Context) result { return probeThinking(ctx, c, model) }},
 		{"多模态图像输入", func(ctx context.Context) result { return probeVision(ctx, c, model) }},
 		{"Embeddings", func(ctx context.Context) result { return probeEmbeddings(ctx, c, t.provider) }},
+		{"Rerank", func(ctx context.Context) result { return probeRerank(ctx, c, t.provider) }},
 		{"图像生成", func(ctx context.Context) result { return probeImage(ctx, c, t.provider, opts.media) }},
 		{"图像编辑", func(context.Context) result { return probeImageEdit(c) }},
 		{"视频生成", func(ctx context.Context) result { return probeVideo(ctx, c, opts.media) }},
@@ -523,6 +524,56 @@ func probeEmbeddings(ctx context.Context, c *llmkit.Client, providerName string)
 	return result{
 		outcome: pass,
 		detail:  fmt.Sprintf("%s · %d 维", model, len(vec)),
+		usage:   resp.Usage,
+	}
+}
+
+// probeRerank asks the reranker to pick the one document that answers the
+// query out of three, then checks that it actually did.
+//
+// A reranker that returns results at all is not proof it works — a broken
+// integration can return the input order with flat scores and look fine. So the
+// assertion is on the outcome: the relevant document must come back first.
+func probeRerank(ctx context.Context, c *llmkit.Client, providerName string) result {
+	if !c.SupportsRerank() {
+		return result{outcome: notApplicable, detail: "该 provider 无 rerank 接口"}
+	}
+	model := defaultRerankModel(providerName)
+	if model == "" {
+		return result{outcome: skipped, detail: "未配置默认 rerank 模型"}
+	}
+	// The panda sentence is last, so a passthrough implementation that ignores
+	// the query cannot accidentally pass.
+	docs := []string{
+		"苹果是一种常见的水果。",
+		"汽车通常有四个轮子。",
+		"熊猫是中国特有的哺乳动物，以竹子为食。",
+	}
+	const wantIdx = 2
+	resp, err := c.Rerank(ctx, &llmkit.RerankRequest{
+		Model:     model,
+		Query:     "什么是熊猫？",
+		Documents: docs,
+	})
+	if err != nil {
+		if llmkit.IsNotFound(err) || llmkit.IsInvalidRequest(err) {
+			return result{outcome: notApplicable, detail: fmt.Sprintf("模型 %s 不可用：%s", model, describeErr(err))}
+		}
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	if len(resp.Results) == 0 {
+		return result{outcome: fail, detail: "返回空结果"}
+	}
+	top := resp.Results[0]
+	if top.Index != wantIdx {
+		return result{
+			outcome: fail,
+			detail:  fmt.Sprintf("%s · 最相关判为第 %d 条，应为第 %d 条", model, top.Index, wantIdx),
+		}
+	}
+	return result{
+		outcome: pass,
+		detail:  fmt.Sprintf("%s · %d 条候选，命中第 %d 条（%.3f）", model, len(docs), top.Index, top.RelevanceScore),
 		usage:   resp.Usage,
 	}
 }

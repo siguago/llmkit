@@ -65,6 +65,15 @@ type (
 	// EmbeddingItem is one embedding vector.
 	EmbeddingItem = provider.EmbeddingItem
 
+	// RerankRequest scores candidate documents against one query.
+	RerankRequest = provider.RerankRequest
+	// RerankResponse carries the documents sorted by relevance, most relevant
+	// first — not in the order they were sent.
+	RerankResponse = provider.RerankResponse
+	// RerankResult is one scored document. Index maps back to the request's
+	// Documents slice.
+	RerankResult = provider.RerankResult
+
 	// MediaAsset is a generated image / video / audio artifact.
 	MediaAsset = provider.MediaAsset
 	// ImageRequest asks for image generation.
