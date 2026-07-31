@@ -150,6 +150,14 @@ func parseRerank(body []byte, model, name string, nDocs int) (*provider.RerankRe
 		usage.CompletionTokens = wire.Tokens.OutputTokens
 		usage.TotalTokens = wire.Tokens.InputTokens + wire.Tokens.OutputTokens
 	}
+	// Cohere-derived vendors bill per search unit rather than per token and put
+	// the count under meta.billed_units. RequestCount is the unified per-call
+	// billing dimension, so that is where it lands — otherwise a Cohere-shaped
+	// response yields an all-zero Usage and per-call pricing has nothing to
+	// multiply.
+	if wire.Meta != nil && wire.Meta.BilledUnits != nil && wire.Meta.BilledUnits.SearchUnits > 0 {
+		usage.RequestCount = wire.Meta.BilledUnits.SearchUnits
+	}
 	provider.NormalizeUsage(usage)
 
 	return &provider.RerankResponse{
