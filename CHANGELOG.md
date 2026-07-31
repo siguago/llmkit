@@ -2,6 +2,22 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## Unreleased
+
+### 修复
+
+**`internal/logging` 的默认 logger 现在真的静默。** 此前 `discard` 是 `slog.NewTextHandler(io.Discard, nil)`，而 `nil` 选项把级别默认成 Info —— 于是它一边丢弃所有记录，一边对 Info/Warn/Error 回答 `Enabled() == true`。任何按 `Enabled` 的文档去跳过昂贵参数构建的守卫都因此失效：参数照常构建，格式化完再扔掉。
+
+`provider.StreamDiagnostics.Malformed` 正是这样一处守卫（注释写着「skip it when nothing is listening — which is the default」），它的 logger 来自 `logging.From(ctx)`。没装调用方 logger 时那就是 `discard`，条件恒为真，于是容错模式下**每个畸形帧都白跑一次 `TruncateForLog(payload, 200)` 拷贝** —— 正是注释声称省掉的那次。
+
+改为自定义 `discardHandler`，`Enabled` 在所有级别恒返回 false。Go 1.24 的 `slog.DiscardHandler` 就是干这个的，但 `go.mod` 声明 1.22，所以手写一份；将来抬高下限时可以原样换掉，行为不变。
+
+> 只影响性能，不影响正确性 —— 记录本来就是被丢弃的，变的只是「丢弃前还构不构建」。装了 `WithLogger` 的调用方完全不受影响：`From` 返回的是他们自己的 logger，级别由他们的 handler 说了算。这一点是双向断言的：`TestWithLogger_ReceivesDiagnostics` 保证畸形帧的 warn 照常送达，把 `From` 改成忽略用户 logger 会让它立刻变红。
+
+自 v0.2.0 的「已知问题」列表里挂了两版，现已清掉。
+
+---
+
 ## v0.3.0 — 2026-07-31
 
 两项新能力：gemini 的 embeddings 和一套 rerank 接口（目前 siliconflow 一家实现）。**两者都经真实 API 实测**，不是只跑通了 mock —— 上一版发布时 gemini embeddings 的 wire format 还只是「照文档理解写的」，这一版把它验了，也因此揪出三个 bug（见「修复」）。
@@ -91,7 +107,7 @@ Gemini 的路由不是 OpenAI 形状：走 `models/{model}:batchEmbedContents`�
 
 ### 已知问题
 
-- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性。自 v0.2.0 起未变。
+- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性。自 v0.2.0 起未变。**（已在 v0.3.0 之后修复，见顶部 Unreleased）**
 - `Models()` 对 gemini 返回的对话模型与 embedding 模型混在一起，`RemoteModel` 无类型字段可供区分。见「修复」一节的权衡。
 - rerank 只有 siliconflow 一家实现。Cohere 形状的 usage（`meta.billed_units.search_units`）已按契约实现并测试，但**没有厂商实测过** —— 接 Cohere / Jina 时值得先验一遍。
 
