@@ -194,7 +194,7 @@ func (p *Provider) callGeminiJSON(ctx context.Context, apiKey, pathSegment strin
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+		return nil, geminiError(resp, respBody)
 	}
 	return respBody, nil
 }

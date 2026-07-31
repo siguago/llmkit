@@ -97,7 +97,7 @@ func TestLiveModelsCoverAllProviders(t *testing.T) {
 var (
 	liveEmbedModels = map[string]string{
 		OpenAI:      "text-embedding-3-small",
-		Gemini:      "text-embedding-004",
+		Gemini:      "gemini-embedding-001",
 		SiliconFlow: "BAAI/bge-m3",
 		Zhipu:       "embedding-3",
 		Mistral:     "mistral-embed",

@@ -39,7 +39,7 @@ const twoVectors = `{"embeddings":[{"values":[0.1,0.2]},{"values":[0.3,0.4]}]}`
 func TestEmbeddings_RequestShape(t *testing.T) {
 	p, got, path, key := embedServer(t, http.StatusOK, twoVectors)
 
-	resp, err := p.Embeddings(context.Background(), "k-test", "text-embedding-004", &provider.EmbeddingRequest{
+	resp, err := p.Embeddings(context.Background(), "k-test", "gemini-embedding-001", &provider.EmbeddingRequest{
 		Input: []string{"天很蓝", "海很深"},
 	})
 	if err != nil {
@@ -48,7 +48,7 @@ func TestEmbeddings_RequestShape(t *testing.T) {
 
 	// The batch endpoint, not the single-shot one — N inputs must cost one
 	// round trip, not N.
-	if !strings.HasSuffix(*path, "/models/text-embedding-004:batchEmbedContents") {
+	if !strings.HasSuffix(*path, "/models/gemini-embedding-001:batchEmbedContents") {
 		t.Errorf("path = %q, want the batchEmbedContents route", *path)
 	}
 	if *key != "k-test" {
@@ -59,8 +59,8 @@ func TestEmbeddings_RequestShape(t *testing.T) {
 	}
 	// Gemini names the model in the URL and again in every sub-request, and the
 	// inner one wants the fully qualified resource name.
-	if got.Requests[0].Model != "models/text-embedding-004" {
-		t.Errorf("sub-request model = %q, want models/text-embedding-004", got.Requests[0].Model)
+	if got.Requests[0].Model != "models/gemini-embedding-001" {
+		t.Errorf("sub-request model = %q, want models/gemini-embedding-001", got.Requests[0].Model)
 	}
 	if got.Requests[0].Content.Parts[0].Text != "天很蓝" || got.Requests[1].Content.Parts[0].Text != "海很深" {
 		t.Errorf("input order not preserved: %+v", got.Requests)
@@ -75,7 +75,7 @@ func TestEmbeddings_RequestShape(t *testing.T) {
 func TestEmbeddings_SingleStringInput(t *testing.T) {
 	p, got, _, _ := embedServer(t, http.StatusOK, `{"embeddings":[{"values":[0.5]}]}`)
 
-	resp, err := p.Embeddings(context.Background(), "k", "text-embedding-004", &provider.EmbeddingRequest{
+	resp, err := p.Embeddings(context.Background(), "k", "gemini-embedding-001", &provider.EmbeddingRequest{
 		Input: "只有一句",
 	})
 	if err != nil {
@@ -93,7 +93,7 @@ func TestEmbeddings_SingleStringInput(t *testing.T) {
 func TestEmbeddings_AcceptsQualifiedModelName(t *testing.T) {
 	p, got, path, _ := embedServer(t, http.StatusOK, `{"embeddings":[{"values":[1]}]}`)
 
-	if _, err := p.Embeddings(context.Background(), "k", "models/text-embedding-004", &provider.EmbeddingRequest{
+	if _, err := p.Embeddings(context.Background(), "k", "models/gemini-embedding-001", &provider.EmbeddingRequest{
 		Input: "x",
 	}); err != nil {
 		t.Fatalf("Embeddings: %v", err)
@@ -102,7 +102,7 @@ func TestEmbeddings_AcceptsQualifiedModelName(t *testing.T) {
 	if strings.Contains(*path, "models/models/") {
 		t.Errorf("path has a doubled prefix: %q", *path)
 	}
-	if got.Requests[0].Model != "models/text-embedding-004" {
+	if got.Requests[0].Model != "models/gemini-embedding-001" {
 		t.Errorf("sub-request model = %q", got.Requests[0].Model)
 	}
 }
@@ -111,7 +111,7 @@ func TestEmbeddings_DimensionsForwarded(t *testing.T) {
 	p, got, _, _ := embedServer(t, http.StatusOK, `{"embeddings":[{"values":[1]}]}`)
 	dims := 256
 
-	if _, err := p.Embeddings(context.Background(), "k", "text-embedding-004", &provider.EmbeddingRequest{
+	if _, err := p.Embeddings(context.Background(), "k", "gemini-embedding-001", &provider.EmbeddingRequest{
 		Input: "x", Dimensions: &dims,
 	}); err != nil {
 		t.Fatalf("Embeddings: %v", err)
@@ -154,7 +154,7 @@ func TestEmbeddings_DimensionsOmittedWhenUnset(t *testing.T) {
 func TestEmbeddings_TaskTypeAndTitleForwarded(t *testing.T) {
 	p, got, _, _ := embedServer(t, http.StatusOK, `{"embeddings":[{"values":[1]}]}`)
 
-	if _, err := p.Embeddings(context.Background(), "k", "text-embedding-004", &provider.EmbeddingRequest{
+	if _, err := p.Embeddings(context.Background(), "k", "gemini-embedding-001", &provider.EmbeddingRequest{
 		Input: "x",
 		ProviderOptions: map[string]any{"gemini": map[string]any{
 			"task_type": "RETRIEVAL_DOCUMENT",
@@ -387,14 +387,83 @@ func TestEmbedProviderOptions(t *testing.T) {
 
 func TestModelNameHelpers(t *testing.T) {
 	for _, tc := range []struct{ in, bare, qualified string }{
-		{"text-embedding-004", "text-embedding-004", "models/text-embedding-004"},
-		{"models/text-embedding-004", "text-embedding-004", "models/text-embedding-004"},
+		{"gemini-embedding-001", "gemini-embedding-001", "models/gemini-embedding-001"},
+		{"models/gemini-embedding-001", "gemini-embedding-001", "models/gemini-embedding-001"},
 	} {
 		if got := bareModel(tc.in); got != tc.bare {
 			t.Errorf("bareModel(%q) = %q, want %q", tc.in, got, tc.bare)
 		}
 		if got := qualifyModel(tc.in); got != tc.qualified {
 			t.Errorf("qualifyModel(%q) = %q, want %q", tc.in, got, tc.qualified)
+		}
+	}
+}
+
+// Embedding models advertise embedContent and never generateContent, so a
+// filter that only looks for generateContent hides every one of them. That was
+// the state when embeddings shipped: the capability said yes, and Models()
+// could not name a single model to use it with — while the vendor's own 404 for
+// a retired model tells you to call ListModels to find one.
+func TestDispatchableModel(t *testing.T) {
+	cases := []struct {
+		name    string
+		methods []string
+		want    bool
+	}{
+		{"chat model", []string{"generateContent", "countTokens"}, true},
+		{"embedding model", []string{"embedContent"}, true},
+		{"batch embedding model", []string{"batchEmbedContents", "embedContent"}, true},
+		{"legacy text model", []string{"generateText"}, false},
+		{"tuning-only", []string{"createTunedModel"}, false},
+		{"nothing", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dispatchableModel(tc.methods); got != tc.want {
+				t.Errorf("dispatchableModel(%v) = %v, want %v", tc.methods, got, tc.want)
+			}
+		})
+	}
+}
+
+// ListModels must surface embedding models, or the embeddings capability has
+// no discoverable model to point at.
+func TestListModels_IncludesEmbeddingModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[
+			{"name":"models/gemini-2.5-flash","displayName":"Flash","inputTokenLimit":1000000,
+			 "supportedGenerationMethods":["generateContent"]},
+			{"name":"models/some-embedding","displayName":"Embed","inputTokenLimit":2048,
+			 "supportedGenerationMethods":["embedContent","batchEmbedContents"]},
+			{"name":"models/legacy-text","displayName":"Legacy",
+			 "supportedGenerationMethods":["generateText"]}
+		]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewWithBaseURL(srv.URL).ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+
+	got := make(map[string]bool, len(models))
+	for _, m := range models {
+		got[m.ModelID] = true
+	}
+	if !got["some-embedding"] {
+		t.Error("an embedding model must be listed — otherwise SupportsEmbeddings is true with no model to use")
+	}
+	if !got["gemini-2.5-flash"] {
+		t.Error("chat models must still be listed")
+	}
+	if got["legacy-text"] {
+		t.Error("a model this SDK has no route for should stay filtered out")
+	}
+	// The "models/" prefix is stripped so the ID can be handed straight back in.
+	for _, m := range models {
+		if strings.HasPrefix(m.ModelID, "models/") {
+			t.Errorf("ModelID %q still carries the resource prefix", m.ModelID)
 		}
 	}
 }

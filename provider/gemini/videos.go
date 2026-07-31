@@ -112,7 +112,7 @@ func (p *Provider) GetVideoJob(ctx context.Context, apiKey string, job *provider
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+		return nil, geminiError(resp, respBody)
 	}
 	return parseVeoOperation(respBody, job)
 }
