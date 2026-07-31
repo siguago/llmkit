@@ -684,7 +684,7 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 | `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/siliconflow` | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0%。新增的 8 家薄封装同理 |
 
-总覆盖率 57%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
+总覆盖率 58%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
 ---
 

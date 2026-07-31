@@ -2,7 +2,24 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## Unreleased
+## v0.3.0 — 2026-07-31
+
+两项新能力：gemini 的 embeddings 和一套 rerank 接口（目前 siliconflow 一家实现）。**两者都经真实 API 实测**，不是只跑通了 mock —— 上一版发布时 gemini embeddings 的 wire format 还只是「照文档理解写的」，这一版把它验了，也因此揪出三个 bug（见「修复」）。
+
+### 从 v0.2.0 升级
+
+**只有一条破坏性变更，且多数人碰不到。**
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| `var p *compat.Provider = siliconflow.New("")` | **编译失败** | 改用 `p := siliconflow.New("")`，或写 `*compat.WithRerank` |
+| `p := siliconflow.New("")` | 不受影响 | — |
+| `llmkit.Wrap(siliconflow.New(""), ...)` | 不受影响 | — |
+| 遍历 `Models()` 挑 gemini 的对话模型 | **行为变化**：现在也会返回 embedding 模型 | 按模型名过滤（含 `embedding` 的那几个） |
+
+前三行只影响直接 import `provider/siliconflow` 的代码。第四行是 gemini 修复的必然副作用 —— 详见「修复」一节，`RemoteModel` 没有类型字段，调用方需自行区分。
+
+用 `llmkit.New(llmkit.SiliconFlow)` 这种门面层写法的，一行都不用改。
 
 ### 破坏性变更
 
@@ -58,6 +75,25 @@ Gemini 的路由不是 OpenAI 形状：走 `models/{model}:batchEmbedContents`�
 
 - 新增 `provider/compat/rerank_test.go` 与根包 `rerank_test.go`：请求形状、结果必须按分数降序而非输入顺序、越界 index 必须报错（两个方向都测）、`document` 字段的五种形态（对象 / 裸字符串 / 缺失 / null / 空对象）、未设的 `top_n` 必须省略（`0` 会被读成「什么都不返回」）、`ProviderOptions` 只透传本厂商命名空间、两种 token 计数位置、空结果集是合法的、以及能力面断言：**朴素的 `compat.Provider` 必须不满足 `Reranker`**，否则每家 compat 厂商都会声称支持。门面层测的是 `ErrUnsupported` 路径与探测/调用两者必须一致。写这批测试时越界守卫当场抓到了我自己测试里的不一致（响应引用 index 2，请求只发了 1 个文档），是它该有的样子。compat 包覆盖率 53.3% → 61.4%。
 - 新增 `provider/gemini/embeddings_test.go`：请求形状（批量端点、鉴权头、子请求全名、输入顺序）、单条输入仍走批量信封、模型名两种写法、`Dimensions` 转发与未设时必须省略（`0` 会被 Gemini 读成「要零宽向量」）、`task_type`/`title` 透传、未知 `task_type` 必须转发而非本地拒绝、base64 拒绝、向量数不匹配、上游错误、截断响应、nil 请求、`Usage` 只有 `RequestCount`、向量元素类型是 `[]any` 的 `float64`，以及 `ProviderOptions` 的嵌套层级检查。gemini 包覆盖率 46.5% → 53.1%。
+- 新增 `provider/gemini/errors_test.go`：无效 key 的分类，用的是从线上端点原样抓下来的响应体（400 + `INVALID_ARGUMENT` + `details[].reason`），不是编出来的形状。反向用例同样重要：`RATE_LIMIT_EXCEEDED` / `RESOURCE_EXHAUSTED` / `QUOTA_EXCEEDED` 断言为**不分类** —— 防止有人日后顺手把它们映射成 `rate_limit`，那会让 `IsSafeToReplay` 重放付费的图像/视频创建。
+- probe 与集成测试新增 rerank 覆盖，断言落在**排序结果**而非「有没有返回」：相关文档放在候选的最后一条，一个原样返回输入顺序的坏实现无法蒙混过关。同时给两处模型表加了守卫（`TestRerankModelsCoverRerankers` / `TestLiveEmbedModelsCoverEmbedders` / `TestLiveRerankModelsCoverRerankers`）—— 写守卫时牵出集成测试的 embed 表还漏了 mistral / minimax / dashscope / together / fireworks / ollama 六家，它们的 embeddings 声明从来没被真实验证过，一并补上。
+
+### 实测验证
+
+这一版的每项能力声明都跑过真实 API，不只是 mock：
+
+| 验证项 | 结果 |
+|---|---|
+| `llmkit-probe gemini` | 模型列表 45 个 · Embeddings `gemini-embedding-001` 3072 维 · 错误分类 `400 → IsAuthError` |
+| `llmkit-probe siliconflow` | Rerank `BAAI/bge-reranker-v2-m3` · Embeddings `BAAI/bge-m3` 1024 维 · 错误分类 `401 → IsAuthError` |
+| `TestLiveEmbeddings/gemini` | 3072 维 |
+| `TestLiveRerank/siliconflow` | `top: index=2 score=0.9906` —— 相关文档排在输入最后一条，被正确判为最相关 |
+
+### 已知问题
+
+- `internal/logging.Enabled` 在默认（未装 logger）路径上对 Info/Warn/Error 返回 true，使 `provider.StreamDiagnostics.Malformed` 的性能守卫失效 —— 容错模式下每个畸形帧多一次 `TruncateForLog` 拷贝。只影响性能，不影响正确性。自 v0.2.0 起未变。
+- `Models()` 对 gemini 返回的对话模型与 embedding 模型混在一起，`RemoteModel` 无类型字段可供区分。见「修复」一节的权衡。
+- rerank 只有 siliconflow 一家实现。Cohere 形状的 usage（`meta.billed_units.search_units`）已按契约实现并测试，但**没有厂商实测过** —— 接 Cohere / Jina 时值得先验一遍。
 
 ---
 
