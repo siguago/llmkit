@@ -36,9 +36,23 @@ Gemini 的路由不是 OpenAI 形状：走 `models/{model}:batchEmbedContents`�
 - **`EncodingFormat` 只接受 `float`**，其余报错。Gemini 没有 base64 线格式，静默给调用方 float 是他们直到下游炸掉才会发现的差异。`Dimensions` 作为 `outputDimensionality` 转发，能不能用交给模型自己答。
 - **向量解码成 `[]any` 而不是 `[]float64`**，与所有 compat provider 一致（`llmkit-probe` 和调用方断言的就是 `[]any`）。
 - **Gemini 在这个端点不返回 token 计数**，所以 `Usage` 只有 `RequestCount`（`NormalizeUsage` 兜底为 1），token 字段留 0 而不是估算 —— 按 token 计价的调用方拿到的是「没有数据」，不是一个编出来的数字。
-- 模型名两种写法都收（`text-embedding-004` 与 `models/text-embedding-004`），URL 用裸名、子请求用全名，不会拼出 `models/models/`。
+- 模型名两种写法都收（`gemini-embedding-001` 与 `models/gemini-embedding-001`），URL 用裸名、子请求用全名，不会拼出 `models/models/`。
 
-`SupportsEmbeddings()` 对 gemini 从 false 变 true，`TestCapabilityMatrix` 与 `TestEmbedModelsCoverEmbedders` 两道守卫同步更新 —— 加这个功能时它们都如期先变红，probe 的默认探测模型填了 `text-embedding-004`。
+`SupportsEmbeddings()` 对 gemini 从 false 变 true，`TestCapabilityMatrix` 与 `TestEmbedModelsCoverEmbedders` 两道守卫同步更新 —— 加这个功能时它们都如期先变红，probe 的默认探测模型填了 `gemini-embedding-001`。
+
+### 修复
+
+**gemini 的默认 embedding 模型改为 `gemini-embedding-001`。** 原先填的 `text-embedding-004` 已从 v1beta 退役，实测 404（`is not found for API version v1beta`）。当前在线的是 `gemini-embedding-001` / `-2` / `-2-preview`。**适配器实现一行没改** —— 实测确认 `v1beta` + `batchEmbedContents` 返回 200，批量路由存在，当初「不像 volcengine 那样有 N 个请求的成本悬崖」这个判断成立。
+
+> 排查时踩到两个假信号，记下来省得下次再走一遍。其一：`ListModels` 返回的三个 embedding 模型都只声明 `embedContent`、不声明 `batchEmbedContents`，但批量路由实测可用 —— Google 的元数据不列它，别拿它当路由是否存在的依据。其二：挂本地代理时这两条 POST 会返回 `text/html` + 0 字节的 404，还带着 Google 的 `server` 头，看着像 API 在拒绝，而 curl 直连即 200。判断路由存不存在要看 API 层的 JSON 报错，HTML 空 body 是中间层的产物。
+
+**gemini 的无效 key 此前不被识别为认证错误。** Gemini 用 HTTP 400 `INVALID_ARGUMENT` 回应无效凭据，而不是 401 —— 于是按状态码分类把「key 错了」判成「请求格式错了」，`IsAuthError()` 返回 false，`IsRetryable()` 也就不知道这个凭据永远不会成功。真信号在响应体的 `details[].reason`（`API_KEY_INVALID`），那是 `google.rpc.ErrorInfo` 的稳定机器标识；message 是本地化文本、status 太粗，都不能用。gemini 的六处错误构造统一走新的 `geminiError`，reason 作为 `ProviderCode(err)` 保留，凭据类映射到 `ErrorCategoryAuth`。实测：`llmkit-probe gemini` 的「错误分类」一项从 FAIL 转为 `PASS 400 → IsAuthError`。
+
+> 只映射凭据类，其余一律不分类 —— 不分类会回落到 HTTP 状态，而 Gemini 别处的状态码本来就是对的（429 限流、404 缺模型、5xx 自身故障）。**尤其不碰 `rate_limit`**：那个分类附带「上游没有计费」的断言，`IsSafeToReplay` 会据此重放图像/视频创建，是真金白银。429 自己就够格，从一个 reason 字符串猜出来的不够格。认不出的 reason 仍然通过 `ProviderCode` 交给调用方，什么都没丢。
+
+**`ListModels` 此前会滤掉所有 embedding 模型。** 过滤条件是「支持 `generateContent`」，而 embedding 模型恰恰不支持它 —— 于是 `SupportsEmbeddings()` 对 gemini 答 true，`Models()` 却一个能用的模型都给不出来，而厂商 404 里那句「Call ModelService.ListModels」指的正是这条路。现在按「本 SDK 有没有对应路由」过滤（`generateContent` / `embedContent` / `batchEmbedContents` 三者之一）。
+
+> **行为变化**：`Models()` 对 gemini 现在同时返回对话模型和 embedding 模型（实测 45 个，其中 3 个 embedding），而 `RemoteModel` 没有类型字段，调用方无法从返回值区分。遍历 `Models()` 挑对话模型的代码需要自己按模型名过滤。这与 vercel adapter 的既有做法一致 —— 权衡过：模型压根不可发现是更糟的失败。
 
 ### 测试
 

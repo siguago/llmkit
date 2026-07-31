@@ -145,7 +145,7 @@ resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
 
 ```go
 resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
-    Model: "text-embedding-004",
+    Model: "gemini-embedding-001",
     Input: []string{"天很蓝", "海很深"},
     ProviderOptions: map[string]any{"gemini": map[string]any{
         "task_type": "RETRIEVAL_DOCUMENT",

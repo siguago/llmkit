@@ -274,7 +274,7 @@ var chatModels = map[string]string{
 // broken" when the endpoint is fine), but the gap has to be recorded on purpose.
 var embedModels = map[string]string{
 	llmkit.OpenAI:      "text-embedding-3-small",
-	llmkit.Gemini:      "text-embedding-004",
+	llmkit.Gemini:      "gemini-embedding-001",
 	llmkit.SiliconFlow: "BAAI/bge-m3",
 	llmkit.Zhipu:       "embedding-3",
 	llmkit.Mistral:     "mistral-embed",

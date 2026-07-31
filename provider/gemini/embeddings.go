@@ -91,7 +91,7 @@ func (p *Provider) Embeddings(ctx context.Context, apiKey, model string, req *pr
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+		return nil, geminiError(resp, respBody)
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

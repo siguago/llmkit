@@ -89,7 +89,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+		return nil, geminiError(resp, respBody)
 	}
 
 	var geminiResp response
@@ -126,10 +126,33 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+		return nil, geminiError(resp, respBody)
 	}
 
 	return NewStreamReader(ctx, resp.Body, model), nil
+}
+
+// dispatchableModel reports whether this SDK has a route for the model, based
+// on the methods Gemini says it supports.
+//
+// Chat models advertise generateContent; embedding models advertise
+// embedContent / batchEmbedContents and never generateContent. Filtering on
+// generateContent alone — which is what this did before embeddings existed —
+// made every embedding model invisible to Models(), so the one documented way
+// to find a working embedding model ("Call ModelService.ListModels", as the
+// 404 for a retired model tells you) was closed off by the SDK itself.
+//
+// Both kinds land in the same list because RemoteModel carries no type field.
+// That mirrors the vercel adapter, which likewise returns language and
+// embedding models together: an undiscoverable model is the worse failure.
+func dispatchableModel(methods []string) bool {
+	for _, m := range methods {
+		switch m {
+		case "generateContent", "embedContent", "batchEmbedContents":
+			return true
+		}
+	}
+	return false
 }
 
 // ListModels fetches available models from the Gemini API.
@@ -160,7 +183,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
 			resp.Body.Close()
-			return nil, provider.NewProviderErrorFromResponse(resp, "gemini", respBody)
+			return nil, geminiError(resp, respBody)
 		}
 
 		var result struct {
@@ -179,21 +202,11 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		resp.Body.Close()
 
 		for _, m := range result.Models {
-			supportsGenerate := false
-			for _, method := range m.SupportedGenerationMethods {
-				if method == "generateContent" {
-					supportsGenerate = true
-					break
-				}
-			}
-			if !supportsGenerate {
+			if !dispatchableModel(m.SupportedGenerationMethods) {
 				continue
 			}
 
-			modelID := m.Name
-			if len(modelID) > 7 && modelID[:7] == "models/" {
-				modelID = modelID[7:]
-			}
+			modelID := bareModel(m.Name)
 
 			allModels = append(allModels, provider.RemoteModel{
 				ModelID:       modelID,
