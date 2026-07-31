@@ -70,31 +70,31 @@ go get github.com/siguago/llmkit
 
 能力按**端点**而不是按功能划分，因为厂商的支持就是按端点参差的：聚合类服务能生成图像却没有编辑端点，五家能建视频任务但只有一家能取消。
 
-| 厂商 | Chat / 流式 | 模型列表 | Embeddings | 图像生成 | 图像编辑 | 视频生成 | 视频取消 |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| openai | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| anthropic | ✅ | ✅ | — | — | — | — | — |
-| gemini | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
-| xai | ✅ | ✅ | — | — | — | — | — |
-| mistral | ✅ | ✅ | ✅ | — | — | — | — |
-| deepseek | ✅ | ✅ | — | — | — | — | — |
-| moonshot | ✅ | ✅ | — | — | — | — | — |
-| zhipu | ✅ | ✅ | ✅ | — | — | — | — |
-| minimax | ✅ | ✅ | ✅ | — | — | — | — |
-| siliconflow | ✅ | ✅ | ✅ | — | — | — | — |
-| dashscope | ✅ | ✅ | ✅ | — | — | ✅ | — |
-| volcengine | ✅ | ✅ | — | — | — | ✅ | ✅ |
-| groq | ✅ | ✅ | — | — | — | — | — |
-| together | ✅ | ✅ | ✅ | — | — | — | — |
-| fireworks | ✅ | ✅ | ✅ | — | — | — | — |
-| cerebras | ✅ | ✅ | — | — | — | — | — |
-| ollama | ✅ | ✅ | ✅ | — | — | — | — |
-| vllm | ✅ | ✅ | ✅ | — | — | — | — |
-| openrouter | ✅ | ✅ | — | ✅ | — | ✅ | — |
-| easyrouter | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| vercel | ✅ | ✅ | ✅ | ✅ | — | — | — |
+| 厂商 | Chat / 流式 | 模型列表 | Embeddings | Rerank | 图像生成 | 图像编辑 | 视频生成 | 视频取消 |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| openai | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | — |
+| anthropic | ✅ | ✅ | — | — | — | — | — | — |
+| gemini | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
+| xai | ✅ | ✅ | — | — | — | — | — | — |
+| mistral | ✅ | ✅ | ✅ | — | — | — | — | — |
+| deepseek | ✅ | ✅ | — | — | — | — | — | — |
+| moonshot | ✅ | ✅ | — | — | — | — | — | — |
+| zhipu | ✅ | ✅ | ✅ | — | — | — | — | — |
+| minimax | ✅ | ✅ | ✅ | — | — | — | — | — |
+| siliconflow | ✅ | ✅ | ✅ | ✅ | — | — | — | — |
+| dashscope | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
+| volcengine | ✅ | ✅ | — | — | — | — | ✅ | ✅ |
+| groq | ✅ | ✅ | — | — | — | — | — | — |
+| together | ✅ | ✅ | ✅ | — | — | — | — | — |
+| fireworks | ✅ | ✅ | ✅ | — | — | — | — | — |
+| cerebras | ✅ | ✅ | — | — | — | — | — | — |
+| ollama | ✅ | ✅ | ✅ | — | — | — | — | — |
+| vllm | ✅ | ✅ | ✅ | — | — | — | — | — |
+| openrouter | ✅ | ✅ | — | — | ✅ | — | ✅ | — |
+| easyrouter | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
+| vercel | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
 
-对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsEmbeddings` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
+对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsEmbeddings` / `SupportsRerank` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
 
 > 这张表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
 >
@@ -112,7 +112,7 @@ go get github.com/siguago/llmkit
 >
 > **volcengine 的 embeddings 不接，是因为语义对不上，不是因为字段名对不上。** 方舟的文本 embeddings API（`/api/v3/embeddings`，`doubao-embedding-text-*`）已进入官方「下线文档归档」；当前在线的是多模态 `doubao-embedding-vision-*`，走 `/api/v3/embeddings/multimodal`，它的 `input` 是**一条内容的各个部分**（文本 / 图片 / 视频）融合成**一个**向量，响应的 `data` 是单个对象而不是数组。而 `Embed` 的契约是「N 条输入 → N 个向量，`Data[i]` 对应 `Input[i]`」。硬接就得把一次 `Embed` 扇出成 N 个 HTTP 请求 —— 100 个 chunk 变成 100 次计费。这种成本悬崖不该藏在一个回答「支持」的能力探测后面，所以如实回答不支持。多模态向量化值得单独一套接口（融合输入本来就是它的卖点），不该硬塞进这一个。
 >
-> **minimax 的 embeddings 是手写的，不是白拿的。** 它的路由同样不是 OpenAI 形状（要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp` 报错），但**批量语义是对得上的**（N 条进、N 个向量出、顺序一致），所以 adapter 里写了一层翻译，用法见本节下面的「minimax embeddings」。
+> **minimax 和 gemini 的 embeddings 是手写的，不是白拿的。** 两家的路由都不是 OpenAI 形状 —— minimax 要 `texts` 而非 `input`、必填 `type`、响应是顶层 `vectors`、还会在 HTTP 200 下用 `base_resp` 报错；gemini 走 `:batchEmbedContents`，每条输入要包成 `content.parts`。但**两家的批量语义都是对得上的**（N 条进、N 个向量出、顺序一致），所以各写了一层翻译，用法见本节下面的「minimax embeddings」和「gemini embeddings」。这正是 volcengine 的反面 —— 那一家不是形状不对，是操作本身就不同。
 >
 > **vllm 的 Embeddings 是 true，但取决于你起的模型**：vLLM 的 OpenAI server 确实有 `/v1/embeddings`，可一个进程只服务一个模型，只有那是 embedding 模型时才答得上。这是部署问题，不是端点有无的问题，SDK 无从代答。
 >
@@ -136,6 +136,52 @@ resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
 ```
 
 `Dimensions` 和 `EncodingFormat` 会**报错而不是被忽略** —— embo-01 的向量宽度固定，你要了 256 维却拿到 1536 维是察觉不到的。忘了嵌 `"minimax"` 那层 key 同样会报错，而不是静默按默认值发出去。
+
+#### gemini embeddings
+
+同样是手写翻译层：Gemini 的路由不是 OpenAI 形状（走 `:batchEmbedContents`，每条输入包成 `content.parts`），但**批量语义对得上** —— N 条进、N 个向量出、顺序一致 —— 所以翻译是忠实的。
+
+`task_type` 告诉模型这批文本的用途，取值不同向量也不同（`RETRIEVAL_QUERY` / `RETRIEVAL_DOCUMENT` / `SEMANTIC_SIMILARITY` / `CLASSIFICATION` / `CLUSTERING` 等）。统一请求里没有对应字段，走 `ProviderOptions`：
+
+```go
+resp, err := c.Embed(ctx, &llmkit.EmbeddingRequest{
+    Model: "text-embedding-004",
+    Input: []string{"天很蓝", "海很深"},
+    ProviderOptions: map[string]any{"gemini": map[string]any{
+        "task_type": "RETRIEVAL_DOCUMENT",
+        "title":     "一篇文档",  // 只在 RETRIEVAL_DOCUMENT 下有意义
+    }},
+})
+```
+
+`Dimensions` 会作为 `outputDimensionality` 转发（能不能用取决于模型）；`EncodingFormat` 只接受 `float`，因为 Gemini 没有 base64 线格式，要 base64 会**报错而不是静默给你 float**。忘了嵌 `"gemini"` 那层 key 同样报错。
+
+与 minimax 的一处刻意差异：**`task_type` 不做本地校验，直接转发**。minimax 的 `type` 只有两个取值且封闭，所以本地拦；Gemini 的取值集合还在扩（`CODE_RETRIEVAL_QUERY` 是后加的），本地白名单会挡掉将来新增的合法值，所以退回本项目的默认惯例 —— 让你看厂商自己的报错。
+
+Gemini 在这个端点不返回 token 计数，所以 `Usage` 只有 `RequestCount`，token 字段是 0 而不是估算值。
+
+#### rerank
+
+重排序是 RAG 的第二段：embeddings 先廉价召回一批候选，reranker 再把 query 和 document 放在一起精确打分。两者互补而非替代 —— reranker 没法检索语料库，embedding 模型也看不到 query 和 document 的交互。
+
+```go
+topN := 3
+resp, err := c.Rerank(ctx, &llmkit.RerankRequest{
+    Model:     "BAAI/bge-reranker-v2-m3",
+    Query:     "什么是熊猫？",
+    Documents: []string{"苹果是一种水果", "汽车有四个轮子", "熊猫是中国特有的哺乳动物"},
+    TopN:      &topN,
+})
+for _, r := range resp.Results {
+    fmt.Println(r.Index, r.RelevanceScore)  // 2 0.98 / 0 0.31 ...
+}
+```
+
+**返回的不是输入顺序。** 这是统一接口里唯一一处刻意打破位置契约的地方 —— 重排本身就是这个操作的目的。结果按相关性降序，还可能被 `TopN` 截断，所以要用 `Result.Index` 映射回你传进去的 `Documents`。越界的 index 会**报错而不是透传**：那本来会变成你使用时的下标越界 panic。
+
+`RelevanceScore` 的量纲**不跨厂商也不跨模型可比** —— 有的给 0..1 概率，有的给无界 logit。用它排序、用它跟你为那个具体模型调好的阈值比较，别拿去跨模型比。
+
+目前只有 siliconflow 一家实现。rerank 不属于 OpenAI API，所以 compat 层默认不带它，得由 adapter 显式选用 `compat.NewWithRerank` —— 否则 21 家 compat 厂商会集体声称支持一条大多数都没有的路由。厂商特有参数（比如硅基流动的 `max_chunks_per_doc`）走 `ProviderOptions["siliconflow"]`。
 
 ---
 
@@ -521,13 +567,11 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 | 缺口 | 说明 |
 |---|---|
 | 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
-| Rerank | RAG 重排序，SiliconFlow / Jina / Cohere 有 |
 | Files API | 上传文件供后续引用；目前只支持消息内联文件 |
 | Batch API | 批量异步（通常半价） |
 | Moderation API | 独立的内容审核端点（图像生成里的 `moderation` 参数不是这个） |
 | Token 计数 | 本地 tokenizer 需要第三方库，与零依赖冲突；Anthropic 的 `count_tokens` 端点也未接 |
 | 余额 / 额度查询 | 未接 |
-| Gemini embeddings | Gemini 有该 API，但适配器还没实现 |
 | 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 都不是 Bearer 鉴权（`api-key` + `api-version`、SigV4、服务账号 OAuth2），要各自的鉴权实现，目前都没有 |
 | 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，需要自己在上层做 |
 
@@ -640,7 +684,7 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 | `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
 | `provider/siliconflow` | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0%。新增的 8 家薄封装同理 |
 
-总覆盖率 56%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
+总覆盖率 57%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
 ---
 

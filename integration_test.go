@@ -85,6 +85,75 @@ func TestLiveModelsCoverAllProviders(t *testing.T) {
 	}
 }
 
+// liveEmbedModels and liveRerankModels are the same idea for the non-chat
+// routes, and need their own guard for the same reason: TestLiveEmbeddings and
+// TestLiveRerank Skip when a provider has no entry, so a capability can be
+// declared and never actually exercised against the vendor — the table stays
+// quiet about what it is not covering.
+//
+// That is not hypothetical. Gemini gained embeddings without an entry here and
+// silently skipped; writing this guard is what surfaced it, along with six
+// other providers whose embeddings claim had never been verified live.
+var (
+	liveEmbedModels = map[string]string{
+		OpenAI:      "text-embedding-3-small",
+		Gemini:      "text-embedding-004",
+		SiliconFlow: "BAAI/bge-m3",
+		Zhipu:       "embedding-3",
+		Mistral:     "mistral-embed",
+		MiniMax:     "embo-01",
+		DashScope:   "text-embedding-v4",
+		Together:    "BAAI/bge-base-en-v1.5",
+		Fireworks:   "nomic-ai/nomic-embed-text-v1.5",
+		Ollama:      "nomic-embed-text",
+		Vercel:      "openai/text-embedding-3-small",
+		EasyRouter:  "text-embedding-3-small",
+	}
+	liveRerankModels = map[string]string{
+		SiliconFlow: "BAAI/bge-reranker-v2-m3",
+	}
+	// A vLLM process serves exactly one model, so no default is guessable —
+	// set LLMKIT_TEST_EMBED_MODEL_VLLM to whatever you started it with.
+	liveEmbedUnknown = map[string]bool{VLLM: true}
+)
+
+func TestLiveEmbedModelsCoverEmbedders(t *testing.T) {
+	for _, name := range Providers() {
+		c, err := New(name, WithAPIKey("list-only-placeholder"))
+		if err != nil {
+			t.Fatalf("New(%s): %v", name, err)
+		}
+		if !c.SupportsEmbeddings() {
+			if liveEmbedModels[name] != "" {
+				t.Errorf("liveEmbedModels has an entry for %q, which does not implement Embedder", name)
+			}
+			continue
+		}
+		if liveEmbedModels[name] == "" && !liveEmbedUnknown[name] {
+			t.Errorf("%q claims embeddings but has no live model — add one to liveEmbedModels, "+
+				"or record why not in liveEmbedUnknown", name)
+		}
+	}
+}
+
+func TestLiveRerankModelsCoverRerankers(t *testing.T) {
+	for _, name := range Providers() {
+		c, err := New(name, WithAPIKey("list-only-placeholder"))
+		if err != nil {
+			t.Fatalf("New(%s): %v", name, err)
+		}
+		if !c.SupportsRerank() {
+			if liveRerankModels[name] != "" {
+				t.Errorf("liveRerankModels has an entry for %q, which does not implement Reranker", name)
+			}
+			continue
+		}
+		if liveRerankModels[name] == "" {
+			t.Errorf("%q claims rerank but has no live model — add one to liveRerankModels", name)
+		}
+	}
+}
+
 // liveClient skips the test when the provider isn't configured to be reached.
 //
 // Providers that need no credential (Ollama, vLLM) can't be gated on one, and
@@ -258,15 +327,7 @@ func TestLiveModels(t *testing.T) {
 // TestLiveEmbeddings checks the embeddings endpoint. Set
 // LLMKIT_TEST_EMBED_MODEL_<PROVIDER> to pick the model.
 func TestLiveEmbeddings(t *testing.T) {
-	defaults := map[string]string{
-		OpenAI:      "text-embedding-3-small",
-		SiliconFlow: "BAAI/bge-m3",
-		Zhipu:       "embedding-3",
-		Moonshot:    "",
-		MiniMax:     "",
-		Vercel:      "openai/text-embedding-3-small",
-		EasyRouter:  "text-embedding-3-small",
-	}
+	defaults := liveEmbedModels
 	for _, name := range Providers() {
 		t.Run(name, func(t *testing.T) {
 			c := liveClient(t, name)
@@ -293,6 +354,50 @@ func TestLiveEmbeddings(t *testing.T) {
 				t.Fatalf("embedding payload = %T %v", resp.Data[0].Embedding, resp.Data[0].Embedding)
 			}
 			t.Logf("%d dimensions", len(vec))
+		})
+	}
+}
+
+// TestLiveRerank checks the rerank endpoint against a real vendor.
+//
+// The assertion is on the ranking, not just on getting a response: a broken
+// integration can echo the input order with flat scores and look healthy. The
+// relevant document is sent last, so a passthrough cannot accidentally pass.
+func TestLiveRerank(t *testing.T) {
+	defaults := liveRerankModels
+	for _, name := range Providers() {
+		t.Run(name, func(t *testing.T) {
+			c := liveClient(t, name)
+			if !c.SupportsRerank() {
+				t.Skip("no rerank endpoint")
+			}
+			model := os.Getenv("LLMKIT_TEST_RERANK_MODEL_" + strings.ToUpper(name))
+			if model == "" {
+				model = defaults[name]
+			}
+			if model == "" {
+				t.Skip("no rerank model configured; set LLMKIT_TEST_RERANK_MODEL_" + strings.ToUpper(name))
+			}
+
+			resp, err := c.Rerank(context.Background(), &RerankRequest{
+				Model: model,
+				Query: "什么是熊猫？",
+				Documents: []string{
+					"苹果是一种常见的水果。",
+					"汽车通常有四个轮子。",
+					"熊猫是中国特有的哺乳动物，以竹子为食。",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Rerank: %v", err)
+			}
+			if len(resp.Results) == 0 {
+				t.Fatal("no results")
+			}
+			if got := resp.Results[0].Index; got != 2 {
+				t.Errorf("top result index = %d, want 2 — the reranker did not identify the relevant document", got)
+			}
+			t.Logf("top: index=%d score=%.4f", resp.Results[0].Index, resp.Results[0].RelevanceScore)
 		})
 	}
 }

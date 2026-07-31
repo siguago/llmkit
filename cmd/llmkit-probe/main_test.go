@@ -340,6 +340,36 @@ func TestEmbedModelsCoverEmbedders(t *testing.T) {
 	}
 }
 
+// TestRerankModelsCoverRerankers is TestEmbedModelsCoverEmbedders for the
+// rerank route, and exists for the same reason: the probe's whole promise is
+// "configure one key and see what this vendor actually supports". A capability
+// that reports true but has no probe model silently inherits a SKIP, which
+// reads as coverage it does not have.
+//
+// This guard was written after rerank shipped without one — the capability was
+// added, SupportsRerank answered true, and nothing in the probe could exercise
+// it. The gap was invisible precisely because no test asked.
+func TestRerankModelsCoverRerankers(t *testing.T) {
+	for _, name := range llmkit.Providers() {
+		c, err := llmkit.New(name, llmkit.WithAPIKey("list-only-placeholder"))
+		if err != nil {
+			t.Fatalf("New(%s): %v", name, err)
+		}
+		if !c.SupportsRerank() {
+			// The inverse also has to hold: a table entry for a provider that
+			// doesn't implement Reranker is dead weight that reads as coverage.
+			if defaultRerankModel(name) != "" {
+				t.Errorf("rerankModels has an entry for %q, which does not implement Reranker", name)
+			}
+			continue
+		}
+		if defaultRerankModel(name) == "" && rerankModelUnknown[name] == "" {
+			t.Errorf("%q claims rerank but has no probe model — add one to rerankModels, "+
+				"or record why not in rerankModelUnknown", name)
+		}
+	}
+}
+
 // -list must work with no credentials configured at all — it is the command you
 // run to find out what to configure.
 func TestProviderDoesChat_NeedsNoCredential(t *testing.T) {
