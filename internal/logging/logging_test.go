@@ -107,17 +107,15 @@ func TestEnabled_RespectsCallerLevel(t *testing.T) {
 	}
 }
 
-// This pins current behaviour, which does NOT match the doc comment on Enabled
-// and currently defeats a real guard in the stream parsers.
+// The default path must be silent at every level, not just below Info.
 //
-// The comment says Enabled can be used to "skip building expensive log
-// arguments ... on the default silent path". It cannot: discard is built as
-// slog.NewTextHandler(io.Discard, nil), and a nil HandlerOptions defaults the
-// level to Info — so Info, Warn and Error all report enabled. A caller
-// following the comment still builds the expensive arguments; they are merely
-// formatted and thrown away.
+// This used to fail. discard was slog.NewTextHandler(io.Discard, nil), and a
+// nil HandlerOptions defaults the level to Info — so Enabled answered true for
+// Info, Warn and Error while throwing every record away. Any caller following
+// Enabled's advice still built the expensive arguments; they were formatted and
+// discarded.
 //
-// This is not hypothetical. provider.StreamDiagnostics.Malformed guards its
+// That was not hypothetical. provider.StreamDiagnostics.Malformed guards its
 // warn with exactly this check, on a logger obtained from From:
 //
 //	// Building the preview costs a copy, so skip it when nothing is listening —
@@ -126,28 +124,63 @@ func TestEnabled_RespectsCallerLevel(t *testing.T) {
 //	        d.logger.Warn(..., "payload_preview", TruncateForLog(payload, 200))
 //	}
 //
-// With no caller logger installed, d.logger is discard, the guard is always
-// true, and TruncateForLog runs for every malformed frame in tolerant mode —
-// the precise copy the comment says is being avoided.
-//
-// The fix is in this package, not at the call site: discard needs a handler
-// whose Enabled is always false (a level above Error, or a custom handler;
-// slog.DiscardHandler would do it but needs Go 1.24 and go.mod declares 1.22).
-// When that lands, the Info/Warn/Error half of this test flips and should be
-// rewritten to assert silence.
-func TestEnabled_DiscardPathIsNotActuallySilent(t *testing.T) {
+// With no caller logger installed d.logger is discard, so the guard was always
+// true and TruncateForLog ran for every malformed frame in tolerant mode — the
+// precise copy the comment claimed to avoid. Hence discardHandler.
+func TestEnabled_DiscardPathIsSilentAtEveryLevel(t *testing.T) {
 	ctx := context.Background()
 
-	if Enabled(ctx, slog.LevelDebug) {
-		t.Error("Debug should be disabled on the discard path")
-	}
-	for _, lv := range []slog.Level{slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
-		if !Enabled(ctx, lv) {
-			t.Errorf("Enabled(%v) on the discard path is now false — the discard "+
-				"handler was made truly silent; update Enabled's doc comment and "+
-				"this test together", lv)
+	for _, lv := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+		if Enabled(ctx, lv) {
+			t.Errorf("Enabled(%v) on the discard path = true; guards that skip "+
+				"expensive argument building are defeated whenever this is true", lv)
 		}
 	}
+	// Above Error too — a caller logging at a custom high level gets the same
+	// answer, since the handler ignores the level entirely.
+	if Enabled(ctx, slog.LevelError+4) {
+		t.Error("a level above Error should also be disabled on the discard path")
+	}
+}
+
+// discardHandler has to satisfy slog.Handler honestly, not just compile.
+//
+// Handle is unreachable through the logger — Enabled short-circuits every call
+// before slog gets there — but slog.Handler implementations are allowed to be
+// invoked directly, and WithAttrs/WithGroup returning nil would panic the next
+// caller. Asserting the contract here is cheaper than discovering it from a
+// stack trace.
+func TestDiscardHandler_SatisfiesContract(t *testing.T) {
+	var h slog.Handler = discardHandler{}
+
+	if err := h.Handle(context.Background(), slog.Record{}); err != nil {
+		t.Errorf("Handle returned %v, want nil", err)
+	}
+	if got := h.WithAttrs([]slog.Attr{slog.String("k", "v")}); got == nil {
+		t.Error("WithAttrs returned nil, which would panic the next call")
+	}
+	if got := h.WithGroup("g"); got == nil {
+		t.Error("WithGroup returned nil, which would panic the next call")
+	}
+	// Derived handlers must stay silent too, or the guard leaks through
+	// logger.With(...).
+	if h.WithAttrs(nil).Enabled(context.Background(), slog.LevelError) {
+		t.Error("a handler derived via WithAttrs must still report disabled")
+	}
+	if h.WithGroup("g").Enabled(context.Background(), slog.LevelError) {
+		t.Error("a handler derived via WithGroup must still report disabled")
+	}
+}
+
+// Silence must not come at the cost of usability: From still returns a logger
+// that can be called without a nil check, it just does nothing.
+func TestDiscardLoggerStillUsable(t *testing.T) {
+	l := From(context.Background())
+	l.Debug("d")
+	l.Info("i")
+	l.Warn("w", "k", "v")
+	l.Error("e")
+	l.With("a", 1).WithGroup("g").Warn("nested")
 }
 
 // Enabled forwards ctx to slog, which must tolerate the same zero-value context
