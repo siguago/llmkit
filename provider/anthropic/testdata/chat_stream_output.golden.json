@@ -1,0 +1,33 @@
+[
+  {
+    "id": "chatcmpl-msg_golden",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-test",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": "assistant",
+          "content": "pong"
+        },
+        "finish_reason": null
+      }
+    ]
+  },
+  {
+    "id": "chatcmpl-msg_golden",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-test",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": ""
+        },
+        "finish_reason": "stop"
+      }
+    ]
+  }
+]

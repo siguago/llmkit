@@ -1,0 +1,49 @@
+[
+  {
+    "id": "chatcmpl_stream",
+    "object": "chat.completion.chunk",
+    "created": 123,
+    "model": "gpt-4o-mini",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": "assistant",
+          "content": ""
+        },
+        "finish_reason": null
+      }
+    ]
+  },
+  {
+    "id": "chatcmpl_stream",
+    "object": "chat.completion.chunk",
+    "created": 123,
+    "model": "gpt-4o-mini",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": "",
+          "content": "pong"
+        },
+        "finish_reason": null
+      }
+    ]
+  },
+  {
+    "id": "chatcmpl_stream",
+    "object": "chat.completion.chunk",
+    "created": 123,
+    "model": "gpt-4o-mini",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": ""
+        },
+        "finish_reason": "stop"
+      }
+    ]
+  }
+]

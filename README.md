@@ -5,14 +5,14 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/siguago/llmkit)](https://goreportcard.com/report/github.com/siguago/llmkit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-一套 Go SDK，用同一套 OpenAI 兼容接口调用 21 家主流大模型厂商。**零第三方依赖**，只用标准库。
+一套 Go SDK，用同一套 OpenAI 兼容接口调用 21 家主流大模型厂商。需要保留厂商语义时，还可显式使用 OpenAI Responses 与 Anthropic Messages 的原生协议面。**零第三方依赖**，只用标准库。
 
 ```go
 client, _ := llmkit.New(llmkit.DeepSeek)          // key 取自 DEEPSEEK_API_KEY
 answer, _ := client.Say(ctx, "deepseek-chat", "用一句话解释 CAP 定理。")
 ```
 
-换一家厂商只改一个常量，请求结构、响应结构、错误处理、流式读法全都不变。
+统一 Chat 接口里，换一家厂商只改一个常量，请求结构、响应结构、错误处理、流式读法全都不变。原生协议面不会按模型名自动启用，也不与 Chat DTO 混用。
 
 国内厂商（DeepSeek / Kimi / 智谱 / MiniMax / 硅基流动 / 通义 / 豆包）与海外厂商
 （OpenAI / Anthropic / Gemini）以及聚合渠道（OpenRouter / Vercel AI Gateway）都在一套接口下，
@@ -38,8 +38,8 @@ go get github.com/siguago/llmkit
 
 | 常量 | 厂商 | 环境变量 | 实现方式 |
 |------|------|----------|----------|
-| `llmkit.OpenAI` | OpenAI | `OPENAI_API_KEY` | compat + reasoning 参数清洗 |
-| `llmkit.Anthropic` | Anthropic Claude | `ANTHROPIC_API_KEY` | 原生 Messages API |
+| `llmkit.OpenAI` | OpenAI | `OPENAI_API_KEY` | compat Chat + 显式原生 Responses |
+| `llmkit.Anthropic` | Anthropic Claude | `ANTHROPIC_API_KEY` | Chat 翻译层 + 显式原生 Messages |
 | `llmkit.Gemini` | Google Gemini | `GEMINI_API_KEY` | 原生 generateContent |
 | `llmkit.XAI` | xAI Grok | `XAI_API_KEY` | compat |
 | `llmkit.Mistral` | Mistral AI | `MISTRAL_API_KEY` | compat |
@@ -96,7 +96,20 @@ go get github.com/siguago/llmkit
 
 对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsEmbeddings` / `SupportsRerank` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
 
-> 这张表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
+### 原生协议能力矩阵
+
+原生协议是独立、显式的能力面；这里的 ✅ 不会让 `Chat` / `ChatStream` 改走另一条 endpoint。
+
+| 协议面 | 已接入 transport | 同步 create | SSE stream | 资源生命周期 | Token count |
+|---|---|:---:|:---:|:---:|:---:|
+| OpenAI Responses | 直连 OpenAI | ✅ | ✅ | ✅ retrieve / delete / cancel / input items | ✅ input tokens |
+| Anthropic Messages | 直连 Anthropic | ✅ | ✅ | — | ✅ input tokens |
+
+Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsResponseStreaming`、`SupportsResponseRetrieval`、`SupportsResponseCancellation`、`SupportsResponseDeletion`、`SupportsResponseInputItems`、`SupportsResponseTokenCount`。Anthropic 对应 `SupportsAnthropicMessages`、`SupportsAnthropicMessageStreaming`、`SupportsAnthropicTokenCount`。这能让只实现部分路由的 relay 如实声明能力；当前首发 transport 仍只保证两家官方直连端点。
+
+> 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
+
+> 前面的统一 Chat / 媒体能力表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
 >
 > **dashscope 和 volcengine 一个 adapter 接两套上游 API**：对话和模型列表走各家的 OpenAI 兼容端点（百炼是 `/compatible-mode/v1`，方舟就是 `/api/v3` 本身），视频走各自的原生异步任务端点。给 `WithBaseURL` 传的是**主机根**，兼容路径由 adapter 自己拼。百炼的 embeddings 一并走兼容端点（`text-embedding-v4`）；方舟的不走，原因见下。
 >
@@ -226,6 +239,57 @@ for {
     fmt.Print(llmkit.ChunkText(chunk))
 }
 ```
+
+### OpenAI Responses（原生）
+
+Responses 使用独立的 `protocol/responses` DTO，不经过 Chat Completions 转换。同步 create、SSE 和 input token count 是三次**独立调用**；下面只展开同步调用，三种可运行路径都在 [examples/responses](examples/responses/main.go)：
+
+```go
+import responsesapi "github.com/siguago/llmkit/protocol/responses"
+
+store := false // SDK 不改写上游默认值；不需要服务端保留时请显式关闭
+resp, err := client.CreateResponse(ctx, &responsesapi.CreateRequest{
+    Model: "gpt-5-mini",
+    Input: responsesapi.NewTextInput("用一句话解释 CAP 定理。"),
+    Store: &store,
+})
+if err != nil { return err }
+fmt.Println(resp.OutputText())
+```
+
+```bash
+OPENAI_API_KEY=sk-... go run ./examples/responses -mode=sync
+OPENAI_API_KEY=sk-... go run ./examples/responses -mode=stream
+OPENAI_API_KEY=sk-... go run ./examples/responses -mode=tokens
+```
+
+`store` 是数据保留选择，不是本地缓存开关。llmkit 刻意不替调用方覆盖 OpenAI 的默认值；示例显式传 `false`。如果要用 `RetrieveResponse`、`ListResponseInputItems` 或 `previous_response_id` 做持久状态链路，请按产品的数据保留要求显式选择，并在不再需要时调用 `DeleteResponse`。后台任务把 `Background` 显式设为 `true` 后可交给 `WaitResponse` 轮询，最终仍要检查 `Response.Status`、`Error` 与 `IncompleteDetails`。
+
+### Anthropic Messages（原生）
+
+原生 Messages 保留 content block、thinking signature、tool use/result、原生 usage 与 SSE event；它不会自动和 `ChatRequest` 相互转换。同步 create、SSE 与服务端 token count 的完整示例在 [examples/anthropic-native](examples/anthropic-native/main.go)：
+
+```go
+import anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+
+turns := []anthropicapi.MessageParam{{
+    Role:    anthropicapi.RoleUser,
+    Content: anthropicapi.StringContent("用一句话解释 CAP 定理。"),
+}}
+message, err := client.CreateAnthropicMessage(ctx, &anthropicapi.MessageRequest{
+    Model: "claude-sonnet-4-5-20250929", MaxTokens: 256, Messages: turns,
+})
+if err != nil { return err }
+fmt.Println(message.Text())
+```
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... go run ./examples/anthropic-native -mode=sync
+ANTHROPIC_API_KEY=sk-ant-... go run ./examples/anthropic-native -mode=stream
+ANTHROPIC_API_KEY=sk-ant-... go run ./examples/anthropic-native -mode=tokens
+```
+
+默认发送稳定的 `anthropic-version: 2023-06-01`；只有确实使用对应 beta 字段时才给单次调用传 `anthropicapi.WithBetas(...)`，不要把 beta header 偷塞进全局自定义 header。
 
 ### 工具调用
 
@@ -376,7 +440,7 @@ llmkit.WithRetry(llmkit.RetryConfig{
 })
 ```
 
-### 花钱的调用不会被盲目重放
+### 创建型调用不会被盲目重放
 
 `GenerateImage` 和 `CreateVideo` 成功即计费，而厂商没有给幂等键，所以它们**不走上面这套通用策略**。默认只重试那些能证明"上游根本没接活"的错误：
 
@@ -402,9 +466,11 @@ llmkit.WithMediaRetry(llmkit.NoRetry())        // 媒体创建一次都不重试
 llmkit.WithMediaRetry(llmkit.DefaultRetry())   // 按通用策略重试，接受可能重复扣费
 ```
 
+`CreateResponse` 和 `CreateAnthropicMessage` 也是会生成内容、可能计费且没有 SDK 级幂等键的 create。它们固定从 `WithRetry` 配置中取 **replay-safe-only** 子集；读超时、5xx、连接中途断开这类「上游可能已经受理」的失败会直接返回。不要在调用方再套一个不看 `IsSafeToReplay` 的通用重试循环，否则一次模糊失败可能变成两次生成和两笔费用。Token count、retrieve 与 input-items 是读操作，仍使用常规重试策略。
+
 ### 另外三个边界
 
-- **流式**只重试握手阶段。一旦流建立成功，中途断开不会重试 —— 已经吐给调用方的 token 无法回滚。
+- **流式**只重试创建/握手阶段。一旦 `ChatStream`、Responses SSE 或 Anthropic Messages SSE 返回给调用方，中途断开不会重放 —— 已经吐给调用方的 event/token 无法回滚。
 - **`EditImage` 永不重试**。上传的 `io.Reader` 是一次性的，第二次尝试读不到内容。要重试请自己重开文件。
 - 重试期间 context 被取消，返回的是**上游的错误**而不是 `context.Canceled` —— 你想知道的是请求为什么失败。
 
@@ -482,7 +548,9 @@ client, _ := llmkit.Wrap(p, llmkit.WithAPIKey(key))
 ```
 llmkit/
 ├── llmkit.go            # New / Wrap / provider 常量 / 工厂表
-├── client.go            # Client：chat / embeddings / images / video
+├── client.go            # Client：统一 chat / embeddings / images / video
+├── responses.go         # OpenAI Responses 原生门面
+├── anthropic_messages.go # Anthropic Messages 原生门面
 ├── messages.go          # 便捷构造器与响应提取
 ├── options.go           # WithAPIKey / WithBaseURL / WithTimeout / ...
 ├── retry.go             # 退避重试
@@ -491,16 +559,19 @@ llmkit/
 ├── integration_test.go  # 真实 API 测试（-tags=integration，默认不跑）
 ├── provider/            # 适配层 —— 直接用也行
 │   ├── types.go         #   统一请求/响应/流接口
+│   ├── native.go        #   原生协议的细粒度可选能力接口
 │   ├── compat/          #   OpenAI 兼容基类
 │   ├── anthropic/       #   原生实现
 │   ├── gemini/          #   原生实现
 │   └── ...              #   其余 11 家
+├── protocol/            # Responses / Anthropic 原生 DTO、union 与 event
 ├── internal/
+│   ├── sse/             #   两套原生 stream 共用的 SSE framing
 │   ├── httpx/           #   统一 transport（代理 / 连接池 / 头注入）
 │   ├── ipprivacy/       #   剥离客户端 IP 泄露头
 │   └── safehttp/        #   SSRF 安全的图片下载
 ├── cmd/llmkit-probe/    # 能力探测 CLI（配个 key 就能实测厂商支持什么）
-├── examples/            # 10 个可运行示例，含一份生产配置全家桶
+├── examples/            # 可运行示例，含原生协议与生产配置全家桶
 ├── Makefile             # make help 看全部命令
 └── .env.example         # 复制成 .env 填 key，probe 会自动读
 ```
@@ -532,6 +603,8 @@ func New(baseURL string) *compat.Provider {
 
 可选能力按需实现 `ModelLister` / `Embedder` / `ImageProvider` / `VideoProvider`，Client 会自动探测。
 
+原生协议也按 endpoint 分接口：例如 relay 只接了 Responses JSON create，就只实现 `provider.ResponsesCreator`，不要顺手实现 stream / retrieve，更不要把这些方法加到所有 adapter 都嵌入的 compat 基类。否则 Go 的 method promotion 会让每家 provider 的 `Supports*` 都错误返回 true。Anthropic Messages 的 create / stream / token count 同理分别 opt in。
+
 **如果这家在 HTTP 200 下报错**（国内厂商常见），用 `provider.WithErrorMetadata(err, 厂商码, 分类)` 附加元数据：`StatusCode` 仍忠实返回 200，而 `IsAuthError` / `IsRateLimited` / `IsRetryable` 会按你给的分类回答。参考 [minimax](provider/minimax/embeddings.go) 的 `base_resp` 处理。
 
 一个约束值得单独说：`ErrorCategoryRateLimit` 比另外四类多一层断言 —— 它同时声明**上游没开始干活、没产生计费**，因为 `IsSafeToReplay` 会据此重放图像 / 视频创建。HTTP 429 自己够格；「200 + 体内限流」不自动够格，除非厂商文档写明这种响应不计费。拿不准就传 `""`：留空则由 HTTP 状态决定，而 200 既不可重试也不可重放，是安全的那一侧。
@@ -549,6 +622,8 @@ OPENAI_API_KEY=sk-...  go run ./examples/structured
 SILICONFLOW_API_KEY=sk-... go run ./examples/embeddings
 OPENAI_API_KEY=sk-...  go run ./examples/images "一只柴犬"
 GEMINI_API_KEY=...     go run ./examples/videos
+OPENAI_API_KEY=sk-...  go run ./examples/responses -mode=sync
+ANTHROPIC_API_KEY=...  go run ./examples/anthropic-native -mode=stream
 go run ./examples/multiprovider     # 跑所有配了 key 的厂商
 
 DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
@@ -567,12 +642,13 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 | 缺口 | 说明 |
 |---|---|
 | 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
-| Files API | 上传文件供后续引用；目前只支持消息内联文件 |
-| Batch API | 批量异步（通常半价） |
-| Moderation API | 独立的内容审核端点（图像生成里的 `moderation` 参数不是这个） |
-| Token 计数 | 本地 tokenizer 需要第三方库，与零依赖冲突；Anthropic 的 `count_tokens` 端点也未接 |
+| Files API | 上传、列举、删除等文件资源端点未接；原生请求 DTO 仍可在协议允许时内联文件或引用已有 `file_id` |
+| Batch API | OpenAI Batch 与 Anthropic Message Batches 均未接 |
+| Moderation API | 独立的内容审核端点未接；图像 / Responses 请求体里的 `moderation` 参数不是这个资源 API |
+| 通用 / 本地 Token 计数 | 统一 Chat 接口没有本地 tokenizer；只有原生 OpenAI Responses input tokens 与 Anthropic Messages `count_tokens` 端点已接 |
+| Responses 扩展产品面 | Conversations、WebSocket、`/responses/compact` 未接；部分内置工具只有 Raw 保真，没有专项强类型 |
 | 余额 / 额度查询 | 未接 |
-| 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 都不是 Bearer 鉴权（`api-key` + `api-version`、SigV4、服务账号 OAuth2），要各自的鉴权实现，目前都没有 |
+| 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 都需要各自的鉴权与路径实现；本版原生 Claude 只保证 Anthropic 官方直连 transport |
 | 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，需要自己在上层做 |
 
 > 自定义 `Transport` 曾经在这张表里，现在有了：见上面的 `WithTransport`，mTLS / 自签证书 / 埋点都走它。
@@ -655,9 +731,12 @@ HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 go test ./...
 ```bash
 go test ./provider/compat/ -run '^$' -fuzz FuzzStreamReader_Strict -fuzztime=30s
 go test ./provider/ -run '^$' -fuzz FuzzParseDataURI -fuzztime=30s
+go test ./internal/sse/ -run '^$' -fuzz FuzzDecoderChunking -fuzztime=30s
+go test ./protocol/responses/ -run '^$' -fuzz FuzzEventJSON -fuzztime=30s
+go test ./protocol/anthropic/ -run '^$' -fuzz FuzzEventRoundTrip -fuzztime=30s
 ```
 
-它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
+它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、任意网络分片不能改变 SSE 帧、未知原生 union/event 必须 Raw 保真、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
 
 要验证真的能跑通，有两条路，都会发真实请求、产生真实费用（每家几分之一美分，token 都封了顶）：
 

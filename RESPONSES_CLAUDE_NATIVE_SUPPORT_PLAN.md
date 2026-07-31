@@ -103,7 +103,8 @@ SSE typed core：
 
 - message_start、content_block_start/delta/stop、message_delta、message_stop、ping、error。
 - text、partial input JSON、thinking、signature、citation delta。
-- 工具 partial JSON 只在 block 完成后解析；仍保留原始片段。
+- 工具 partial JSON 只在 block 完成后解析；原始片段始终保留。因 max_tokens 或中断而形成的无效/不完整 JSON 不得把已正常终止的流改判为错误。
+- `server_tool_use` 等尚未强类型化的服务端工具块仍须接受 `input_json_delta`，有效输入回填到 Raw block，同时保持未知字段和大整数精度。
 - 多个并行 block 按 index 聚合。
 
 `anthropic-version` 默认 `2023-06-01`，同时提供专用配置覆盖；`anthropic-beta` 允许显式字符串列表，不能用封闭枚举阻挡未来 beta。认证仍由 provider 管理，不允许 ExtraFields 覆盖 URL、Authorization 或认证 header。
@@ -138,12 +139,14 @@ anthropic_messages.go     # 根 Client façade
 
 ```text
 ResponsesCreator
+ResponsesStreamer
 ResponsesRetriever
 ResponsesCanceller
 ResponsesDeleter
 ResponsesInputItemLister
 ResponsesTokenCounter
 AnthropicMessagesCreator
+AnthropicMessagesStreamer
 AnthropicTokenCounter
 ```
 
@@ -167,10 +170,12 @@ CountAnthropicMessageTokens
 
 - Native DTO 是 wire source of truth；Chat DTO 只是 compatibility view。
 - union 使用 `Type string` + typed known payload + `json.RawMessage` unknown fallback。
+- 判别字段默认严格必需；唯一例外是 Responses input 数组中的官方 EasyInputMessage 简写（`role` + `content`，`type` 可省略）。例外只在 Input 解码上下文生效，且往返时保留省略形态。
 - 未知 top-level/nested 字段必须保存，避免未来 API 增字段后往返丢失。
 - request 的 ExtraFields 与已知字段冲突时返回错误，不允许 silent override。
 - 不通过 `map[string]any` 中转需要保真的 JSON number，避免大整数精度损失。
-- 可选 false/0/null/absent 使用指针或显式 optional type区分。
+- 在上游 wire 语义确实区分时，可选 false/0/null/absent 使用指针或显式 optional type 区分；官方 response 中必定出现的 nullable 字段不为无效的 absent 形态另造状态。
+- required 的空数组/空对象/零值不得被 `omitempty` 删除；Response 顶层及 error event 的 required+nullable 字段保留 null，reasoning summary、output annotations、event logprobs 与 usage token-details（含 0 个 cache-write token）可完成 decode→encode 与终态 clone。
 - helper 可以提取 output text、tool calls、normalized usage，但不得改变原生对象。
 - stream accumulator 的终态对象与同等非流式 fixture 必须语义等价。
 
@@ -247,7 +252,9 @@ CountAnthropicMessageTokens
 - terminal event 先交付、下一次 EOF。
 - terminal 前断流明确失败。
 - Responses 多 output index/item/content index 交错。
+- Responses `content_part.added/done` 按 part 类型路由到 message 或 reasoning；未来未知 part 不得让后续终态事件不可读。
 - Claude 多 block index、partial JSON、ping、thinking/signature、流内 error。
+- Claude 未知 `server_tool_use` block 的 input delta 可聚合；截断/无效 partial JSON 可被调用者检查，且不阻断 message_stop。
 - unknown event 返回 Raw 且后续事件仍可读。
 - accumulator 与非流式结果语义等价。
 - parser/union/accumulator fuzz：不 panic、有界终止、frame limit 恒生效。
@@ -273,6 +280,7 @@ CountAnthropicMessageTokens
 - 默认显式 `store:false`，仅状态链路测试开启存储并在测试后删除。
 - 不快照自然语言，只断言协议结构、状态、usage 和 request ID。
 - 无 API key 时 live suite 正确 skip，但离线发布门禁仍须全部通过。
+- Responses background/cancel 与 Anthropic thinking-signature 用例分别由 `LLMKIT_RUN_NATIVE_BACKGROUND=1`、`LLMKIT_RUN_NATIVE_THINKING=1` 显式开启，避免日常 integration 冒烟测试意外扩大耗时和费用；发布前需开启执行。
 
 ## 9. 官方协议基线
 

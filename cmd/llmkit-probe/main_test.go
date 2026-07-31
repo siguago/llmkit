@@ -370,6 +370,35 @@ func TestRerankModelsCoverRerankers(t *testing.T) {
 	}
 }
 
+// Native protocol capability probes must be present in the real probe list;
+// otherwise Supports* can report true while `llmkit-probe` never exercises the
+// endpoint it claims to verify.
+func TestNativeProtocolCapabilitiesHaveProbes(t *testing.T) {
+	tests := []struct {
+		provider string
+		name     string
+	}{
+		{llmkit.OpenAI, "OpenAI Responses"},
+		{llmkit.Anthropic, "Anthropic Messages"},
+	}
+	for _, test := range tests {
+		client, err := llmkit.New(test.provider, llmkit.WithAPIKey("list-only-placeholder"))
+		if err != nil {
+			t.Fatalf("New(%s): %v", test.provider, err)
+		}
+		found := false
+		for _, probe := range buildProbes(client, defaultChatModel(test.provider), target{provider: test.provider}, probeOptions{}) {
+			if probe.name == test.name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s capability has no %q probe", test.provider, test.name)
+		}
+	}
+}
+
 // -list must work with no credentials configured at all — it is the command you
 // run to find out what to configure.
 func TestProviderDoesChat_NeedsNoCredential(t *testing.T) {

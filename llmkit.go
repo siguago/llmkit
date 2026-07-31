@@ -1,5 +1,7 @@
-// Package llmkit is a single-dependency-free Go SDK for talking to every major
-// LLM vendor through one OpenAI-shaped interface.
+// Package llmkit is a third-party-dependency-free Go SDK for talking to major
+// LLM vendors. Its default surface is one OpenAI Chat Completions-shaped
+// interface; opt-in native surfaces preserve protocol-specific semantics where
+// translating through Chat Completions would lose information.
 //
 // # Quick start
 //
@@ -9,13 +11,52 @@
 //	}
 //	text, err := client.Say(ctx, "deepseek-chat", "Explain CAP theorem in one paragraph.")
 //
-// The full surface is OpenAI-compatible, so anything you already know about
-// chat completions applies:
+// The unified Chat surface is OpenAI-compatible, so anything you already know
+// about chat completions applies:
 //
 //	resp, err := client.Chat(ctx, &llmkit.ChatRequest{
 //		Model:    "deepseek-chat",
 //		Messages: []llmkit.Message{llmkit.User("Hello")},
 //	})
+//
+// # Native protocol surfaces
+//
+// Native OpenAI Responses requests use types from
+// [github.com/siguago/llmkit/protocol/responses] and are available only when the
+// selected provider implements the corresponding optional capability:
+//
+//	store := false
+//	resp, err := client.CreateResponse(ctx, &responses.CreateRequest{
+//		Model: "gpt-5-mini",
+//		Input: responses.NewTextInput("Explain CAP theorem in one paragraph."),
+//		Store: &store,
+//	})
+//
+// Native Anthropic Messages requests similarly use
+// [github.com/siguago/llmkit/protocol/anthropic]:
+//
+//	resp, err := client.CreateAnthropicMessage(ctx, &anthropic.MessageRequest{
+//		Model:     "claude-sonnet-4-5-20250929",
+//		MaxTokens: 256,
+//		Messages: []anthropic.MessageParam{{
+//			Role: anthropic.RoleUser, Content: anthropic.StringContent("Hello"),
+//		}},
+//	})
+//
+// These calls are explicit: Chat and ChatStream never switch protocols based on
+// model names. OpenAI Responses currently covers its core resource lifecycle,
+// SSE, and input-token count on the direct OpenAI transport. Native Anthropic
+// support covers Messages create, SSE, and token count on the direct Anthropic
+// transport. It does not imply support for adjacent products such as Batch,
+// Conversations, WebSocket, Responses compact, or cloud-hosted Claude
+// transports. Unknown native items, blocks, and events remain accessible in Raw
+// form.
+//
+// Creation can generate and bill more than once if a caller blindly replays an
+// ambiguous failure. llmkit therefore applies only replay-safe retries to native
+// create calls and never resumes a stream after events have been delivered.
+// llmkit also leaves OpenAI's Store default untouched; set Store explicitly when
+// data-retention behavior matters.
 //
 // # Provider differences
 //

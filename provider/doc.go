@@ -10,7 +10,11 @@
 // [Provider] is the one interface every adapter must satisfy — chat, streaming
 // chat, and a name. Everything else is optional and discovered by type
 // assertion: [ModelLister], [Embedder], [ImageGenerator], [ImageEditor],
-// [VideoCreator], [VideoCanceller].
+// [VideoCreator], [VideoCanceller], [ResponsesCreator], [ResponsesStreamer],
+// [ResponsesRetriever], [ResponsesCanceller], [ResponsesDeleter],
+// [ResponsesInputItemLister], [ResponsesTokenCounter],
+// [AnthropicMessagesCreator], [AnthropicMessagesStreamer], and
+// [AnthropicTokenCounter].
 //
 // Implement an optional interface only when the vendor endpoint genuinely
 // exists. Do not satisfy one with a method that always returns [ErrUnsupported]:
@@ -18,16 +22,30 @@
 // a capability the caller cannot actually use. An adapter that generates images
 // but cannot edit them implements [ImageGenerator] and stops there.
 //
+// Native protocol capabilities stay separate both from [Provider] and from one
+// another. A relay that implements Responses create but not retrieval should
+// implement [ResponsesCreator] only. Do not add native methods to a broadly
+// embedded compatibility provider: Go method promotion would make every adapter
+// embedding it falsely advertise that endpoint.
+//
+// Native wire data belongs to leaf protocol packages rather than this package:
+// OpenAI Responses types are in [github.com/siguago/llmkit/protocol/responses]
+// and Anthropic Messages types are in
+// [github.com/siguago/llmkit/protocol/anthropic]. The llmkit façade exposes
+// explicit methods for them; it does not automatically route by model name or
+// promise a lossless conversion between the two protocols.
+//
 // # API stability
 //
 // This module is pre-1.0 and the API is not frozen. Within that, the parts here
 // differ in how settled they are:
 //
-//   - Stable in shape. The adapter interfaces above, [ProviderError],
-//     [ChatCompletionRequest]/[ChatCompletionResponse] core fields (Model,
-//     Messages, Temperature, MaxTokens, Tools, ToolChoice, ResponseFormat,
-//     Stream), [Message], [ContentPart], and [Usage] token counts. These
-//     mirror the OpenAI wire format and are unlikely to move.
+//   - Stable in shape. [Provider], the mature unified capability interfaces,
+//     [ProviderError], [ChatCompletionRequest]/[ChatCompletionResponse] core
+//     fields (Model, Messages, Temperature, MaxTokens, Tools, ToolChoice,
+//     ResponseFormat, Stream), [Message], [ContentPart], and [Usage] token
+//     counts. These mirror the established unified wire format and are unlikely
+//     to move.
 //
 //   - Additive and vendor-specific. The long tail of optional fields on
 //     [ChatCompletionRequest] — ProviderRouting, SafetySettings, CacheID,
@@ -35,6 +53,12 @@
 //     vendor needed it; providers that don't recognize a field ignore it.
 //     Expect this set to grow, and expect individual fields to be retired when
 //     a vendor drops the feature.
+//
+//   - Native and forward-compatible. The core typed variants in the protocol
+//     leaf packages track the corresponding vendor wire contracts. Unknown
+//     item, block, event, and extension variants are retained as raw JSON so a
+//     newer server response is not silently discarded. A Raw value is an
+//     escape hatch, not a claim that every adjacent vendor product is covered.
 //
 //   - Opaque passthrough. Anything typed `any` or `map[string]any` is forwarded
 //     to the vendor without interpretation. The SDK makes no promise about the

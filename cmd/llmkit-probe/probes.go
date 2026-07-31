@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/siguago/llmkit"
+	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+	responsesapi "github.com/siguago/llmkit/protocol/responses"
 )
 
 type outcome int
@@ -156,6 +158,8 @@ type probe struct {
 func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []probe {
 	return []probe{
 		{"模型列表", func(ctx context.Context) result { return probeModels(ctx, c) }},
+		{"OpenAI Responses", func(ctx context.Context) result { return probeResponses(ctx, c, model) }},
+		{"Anthropic Messages", func(ctx context.Context) result { return probeAnthropicMessages(ctx, c, model) }},
 		{"非流式对话", func(ctx context.Context) result { return probeChat(ctx, c, model) }},
 		{"流式对话", func(ctx context.Context) result { return probeStream(ctx, c, model) }},
 		{"多轮上下文", func(ctx context.Context) result { return probeMultiTurn(ctx, c, model) }},
@@ -174,6 +178,50 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 }
 
 // ---------------------------------------------------------------- probes
+
+func probeResponses(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsResponses() {
+		return result{outcome: notApplicable, detail: "无原生 Responses transport"}
+	}
+	if !c.SupportsResponseStreaming() || !c.SupportsResponseRetrieval() ||
+		!c.SupportsResponseCancellation() || !c.SupportsResponseDeletion() ||
+		!c.SupportsResponseInputItems() || !c.SupportsResponseTokenCount() {
+		return result{outcome: fail, detail: "Responses 能力声明不完整"}
+	}
+	count, err := c.CountResponseInputTokens(ctx, &responsesapi.TokenCountRequest{
+		Model: model,
+		Input: responsesapi.NewTextInput("hello"),
+	})
+	if err != nil {
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	if count == nil || count.InputTokens <= 0 {
+		return result{outcome: fail, detail: "input token count 为空或为零"}
+	}
+	return result{outcome: pass, detail: fmt.Sprintf("原生端点可用 · input=%d tokens", count.InputTokens)}
+}
+
+func probeAnthropicMessages(ctx context.Context, c *llmkit.Client, model string) result {
+	if !c.SupportsAnthropicMessages() {
+		return result{outcome: notApplicable, detail: "无原生 Messages transport"}
+	}
+	if !c.SupportsAnthropicMessageStreaming() || !c.SupportsAnthropicTokenCount() {
+		return result{outcome: fail, detail: "Messages 能力声明不完整"}
+	}
+	count, err := c.CountAnthropicMessageTokens(ctx, &anthropicapi.TokenCountRequest{
+		Model: model,
+		Messages: []anthropicapi.MessageParam{{
+			Role: anthropicapi.RoleUser, Content: anthropicapi.StringContent("hello"),
+		}},
+	})
+	if err != nil {
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	if count == nil || count.InputTokens <= 0 {
+		return result{outcome: fail, detail: "input token count 为空或为零"}
+	}
+	return result{outcome: pass, detail: fmt.Sprintf("原生端点可用 · input=%d tokens", count.InputTokens)}
+}
 
 func probeModels(ctx context.Context, c *llmkit.Client) result {
 	if !c.SupportsModels() {
