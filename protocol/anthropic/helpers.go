@@ -39,6 +39,7 @@ func ToolUses(message *MessageResponse) []ToolUseBlock {
 		copy.ExtraFields = cloneExtras(copy.ExtraFields)
 		if copy.CacheControl != nil {
 			cache := *copy.CacheControl
+			cache.TTL = cloneString(cache.TTL)
 			cache.ExtraFields = cloneExtras(cache.ExtraFields)
 			copy.CacheControl = &cache
 		}

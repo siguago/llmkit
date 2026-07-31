@@ -148,8 +148,8 @@ const (
 // refusals. Type and category remain open strings for forward compatibility.
 type StopDetails struct {
 	Type        string      `json:"type"`
-	Category    *string     `json:"category,omitempty"`
-	Explanation *string     `json:"explanation,omitempty"`
+	Category    *string     `json:"category"`
+	Explanation *string     `json:"explanation"`
 	ExtraFields ExtraFields `json:"-"`
 }
 

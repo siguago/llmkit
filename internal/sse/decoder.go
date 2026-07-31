@@ -2,7 +2,7 @@
 //
 // It deliberately stops at framing: callers remain responsible for interpreting
 // an event's data (JSON, a sentinel such as [DONE], or another protocol). The
-// decoder accepts both LF and CRLF line endings and does not rely on the read
+// decoder accepts CR, LF and CRLF line endings and does not rely on the read
 // boundaries of the supplied io.Reader.
 package sse
 
@@ -74,6 +74,13 @@ type Decoder struct {
 	eof       bool
 	terminal  error
 
+	// A CR terminates a line immediately. If the following byte is LF, it is the
+	// second half of the same terminator and must be consumed before the next
+	// line. Keeping that state here lets a lone CR dispatch an event without
+	// blocking while the decoder waits to learn whether an LF will follow.
+	afterCR         bool
+	afterCRLineSize int
+
 	name          string
 	lastID        string
 	retry         *time.Duration
@@ -112,8 +119,7 @@ func NewDecoder(r io.Reader, maxEventBytes int) *Decoder {
 
 // Next returns the next dispatched event. A blank line dispatches an event
 // only after at least one data field has been seen, matching the SSE dispatch
-// algorithm. At clean EOF, pending data is dispatched once before a later call
-// returns io.EOF.
+// algorithm. EOF discards an event that was not terminated by a blank line.
 func (d *Decoder) Next() (Event, error) {
 	if d.terminal != nil {
 		return Event{}, d.terminal
@@ -127,9 +133,6 @@ func (d *Decoder) Next() (Event, error) {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				d.eof = true
-				if d.hasData {
-					return d.dispatch(), nil
-				}
 				d.resetEvent()
 				return Event{}, io.EOF
 			}
@@ -158,51 +161,94 @@ func (d *Decoder) Next() (Event, error) {
 
 		if eofAfterLine {
 			d.eof = true
-			if d.hasData {
-				return d.dispatch(), nil
-			}
 			d.resetEvent()
 			return Event{}, io.EOF
 		}
 	}
 }
 
-// readLine returns a line without its LF or CRLF terminator. eofAfterLine is
-// true only for a final, unterminated line. ReadSlice is used in a loop so the
-// result is independent of bufio's buffer size and the source's Read chunks.
+// readLine returns a line without its CR, LF or CRLF terminator. eofAfterLine
+// is true only for a final, unterminated line. CR is recognized immediately;
+// a following LF is consumed at the start of the next call. Reading through a
+// bufio.Reader keeps the result independent of the source's Read chunks.
 func (d *Decoder) readLine() (line []byte, eofAfterLine bool, err error) {
-	for {
-		fragment, readErr := d.reader.ReadSlice('\n')
-		if len(fragment) > d.lineMax-len(line) {
-			size := d.lineMax
-			if size < math.MaxInt {
-				size++
-			}
-			return nil, false, &EventTooLargeError{Limit: d.max, Size: size}
-		}
-		line = append(line, fragment...)
+	lineSize := 0
 
+	if d.afterCR {
+		b, readErr := d.reader.ReadByte()
 		switch readErr {
 		case nil:
-			// ReadSlice includes the delimiter. CR is a terminator only as the
-			// first half of CRLF here; lone CR support is intentionally outside
-			// this package's wire contract.
-			line = line[:len(line)-1]
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
+			d.afterCR = false
+			if b == '\n' {
+				if d.afterCRLineSize >= d.lineMax {
+					return nil, false, d.physicalLineTooLarge()
+				}
+				d.afterCRLineSize = 0
+			} else {
+				d.afterCRLineSize = 0
+				if err := d.appendLineByte(&line, &lineSize, b); err != nil {
+					return nil, false, err
+				}
+				if b == '\r' {
+					d.afterCR = true
+					d.afterCRLineSize = lineSize
+					return line, false, nil
+				}
 			}
-			return line, false, nil
-		case bufio.ErrBufferFull:
-			continue
 		case io.EOF:
-			if len(line) == 0 {
-				return nil, false, io.EOF
-			}
-			return line, true, nil
+			d.afterCR = false
+			d.afterCRLineSize = 0
+			return nil, false, io.EOF
 		default:
 			return nil, false, readErr
 		}
 	}
+
+	for {
+		b, readErr := d.reader.ReadByte()
+		if readErr != nil {
+			switch readErr {
+			case io.EOF:
+				if len(line) == 0 {
+					return nil, false, io.EOF
+				}
+				return line, true, nil
+			default:
+				return nil, false, readErr
+			}
+		}
+
+		if err := d.appendLineByte(&line, &lineSize, b); err != nil {
+			return nil, false, err
+		}
+		switch b {
+		case '\n':
+			return line, false, nil
+		case '\r':
+			d.afterCR = true
+			d.afterCRLineSize = lineSize
+			return line, false, nil
+		}
+	}
+}
+
+func (d *Decoder) appendLineByte(line *[]byte, lineSize *int, b byte) error {
+	if *lineSize >= d.lineMax {
+		return d.physicalLineTooLarge()
+	}
+	(*lineSize)++
+	if b != '\r' && b != '\n' {
+		*line = append(*line, b)
+	}
+	return nil
+}
+
+func (d *Decoder) physicalLineTooLarge() error {
+	size := d.lineMax
+	if size < math.MaxInt {
+		size++
+	}
+	return &EventTooLargeError{Limit: d.max, Size: size}
 }
 
 func (d *Decoder) processField(line []byte) error {

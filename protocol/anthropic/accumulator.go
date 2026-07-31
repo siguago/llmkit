@@ -217,6 +217,22 @@ func (accumulator *Accumulator) addContentBlockDelta(event *ContentBlockDeltaEve
 		block.Thinking.Signature += event.Delta.Signature.Signature
 	default:
 		if event.Delta.Unknown != nil {
+			if block.Raw != nil && block.Type == "compaction" && event.Delta.Type == "compaction_delta" {
+				var delta struct {
+					Content json.RawMessage `json:"content"`
+				}
+				if err := json.Unmarshal(event.Delta.Unknown, &delta); err != nil {
+					return fmt.Errorf("anthropic: decode compaction delta for block %d: %w", event.Index, err)
+				}
+				if delta.Content == nil || !json.Valid(delta.Content) {
+					return fmt.Errorf("anthropic: compaction delta for block %d has invalid content", event.Index)
+				}
+				updated, err := setRawObjectField(block.Raw, "content", delta.Content)
+				if err != nil {
+					return fmt.Errorf("anthropic: update compaction block %d: %w", event.Index, err)
+				}
+				block.Raw = updated
+			}
 			accumulator.unknownEvents = append(accumulator.unknownEvents, cloneRaw(event.Delta.Unknown))
 		}
 	}
@@ -274,6 +290,12 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 	if event.Delta.Container != nil {
 		accumulator.message.Container = cloneRaw(event.Delta.Container)
 	}
+	if contextManagement, exists := event.ExtraFields["context_management"]; exists {
+		if accumulator.message.ExtraFields == nil {
+			accumulator.message.ExtraFields = make(ExtraFields)
+		}
+		accumulator.message.ExtraFields["context_management"] = cloneRaw(contextManagement)
+	}
 
 	usage := &accumulator.message.Usage
 	usage.OutputTokens = event.Usage.OutputTokens
@@ -299,11 +321,35 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 		usage.ServerToolUse = &copy
 	}
 	if len(event.Usage.ExtraFields) != 0 {
-		if usage.ExtraFields == nil {
-			usage.ExtraFields = make(ExtraFields)
-		}
 		for key, value := range event.Usage.ExtraFields {
-			usage.ExtraFields[key] = cloneRaw(value)
+			switch key {
+			case "cache_creation":
+				var decoded *CacheCreation
+				if err := json.Unmarshal(value, &decoded); err != nil {
+					return fmt.Errorf("anthropic: decode message_delta usage cache_creation: %w", err)
+				}
+				usage.CacheCreation = decoded
+			case "inference_geo":
+				var decoded *string
+				if err := json.Unmarshal(value, &decoded); err != nil {
+					return fmt.Errorf("anthropic: decode message_delta usage inference_geo: %w", err)
+				}
+				usage.InferenceGeo = decoded
+			case "service_tier":
+				var decoded *string
+				if err := json.Unmarshal(value, &decoded); err != nil {
+					return fmt.Errorf("anthropic: decode message_delta usage service_tier: %w", err)
+				}
+				usage.ServiceTier = decoded
+			default:
+				if isUsageField(key) {
+					return &ExtraFieldConflictError{Field: key}
+				}
+				if usage.ExtraFields == nil {
+					usage.ExtraFields = make(ExtraFields)
+				}
+				usage.ExtraFields[key] = cloneRaw(value)
+			}
 		}
 	}
 	return nil
@@ -393,10 +439,7 @@ func (accumulator *Accumulator) snapshotLocked() *MessageResponse {
 	if accumulator.message == nil {
 		return nil
 	}
-	message, err := cloneMessageResponse(accumulator.message)
-	if err != nil {
-		return nil
-	}
+	message := copyMessageResponse(accumulator.message)
 	indices := make([]int, 0, len(accumulator.blocks))
 	for index := range accumulator.blocks {
 		indices = append(indices, index)
@@ -404,14 +447,23 @@ func (accumulator *Accumulator) snapshotLocked() *MessageResponse {
 	sort.Ints(indices)
 	message.Content = make([]ContentBlock, 0, len(indices))
 	for _, index := range indices {
-		block, err := cloneContentBlock(accumulator.blocks[index])
-		if err != nil {
-			return nil
+		block := copyContentBlock(accumulator.blocks[index])
+		if partial, exists := accumulator.partialJSON[index]; exists {
+			block.PartialJSON = string(partial)
 		}
 		message.Content = append(message.Content, block)
 	}
 	message.RequestID = accumulator.requestID
 	return message
+}
+
+func isUsageField(field string) bool {
+	for _, known := range usageFields {
+		if field == known {
+			return true
+		}
+	}
+	return false
 }
 
 func missingEventPayload(eventType EventType) error {
@@ -459,6 +511,59 @@ func cloneMessageResponse(message *MessageResponse) (*MessageResponse, error) {
 	}
 	cloned.RequestID = message.RequestID
 	return &cloned, nil
+}
+
+func copyMessageResponse(message *MessageResponse) *MessageResponse {
+	if message == nil {
+		return nil
+	}
+	copy := *message
+	if message.Content != nil {
+		copy.Content = make([]ContentBlock, len(message.Content))
+		for index, block := range message.Content {
+			copy.Content[index] = copyContentBlock(block)
+		}
+	}
+	copy.Container = cloneRaw(message.Container)
+	copy.StopReason = cloneStopReason(message.StopReason)
+	copy.StopSequence = cloneString(message.StopSequence)
+	copy.StopDetails = cloneStopDetails(message.StopDetails)
+	copy.Usage = cloneUsage(message.Usage)
+	copy.ExtraFields = cloneExtras(message.ExtraFields)
+	return &copy
+}
+
+func cloneUsage(usage Usage) Usage {
+	copy := usage
+	copy.CacheCreationInputTokens = cloneInt64(usage.CacheCreationInputTokens)
+	copy.CacheReadInputTokens = cloneInt64(usage.CacheReadInputTokens)
+	if usage.CacheCreation != nil {
+		value := *usage.CacheCreation
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.CacheCreation = &value
+	}
+	copy.InferenceGeo = cloneString(usage.InferenceGeo)
+	if usage.OutputTokensDetails != nil {
+		value := *usage.OutputTokensDetails
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.OutputTokensDetails = &value
+	}
+	if usage.ServerToolUse != nil {
+		value := *usage.ServerToolUse
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.ServerToolUse = &value
+	}
+	copy.ServiceTier = cloneString(usage.ServiceTier)
+	copy.ExtraFields = cloneExtras(usage.ExtraFields)
+	return copy
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func cloneStopReason(reason *StopReason) *StopReason {

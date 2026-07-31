@@ -374,6 +374,7 @@ func TestNativeResponsesHTTPError_PreservesEnvelopeMetadataAndRetryAfter(t *test
 		{"invalid_request", http.StatusBadRequest, "invalid_request_error", "invalid_value", "invalid_value", provider.ErrorCategoryInvalidRequest, ""},
 		{"not_found", http.StatusNotFound, "not_found_error", "resource_not_found", "resource_not_found", provider.ErrorCategoryNotFound, ""},
 		{"server", http.StatusInternalServerError, "api_error", "internal_error", "internal_error", provider.ErrorCategoryServer, ""},
+		{"408_overrides_rate_body", http.StatusRequestTimeout, "rate_limit_error", "rate_limit_exceeded", "rate_limit_exceeded", "", ""},
 	}
 
 	for _, test := range tests {
@@ -414,6 +415,40 @@ func TestNativeResponsesHTTPError_PreservesEnvelopeMetadataAndRetryAfter(t *test
 				t.Errorf("ErrorCategoryOf = %q, want %q", got, test.wantCategory)
 			}
 		})
+	}
+}
+
+func TestNativeResponsesAPIErrorPreservesHTTPMetadataWhenBodyReadFails(t *testing.T) {
+	bodyErr := io.ErrUnexpectedEOF
+	payload := []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}`)
+	client := NewWithBaseURL("https://example.invalid/v1")
+	client.client = &http.Client{Transport: responsesRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header: http.Header{
+				"Retry-After":  []string{"9"},
+				"X-Request-Id": []string{"req_partial_error"},
+			},
+			Body: &responsesErrorAfterDataBody{data: payload, err: bodyErr},
+		}, nil
+	})}
+
+	_, err := client.CreateResponse(context.Background(), "key", newResponsesCreateRequest())
+	if err == nil {
+		t.Fatal("expected API/read error")
+	}
+	if !errors.Is(err, bodyErr) {
+		t.Fatalf("body read error was hidden: %v", err)
+	}
+	var providerErr *provider.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("HTTP error metadata was hidden: %T %v", err, err)
+	}
+	if providerErr.StatusCode != http.StatusTooManyRequests || providerErr.RetryAfter != "9" || providerErr.RequestID != "req_partial_error" {
+		t.Fatalf("ProviderError = %+v", providerErr)
+	}
+	if provider.ProviderCode(err) != "rate_limit_exceeded" || provider.ErrorCategoryOf(err) != provider.ErrorCategoryRateLimit {
+		t.Fatalf("classification = code %q category %q", provider.ProviderCode(err), provider.ErrorCategoryOf(err))
 	}
 }
 
@@ -688,6 +723,9 @@ func TestNativeResponsesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if provider.ProviderCode(err) != "rate_limit_exceeded" || provider.ErrorCategoryOf(err) != provider.ErrorCategoryRateLimit {
 		t.Fatalf("classified error code/category = %q / %q", provider.ProviderCode(err), provider.ErrorCategoryOf(err))
 	}
+	if !provider.IsMarkedUnsafeToReplay(err) {
+		t.Fatal("an in-stream error must never assert that replay is safe")
+	}
 	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Recv after pending error = %v, want EOF", err)
 	}
@@ -736,6 +774,30 @@ func TestNativeResponsesStream_ReportsUnexpectedEOFBeforeTerminal(t *testing.T) 
 	}
 }
 
+func TestNativeResponsesStream_DiscardsUnterminatedTerminalFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n", responsesStreamCompletedJSON(0, "resp_truncated"))
+	}))
+	defer server.Close()
+
+	stream, err := NewWithBaseURL(server.URL).CreateResponseStream(
+		context.Background(), "key", newResponsesCreateRequest(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	event, err := stream.Recv()
+	if event != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Recv = event=%+v err=%v, want nil/io.ErrUnexpectedEOF", event, err)
+	}
+	if final := stream.FinalResponse(); final != nil {
+		t.Fatalf("unterminated terminal frame must not be accumulated: %+v", final)
+	}
+}
+
 func TestNativeResponsesStream_EnforcesAssembledFrameLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -770,6 +832,28 @@ type responsesBlockingBody struct {
 	closed  chan struct{}
 	once    sync.Once
 }
+
+type responsesRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn responsesRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+type responsesErrorAfterDataBody struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (body *responsesErrorAfterDataBody) Read(target []byte) (int, error) {
+	if body.done {
+		return 0, io.EOF
+	}
+	body.done = true
+	return copy(target, body.data), body.err
+}
+
+func (*responsesErrorAfterDataBody) Close() error { return nil }
 
 func newResponsesBlockingBody() *responsesBlockingBody {
 	return &responsesBlockingBody{started: make(chan struct{}), closed: make(chan struct{})}

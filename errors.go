@@ -206,13 +206,20 @@ func IsRetryable(err error) bool {
 //     charged, but a misconfigured base URL won't fix itself on attempt two.
 //   - A 429 is both, so it is the case that actually gets replayed.
 //
-// This is the default retry gate for GenerateImage and CreateVideo, where a
-// duplicate attempt costs real money. See WithMediaRetry to override it.
+// This is the default retry gate for billable, non-idempotent creation calls,
+// including Responses, Anthropic Messages, images, and videos. WithMediaRetry
+// can explicitly override it for image and video creation.
 func IsSafeToReplay(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if provider.IsMarkedUnsafeToReplay(err) {
+		// Stream errors can still be categorized as rate limits for diagnostics
+		// and retryability after output may have been delivered. The explicit
+		// marker wins because replay could duplicate billable work.
 		return false
 	}
 	if category := errorCategory(err); category != "" {

@@ -136,12 +136,20 @@ type ReasoningConfig struct {
 	Context         string      `json:"context,omitempty"`
 	Mode            string      `json:"mode,omitempty"`
 	ExtraFields     ExtraFields `json:"-"`
+
+	// fieldPresence and nullFields retain nullable response members without
+	// changing the convenient string fields used to construct requests.
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type TextConfig struct {
 	Format      *TextFormat `json:"format,omitempty"`
 	Verbosity   string      `json:"verbosity,omitempty"`
 	ExtraFields ExtraFields `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type TextFormat struct {
@@ -151,6 +159,9 @@ type TextFormat struct {
 	Schema      json.RawMessage `json:"schema,omitempty"`
 	Strict      *bool           `json:"strict,omitempty"`
 	ExtraFields ExtraFields     `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type Prompt struct {
@@ -182,7 +193,24 @@ var (
 
 func (v ReasoningConfig) MarshalJSON() ([]byte, error) {
 	type plain ReasoningConfig
-	return marshalObjectWithExtra(plain(v), v.ExtraFields, reasoningConfigFields)
+	return marshalObjectPreservingFieldPresence(
+		plain(v), v.ExtraFields, reasoningConfigFields, v.fieldPresence, v.nullFields,
+		func(name string) (any, bool) {
+			switch name {
+			case "effort":
+				return v.Effort, true
+			case "summary":
+				return v.Summary, true
+			case "generate_summary":
+				return v.GenerateSummary, true
+			case "context":
+				return v.Context, true
+			case "mode":
+				return v.Mode, true
+			}
+			return nil, false
+		},
+	)
 }
 
 func (v *ReasoningConfig) UnmarshalJSON(data []byte) error {
@@ -197,12 +225,26 @@ func (v *ReasoningConfig) UnmarshalJSON(data []byte) error {
 	}
 	*v = ReasoningConfig(decoded)
 	v.ExtraFields = extra
+	if err := captureFieldPresence(data, reasoningConfigFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (v TextConfig) MarshalJSON() ([]byte, error) {
 	type plain TextConfig
-	return marshalObjectWithExtra(plain(v), v.ExtraFields, textConfigFields)
+	return marshalObjectPreservingFieldPresence(
+		plain(v), v.ExtraFields, textConfigFields, v.fieldPresence, v.nullFields,
+		func(name string) (any, bool) {
+			switch name {
+			case "format":
+				return v.Format, true
+			case "verbosity":
+				return v.Verbosity, true
+			}
+			return nil, false
+		},
+	)
 }
 
 func (v *TextConfig) UnmarshalJSON(data []byte) error {
@@ -217,12 +259,90 @@ func (v *TextConfig) UnmarshalJSON(data []byte) error {
 	}
 	*v = TextConfig(decoded)
 	v.ExtraFields = extra
+	if err := captureFieldPresence(data, textConfigFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
+	return nil
+}
+
+func marshalObjectPreservingFieldPresence(
+	base any,
+	extra ExtraFields,
+	known, presence, nulls map[string]struct{},
+	fieldValue func(string) (any, bool),
+) ([]byte, error) {
+	encodedBase, err := json.Marshal(base)
+	if err != nil {
+		return nil, err
+	}
+	var fields ExtraFields
+	if err := json.Unmarshal(encodedBase, &fields); err != nil {
+		return nil, err
+	}
+	for name := range presence {
+		if _, exists := fields[name]; exists {
+			continue
+		}
+		if _, wasNull := nulls[name]; wasNull {
+			fields[name] = json.RawMessage("null")
+			continue
+		}
+		value, exists := fieldValue(name)
+		if !exists {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("responses: marshal field %q: %w", name, err)
+		}
+		fields[name] = encoded
+	}
+	return marshalObjectWithExtra(fields, extra, known)
+}
+
+func captureFieldPresence(data []byte, known map[string]struct{}, presence, nulls *map[string]struct{}) error {
+	var fields ExtraFields
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name, raw := range fields {
+		if _, exists := known[name]; !exists {
+			continue
+		}
+		if *presence == nil {
+			*presence = make(map[string]struct{})
+		}
+		(*presence)[name] = struct{}{}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			if *nulls == nil {
+				*nulls = make(map[string]struct{})
+			}
+			(*nulls)[name] = struct{}{}
+		}
+	}
 	return nil
 }
 
 func (v TextFormat) MarshalJSON() ([]byte, error) {
 	type plain TextFormat
-	return marshalObjectWithExtra(plain(v), v.ExtraFields, textFormatFields)
+	return marshalObjectPreservingFieldPresence(
+		plain(v), v.ExtraFields, textFormatFields, v.fieldPresence, v.nullFields,
+		func(name string) (any, bool) {
+			switch name {
+			case "type":
+				return v.Type, true
+			case "name":
+				return v.Name, true
+			case "description":
+				return v.Description, true
+			case "schema":
+				return v.Schema, true
+			case "strict":
+				return v.Strict, true
+			}
+			return nil, false
+		},
+	)
 }
 
 func (v *TextFormat) UnmarshalJSON(data []byte) error {
@@ -238,6 +358,9 @@ func (v *TextFormat) UnmarshalJSON(data []byte) error {
 	*v = TextFormat(decoded)
 	v.Schema = cloneRaw(v.Schema)
 	v.ExtraFields = extra
+	if err := captureFieldPresence(data, textFormatFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -846,23 +969,26 @@ func (r *Response) OutputText() string {
 		return ""
 	}
 	var out strings.Builder
+	sawTypedText := false
 	for _, item := range r.Output {
 		if item.Message == nil {
 			continue
 		}
 		if item.Message.Content.Text != nil {
+			sawTypedText = true
 			out.WriteString(*item.Message.Content.Text)
 		}
 		for _, part := range item.Message.Content.Parts {
 			if part.OutputText != nil {
+				sawTypedText = true
 				out.WriteString(part.OutputText.Text)
 			}
 		}
 	}
-	if out.Len() == 0 {
-		return r.OutputTextValue
+	if sawTypedText {
+		return out.String()
 	}
-	return out.String()
+	return r.OutputTextValue
 }
 
 // FunctionCalls returns an owned list of function_call output items.

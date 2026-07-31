@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -265,13 +266,14 @@ func (p *Provider) doResponsesRequest(
 	}
 	defer resp.Body.Close()
 	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponsesErrorBodyBytes+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("openai responses: read error response: %w", readErr)
-	}
 	if len(payload) > maxResponsesErrorBodyBytes {
 		payload = payload[:maxResponsesErrorBodyBytes]
 	}
-	return nil, decodeResponsesAPIError(resp, payload)
+	apiErr := decodeResponsesAPIError(resp, payload)
+	if readErr != nil {
+		return nil, errors.Join(apiErr, fmt.Errorf("openai responses: read error response: %w", readErr))
+	}
+	return nil, apiErr
 }
 
 func decodeResponsesAPIError(resp *http.Response, payload []byte) error {
@@ -290,17 +292,24 @@ func decodeResponsesAPIError(resp *http.Response, payload []byte) error {
 }
 
 func responsesErrorCategory(status int, errorType string) provider.ErrorCategory {
-	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return provider.ErrorCategoryAuth
-	case status == http.StatusTooManyRequests:
-		return provider.ErrorCategoryRateLimit
-	case status == http.StatusNotFound:
-		return provider.ErrorCategoryNotFound
-	case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
-		return provider.ErrorCategoryInvalidRequest
-	case status >= 500:
-		return provider.ErrorCategoryServer
+	if status != 0 {
+		switch {
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			return provider.ErrorCategoryAuth
+		case status == http.StatusTooManyRequests:
+			return provider.ErrorCategoryRateLimit
+		case status == http.StatusNotFound:
+			return provider.ErrorCategoryNotFound
+		case status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge || status == http.StatusUnprocessableEntity:
+			return provider.ErrorCategoryInvalidRequest
+		case status >= 500 && status <= 599:
+			return provider.ErrorCategoryServer
+		default:
+			// A delivered HTTP status is stronger evidence than a conflicting
+			// body type. In particular, never let a 408/409/402 body claim the
+			// replay-safe rate-limit category reserved for an explicit 429.
+			return ""
+		}
 	}
 	switch errorType {
 	case "authentication_error", "permission_error":

@@ -231,6 +231,68 @@ func TestNestedDTOExtraFieldConflicts(t *testing.T) {
 	}
 }
 
+func TestNestedResponseConfigNullablePresenceRoundTrip(t *testing.T) {
+	t.Run("reasoning", func(t *testing.T) {
+		for _, wire := range [][]byte{
+			[]byte(`{}`),
+			[]byte(`{"effort":null,"summary":null,"generate_summary":null}`),
+			[]byte(`{"effort":"high","summary":"detailed","generate_summary":"concise"}`),
+		} {
+			var config ReasoningConfig
+			if err := json.Unmarshal(wire, &config); err != nil {
+				t.Fatalf("Unmarshal %s: %v", wire, err)
+			}
+			encoded, err := json.Marshal(config)
+			if err != nil {
+				t.Fatalf("Marshal %s: %v", wire, err)
+			}
+			assertSemanticJSONEqual(t, wire, encoded)
+		}
+
+		var edited ReasoningConfig
+		if err := json.Unmarshal([]byte(`{"effort":null,"summary":null}`), &edited); err != nil {
+			t.Fatal(err)
+		}
+		edited.Effort = "high"
+		encoded, err := json.Marshal(edited)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSemanticJSONEqual(t, []byte(`{"effort":"high","summary":null}`), encoded)
+	})
+
+	t.Run("text", func(t *testing.T) {
+		for _, wire := range [][]byte{
+			[]byte(`{"format":{"type":"text"}}`),
+			[]byte(`{"format":{"type":"text"},"verbosity":null}`),
+			[]byte(`{"format":{"type":"text"},"verbosity":"high"}`),
+			[]byte(`{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null}`),
+			[]byte(`{"format":{"type":"json_schema","name":"answer","schema":{},"strict":false},"verbosity":"low"}`),
+		} {
+			var config TextConfig
+			if err := json.Unmarshal(wire, &config); err != nil {
+				t.Fatalf("Unmarshal %s: %v", wire, err)
+			}
+			encoded, err := json.Marshal(config)
+			if err != nil {
+				t.Fatalf("Marshal %s: %v", wire, err)
+			}
+			assertSemanticJSONEqual(t, wire, encoded)
+		}
+
+		var edited TextConfig
+		if err := json.Unmarshal([]byte(`{"format":{"type":"text"},"verbosity":null}`), &edited); err != nil {
+			t.Fatal(err)
+		}
+		edited.Verbosity = "low"
+		encoded, err := json.Marshal(edited)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSemanticJSONEqual(t, []byte(`{"format":{"type":"text"},"verbosity":"low"}`), encoded)
+	})
+}
+
 func TestKnownItemAndContentExtensionsRemainEditable(t *testing.T) {
 	wire := []byte(`{
   "type":"message","id":"msg_1","role":"assistant","status":"completed",
@@ -420,6 +482,52 @@ func TestResponseTypedMutationExtensionsHelpersAndRequestID(t *testing.T) {
 	}
 }
 
+func TestResponseOutputTextDoesNotFallbackForEmptyTypedText(t *testing.T) {
+	tests := []struct {
+		name   string
+		output []Item
+		want   string
+	}{
+		{
+			name: "empty output text part",
+			output: []Item{NewMessageItem(Message{
+				Role: "assistant", Content: NewPartContent(NewOutputTextPart("")),
+			})},
+			want: "",
+		},
+		{
+			name: "empty string content",
+			output: []Item{NewMessageItem(Message{
+				Role: "assistant", Content: NewTextContent(""),
+			})},
+			want: "",
+		},
+		{
+			name: "empty then populated parts",
+			output: []Item{NewMessageItem(Message{
+				Role: "assistant", Content: NewPartContent(NewOutputTextPart(""), NewOutputTextPart("answer")),
+			})},
+			want: "answer",
+		},
+		{
+			name: "no typed text",
+			output: []Item{NewMessageItem(Message{
+				Role: "assistant", Content: NewPartContent(NewRefusalPart("declined")),
+			})},
+			want: "fallback",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := Response{Output: test.output, OutputTextValue: "fallback"}
+			if got := response.OutputText(); got != test.want {
+				t.Fatalf("OutputText() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestResponseRequiredCollectionsAndNullablePresenceRoundTrip(t *testing.T) {
 	wire := []byte(`{
   "id":"resp_presence","object":"response","created_at":1.25,"status":"completed",
@@ -579,6 +687,24 @@ func TestUnionConflictsAreRejected(t *testing.T) {
 	_, err := json.Marshal(Input{Text: &text, Items: []Item{}})
 	if !errors.Is(err, ErrInvalidUnion) {
 		t.Fatalf("Input conflict error = %v", err)
+	}
+	for _, test := range []struct {
+		name  string
+		input Input
+	}{
+		{"raw and text", Input{Raw: json.RawMessage(`{"future":true}`), Text: &text}},
+		{"raw and items", Input{Raw: json.RawMessage(`{"future":true}`), Items: []Item{}}},
+		{"raw and null", Input{Raw: json.RawMessage(`{"future":true}`), Null: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := json.Marshal(test.input); !errors.Is(err, ErrInvalidUnion) {
+				t.Fatalf("Input conflict error = %v, want ErrInvalidUnion", err)
+			}
+		})
+	}
+	conflictingInstructions := Input{Raw: json.RawMessage(`{"future":true}`), Text: &text}
+	if _, err := json.Marshal(Response{Instructions: conflictingInstructions}); !errors.Is(err, ErrInvalidUnion) {
+		t.Fatalf("nested Input conflict error = %v, want ErrInvalidUnion", err)
 	}
 	_, err = json.Marshal(ContentPart{
 		Type:       ContentTypeOutputText,

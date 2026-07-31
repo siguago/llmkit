@@ -593,3 +593,107 @@ func cloneContentBlock(block ContentBlock) (ContentBlock, error) {
 	cloned.PartialJSON = block.PartialJSON
 	return cloned, nil
 }
+
+// copyContentBlock makes an infallible defensive copy of an already validated
+// block. Accumulators validate blocks on ingress, so snapshots must not need to
+// marshal mutable state merely to clone it.
+func copyContentBlock(block ContentBlock) ContentBlock {
+	copy := block
+	copy.Raw = cloneRaw(block.Raw)
+	if block.Text != nil {
+		value := *block.Text
+		value.Citations = cloneRaw(value.Citations)
+		value.CacheControl = cloneCacheControl(value.CacheControl)
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.Text = &value
+	}
+	if block.Image != nil {
+		value := *block.Image
+		value.Source = cloneSource(value.Source)
+		value.CacheControl = cloneCacheControl(value.CacheControl)
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.Image = &value
+	}
+	if block.Document != nil {
+		value := *block.Document
+		value.Source = cloneSource(value.Source)
+		value.CacheControl = cloneCacheControl(value.CacheControl)
+		value.Citations = cloneRaw(value.Citations)
+		value.Context = cloneString(value.Context)
+		value.Title = cloneString(value.Title)
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.Document = &value
+	}
+	if block.ToolUse != nil {
+		value := *block.ToolUse
+		value.Input = cloneRaw(value.Input)
+		value.Caller = cloneRaw(value.Caller)
+		value.CacheControl = cloneCacheControl(value.CacheControl)
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.ToolUse = &value
+	}
+	if block.ToolResult != nil {
+		value := *block.ToolResult
+		value.Content = cloneContent(value.Content)
+		value.IsError = cloneBool(value.IsError)
+		value.CacheControl = cloneCacheControl(value.CacheControl)
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.ToolResult = &value
+	}
+	if block.Thinking != nil {
+		value := *block.Thinking
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.Thinking = &value
+	}
+	if block.RedactedThinking != nil {
+		value := *block.RedactedThinking
+		value.ExtraFields = cloneExtras(value.ExtraFields)
+		copy.RedactedThinking = &value
+	}
+	return copy
+}
+
+func cloneCacheControl(control *CacheControl) *CacheControl {
+	if control == nil {
+		return nil
+	}
+	copy := *control
+	copy.TTL = cloneString(control.TTL)
+	copy.ExtraFields = cloneExtras(control.ExtraFields)
+	return &copy
+}
+
+func cloneSource(source Source) Source {
+	copy := source
+	copy.MediaType = cloneString(source.MediaType)
+	copy.Data = cloneString(source.Data)
+	copy.URL = cloneString(source.URL)
+	copy.FileID = cloneString(source.FileID)
+	copy.Content = cloneRaw(source.Content)
+	copy.ExtraFields = cloneExtras(source.ExtraFields)
+	return copy
+}
+
+func cloneContent(content *Content) *Content {
+	if content == nil {
+		return nil
+	}
+	copy := *content
+	copy.Text = cloneString(content.Text)
+	if content.Blocks != nil {
+		copy.Blocks = make([]ContentBlock, len(content.Blocks))
+		for index, block := range content.Blocks {
+			copy.Blocks[index] = copyContentBlock(block)
+		}
+	}
+	copy.Raw = cloneRaw(content.Raw)
+	return &copy
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}

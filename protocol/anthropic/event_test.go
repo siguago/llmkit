@@ -3,6 +3,7 @@ package anthropic
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -155,6 +156,189 @@ func TestAccumulatorMergesMessageDeltaOutputTokenDetails(t *testing.T) {
 	}
 }
 
+func TestAccumulatorMergesFinalUsageFieldsWithoutExtraFieldConflicts(t *testing.T) {
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"msg_usage","type":"message","role":"assistant","model":"claude","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":11,"output_tokens":1}}}`)
+	applyFixture(t, accumulator, `{
+  "type":"message_delta",
+  "delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},
+  "usage":{
+    "output_tokens":23,
+    "cache_creation":{"ephemeral_1h_input_tokens":7,"ephemeral_5m_input_tokens":3,"future_cache":900719925474099312345},
+    "inference_geo":"us",
+    "service_tier":"priority",
+    "future_usage":900719925474099312345
+  }
+}`)
+	applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+	message, err := accumulator.Result()
+	if err != nil || message == nil {
+		t.Fatalf("Result = %#v, %v", message, err)
+	}
+	if message.Usage.CacheCreation == nil || message.Usage.CacheCreation.Ephemeral1hInputTokens != 7 {
+		t.Fatalf("cache creation = %#v", message.Usage.CacheCreation)
+	}
+	if message.Usage.InferenceGeo == nil || *message.Usage.InferenceGeo != "us" {
+		t.Fatalf("inference geo = %#v", message.Usage.InferenceGeo)
+	}
+	if message.Usage.ServiceTier == nil || *message.Usage.ServiceTier != "priority" {
+		t.Fatalf("service tier = %#v", message.Usage.ServiceTier)
+	}
+	if got := string(message.Usage.ExtraFields["future_usage"]); got != "900719925474099312345" {
+		t.Fatalf("future usage = %s", got)
+	}
+	if _, err := json.Marshal(message); err != nil {
+		t.Fatalf("Marshal final message: %v", err)
+	}
+
+	// Returned snapshots must not share pointers or raw extension bytes with the
+	// accumulator, even for fields promoted from message_delta extras.
+	*message.Usage.InferenceGeo = "mutated"
+	*message.Usage.ServiceTier = "mutated"
+	message.Usage.CacheCreation.ExtraFields["future_cache"][0] = '0'
+	message.Usage.ExtraFields["future_usage"][0] = '0'
+	second, err := accumulator.Result()
+	if err != nil || second == nil {
+		t.Fatalf("second Result = %#v, %v", second, err)
+	}
+	if *second.Usage.InferenceGeo != "us" || *second.Usage.ServiceTier != "priority" {
+		t.Fatalf("snapshot pointers leaked: %#v", second.Usage)
+	}
+	if got := string(second.Usage.CacheCreation.ExtraFields["future_cache"]); got != "900719925474099312345" {
+		t.Fatalf("nested snapshot raw leaked: %s", got)
+	}
+	if got := string(second.Usage.ExtraFields["future_usage"]); got != "900719925474099312345" {
+		t.Fatalf("snapshot raw leaked: %s", got)
+	}
+}
+
+func TestAccumulatorSnapshotsUnstoppedPartialToolJSON(t *testing.T) {
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"lookup","input":{}}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Par"}}`)
+
+	partial := accumulator.Message()
+	if partial == nil || len(partial.Content) != 1 {
+		t.Fatalf("partial message = %#v", partial)
+	}
+	if got := partial.Content[0].PartialJSON; got != `{"city":"Par` {
+		t.Fatalf("PartialJSON = %q", got)
+	}
+	if got := string(partial.Content[0].ToolUse.Input); got != `{}` {
+		t.Fatalf("unstopped input was parsed: %s", got)
+	}
+	partial.Content[0].ToolUse.Input[0] = '['
+
+	applyFixture(t, accumulator, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+	partial, err := accumulator.Result()
+	var apiError *APIError
+	if !errors.As(err, &apiError) || partial == nil {
+		t.Fatalf("Result = %#v, %#v", partial, err)
+	}
+	if got := partial.Content[0].PartialJSON; got != `{"city":"Par` {
+		t.Fatalf("error snapshot PartialJSON = %q", got)
+	}
+	if got := string(partial.Content[0].ToolUse.Input); got != `{}` {
+		t.Fatalf("snapshot input leaked into accumulator: %s", got)
+	}
+}
+
+func TestDrainStreamCarriesRequestIDAndPartialJSON(t *testing.T) {
+	fixtures := []string{
+		`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"lookup","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Par"}}`,
+	}
+	events := make([]*Event, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		event, err := ParseEvent([]byte(fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+
+	for _, supplied := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new accumulator", true: "supplied accumulator"}[supplied], func(t *testing.T) {
+			var accumulator *Accumulator
+			if supplied {
+				accumulator = NewAccumulator()
+				accumulator.SetRequestID("stale")
+			}
+			stream := &scriptedStream{events: events, requestID: "req_drain", terminalErr: io.EOF}
+			message, err := DrainStream(stream, accumulator)
+			if !errors.Is(err, ErrStreamIncomplete) {
+				t.Fatalf("DrainStream error = %v", err)
+			}
+			if message == nil || message.RequestID != "req_drain" {
+				t.Fatalf("message = %#v", message)
+			}
+			if len(message.Content) != 1 || message.Content[0].PartialJSON != `{"city":"Par` {
+				t.Fatalf("partial content = %#v", message.Content)
+			}
+		})
+	}
+}
+
+func TestDrainStreamCarriesRequestIDOnSuccessfulCompletion(t *testing.T) {
+	fixtures := []string{
+		`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}
+	events := make([]*Event, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		event, err := ParseEvent([]byte(fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	message, err := DrainStream(&scriptedStream{events: events, requestID: "req_complete"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message == nil || message.RequestID != "req_complete" || message.Usage.OutputTokens != 2 {
+		t.Fatalf("message = %#v", message)
+	}
+}
+
+func TestAccumulatorAppliesBetaContextManagementAndCompactionDelta(t *testing.T) {
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0},"context_management":null}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":""}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":"Summary so far."}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4},"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]}}`)
+	applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+	message, err := accumulator.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(message.ExtraFields["context_management"]); got != `{"applied_edits":[{"type":"clear_tool_uses_20250919"}]}` {
+		t.Fatalf("context_management = %s", got)
+	}
+	if len(message.Content) != 1 || message.Content[0].Raw == nil {
+		t.Fatalf("content = %#v", message.Content)
+	}
+	var block struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(message.Content[0].Raw, &block); err != nil {
+		t.Fatal(err)
+	}
+	if block.Type != "compaction" || block.Content != "Summary so far." {
+		t.Fatalf("compaction block = %#v", block)
+	}
+	if got := accumulator.UnknownEvents(); len(got) != 1 || string(got[0]) != `{"type":"compaction_delta","content":"Summary so far."}` {
+		t.Fatalf("unknown delta retention = %q", got)
+	}
+}
+
 func TestAccumulatorPreservesInvalidPartialToolJSONAtBlockStop(t *testing.T) {
 	accumulator := NewAccumulator()
 	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
@@ -256,3 +440,26 @@ func applyFixture(t *testing.T, accumulator *Accumulator, fixture string) {
 		t.Fatalf("Add: %v", err)
 	}
 }
+
+type scriptedStream struct {
+	events      []*Event
+	next        int
+	requestID   string
+	terminalErr error
+}
+
+func (stream *scriptedStream) Recv() (*Event, error) {
+	if stream.next < len(stream.events) {
+		event := stream.events[stream.next]
+		stream.next++
+		return event, nil
+	}
+	if stream.terminalErr != nil {
+		return nil, stream.terminalErr
+	}
+	return nil, io.EOF
+}
+
+func (stream *scriptedStream) Close() error                   { return nil }
+func (stream *scriptedStream) RequestID() string              { return stream.requestID }
+func (stream *scriptedStream) FinalMessage() *MessageResponse { return nil }

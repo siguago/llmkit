@@ -186,8 +186,12 @@ CountAnthropicMessageTokens
 - Claude HTTP 200 + refusal 是成功 Message，不伪装成 HTTP error。
 - SSE error 事件先返回给调用者；下一次 `Recv` 再返回终止 error/EOF。
 - Responses 必须见 completed/failed/incomplete/error；Claude 必须见 message_stop/error。终态前连接断开返回 unexpected EOF。
+- HTTP status 是错误分类的首要证据；除明确 429 外，不允许矛盾的 body code 把 408/409/5xx 等结果提升为 replay-safe rate limit。
+- 非 2xx body 读取中断时，同时保留 HTTP status、Retry-After、request ID、已读 body 和底层读取错误；不能退化为无状态的普通 I/O error。
 - create 默认使用现有 retry 配置的 replay-safe-only 子集。只有能够证明上游未接收工作的错误才自动重放。
 - stream 只允许首事件前的握手重试；首事件交付后不重放。
+- 流内 error 即使语义上是 rate limit，也必须显式标记为不可安全重放，避免调用方把已可能产生输出的请求重复计费。
+- 自定义凭据头（尤其 Anthropic `x-api-key`）不得随跨 origin redirect 转发；同 origin redirect 保留标准行为和跳数上限。
 - 尊重 Retry-After 和 context cancellation，保证 Close 能解除阻塞。
 
 ## 7. 实施顺序
@@ -247,9 +251,10 @@ CountAnthropicMessageTokens
 
 ### SSE
 
-- LF/CRLF、comments、event/id/retry、多 data 行、任意网络分片。
+- CR/LF/CRLF、comments、event/id/retry、多 data 行、任意网络分片（包括 CRLF 跨分片）。
 - assembled event frame ceiling，而不是单行 ceiling。
 - terminal event 先交付、下一次 EOF。
+- 只有空行才能 dispatch SSE event；EOF 必须丢弃未终止的 pending data。即使最后一帧包含完整 terminal JSON，只要缺少事件结束空行仍按截断失败。
 - terminal 前断流明确失败。
 - Responses 多 output index/item/content index 交错。
 - Responses `content_part.added/done` 按 part 类型路由到 message 或 reasoning；未来未知 part 不得让后续终态事件不可读。
@@ -264,6 +269,7 @@ CountAnthropicMessageTokens
 - `provider.Provider` 不增加方法；v0.3 风格外部 adapter 仍编译。
 - unsupported capability 触网前返回可 `errors.Is(ErrUnsupported)` 的错误。
 - 旧 Chat/ChatStream 请求和公开行为 golden 不变。
+- 旧 Anthropic Chat/ChatStream 的 header、直接 `*provider.ProviderError` 类型和 10 KiB error-body 上限均保持基线行为。
 - capability matrix 与实际 method set 一致。
 - `gofmt`、`git diff --check`、`go vet ./...`。
 - `GOTOOLCHAIN=local` 下 Go 1.22 build/test，integration tag 至少编译。

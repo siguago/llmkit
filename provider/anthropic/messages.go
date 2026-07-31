@@ -17,7 +17,10 @@ import (
 	"github.com/siguago/llmkit/provider"
 )
 
-const maxNativeErrorBodyBytes = 64 << 10
+const (
+	maxLegacyErrorBodyBytes = 10 << 10
+	maxNativeErrorBodyBytes = 64 << 10
+)
 
 var (
 	_ provider.AnthropicMessagesCreator  = (*Provider)(nil)
@@ -154,6 +157,47 @@ func (p *Provider) doNativeRequest(
 	stream bool,
 	opts ...anthropicapi.RequestOption,
 ) (*http.Response, error) {
+	return p.doAnthropicRequest(ctx, apiKey, endpoint, body, anthropicRequestBehavior{
+		useStreamClient:   stream,
+		acceptEventStream: stream,
+		decodeNativeError: true,
+		maxErrorBodyBytes: maxNativeErrorBodyBytes,
+	}, opts...)
+}
+
+// doLegacyChatRequest preserves the Chat adapter's established wire and error
+// contract while reusing the native transport setup. In particular, legacy
+// streams never sent an explicit Accept header, and legacy HTTP failures were
+// returned as a direct *provider.ProviderError.
+func (p *Provider) doLegacyChatRequest(
+	ctx context.Context,
+	apiKey string,
+	endpoint string,
+	body []byte,
+	stream bool,
+	opts ...anthropicapi.RequestOption,
+) (*http.Response, error) {
+	return p.doAnthropicRequest(ctx, apiKey, endpoint, body, anthropicRequestBehavior{
+		useStreamClient:   stream,
+		maxErrorBodyBytes: maxLegacyErrorBodyBytes,
+	}, opts...)
+}
+
+type anthropicRequestBehavior struct {
+	useStreamClient   bool
+	acceptEventStream bool
+	decodeNativeError bool
+	maxErrorBodyBytes int64
+}
+
+func (p *Provider) doAnthropicRequest(
+	ctx context.Context,
+	apiKey string,
+	endpoint string,
+	body []byte,
+	behavior anthropicRequestBehavior,
+	opts ...anthropicapi.RequestOption,
+) (*http.Response, error) {
 	requestOptions := anthropicapi.ApplyRequestOptions(opts...)
 	requestOptions.Version = strings.TrimSpace(requestOptions.Version)
 	if requestOptions.Version == "" {
@@ -164,10 +208,10 @@ func (p *Provider) doNativeRequest(
 	if err != nil {
 		return nil, err
 	}
-	setNativeHeaders(httpReq, apiKey, requestOptions, stream)
+	setNativeHeaders(httpReq, apiKey, requestOptions, behavior.acceptEventStream)
 
 	client := p.client
-	if stream {
+	if behavior.useStreamClient {
 		client = p.streamClient
 	}
 	resp, err := client.Do(httpReq)
@@ -178,21 +222,34 @@ func (p *Provider) doNativeRequest(
 		return resp, nil
 	}
 	defer resp.Body.Close()
-	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNativeErrorBodyBytes+1))
+	maxErrorBodyBytes := behavior.maxErrorBodyBytes
+	if maxErrorBodyBytes <= 0 {
+		maxErrorBodyBytes = maxNativeErrorBodyBytes
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+
+	if !behavior.decodeNativeError {
+		// Preserve the legacy Chat contract: callers may use a direct concrete
+		// assertion rather than errors.As, and the old implementation ignored a
+		// secondary body read failure after receiving the HTTP response.
+		return nil, provider.NewProviderErrorFromResponse(resp, "anthropic", payload)
+	}
+
+	apiErr := decodeNativeAPIError(resp, payload)
 	if readErr != nil {
-		return nil, fmt.Errorf("anthropic: read error response: %w", readErr)
+		// Receiving a status and headers is useful evidence even when reading the
+		// body then fails. Join both causes so status, Retry-After, request ID,
+		// provider metadata, and the underlying I/O error all remain inspectable.
+		return nil, errors.Join(apiErr, fmt.Errorf("anthropic: read error response: %w", readErr))
 	}
-	if len(payload) > maxNativeErrorBodyBytes {
-		payload = payload[:maxNativeErrorBodyBytes]
-	}
-	return nil, decodeNativeAPIError(resp, payload)
+	return nil, apiErr
 }
 
-func setNativeHeaders(req *http.Request, apiKey string, opts anthropicapi.RequestOptions, stream bool) {
+func setNativeHeaders(req *http.Request, apiKey string, opts anthropicapi.RequestOptions, acceptEventStream bool) {
 	provider.SetKeyHeader(req.Header, "x-api-key", apiKey)
 	req.Header.Set("anthropic-version", opts.Version)
 	req.Header.Set("content-type", "application/json")
-	if stream {
+	if acceptEventStream {
 		req.Header.Set("accept", "text/event-stream")
 	}
 	if betas := normalizedBetas(opts.Betas); len(betas) > 0 {
@@ -227,15 +284,36 @@ func decodeNativeAPIError(resp *http.Response, payload []byte) error {
 		RequestID string                `json:"request_id"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return providerErr
+		return provider.WithErrorMetadata(providerErr, "", anthropicErrorCategory(resp.StatusCode, ""))
 	}
 	if providerErr.RequestID == "" {
 		providerErr.RequestID = envelope.RequestID
 	}
-	return provider.WithErrorMetadata(providerErr, envelope.Error.Type, anthropicErrorCategory(envelope.Error.Type))
+	return provider.WithErrorMetadata(providerErr, envelope.Error.Type, anthropicErrorCategory(resp.StatusCode, envelope.Error.Type))
 }
 
-func anthropicErrorCategory(code string) provider.ErrorCategory {
+func anthropicErrorCategory(status int, code string) provider.ErrorCategory {
+	// An actual HTTP status is the authoritative classification. Never let a
+	// contradictory body code turn a delivered 5xx request into a replay-safe
+	// rate limit (or hide a real 429). A zero status denotes an in-stream error,
+	// where the provider code is the only available signal.
+	if status != 0 {
+		switch {
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			return provider.ErrorCategoryAuth
+		case status == http.StatusTooManyRequests:
+			return provider.ErrorCategoryRateLimit
+		case status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge || status == http.StatusUnprocessableEntity:
+			return provider.ErrorCategoryInvalidRequest
+		case status == http.StatusNotFound:
+			return provider.ErrorCategoryNotFound
+		case status >= http.StatusInternalServerError && status <= 599:
+			return provider.ErrorCategoryServer
+		default:
+			return ""
+		}
+	}
+
 	switch code {
 	case "authentication_error", "permission_error":
 		return provider.ErrorCategoryAuth
@@ -347,7 +425,11 @@ func (stream *nativeMessageStream) Recv() (*anthropicapi.Event, error) {
 			_ = stream.Close()
 			if event.Error != nil {
 				apiErr := event.Error.Error
-				stream.pendingErr = provider.WithErrorMetadata(&apiErr, apiErr.Type, anthropicErrorCategory(apiErr.Type))
+				stream.pendingErr = provider.MarkUnsafeToReplay(provider.WithErrorMetadata(
+					&apiErr,
+					apiErr.Type,
+					anthropicErrorCategory(0, apiErr.Type),
+				))
 			}
 		}
 		return event, nil

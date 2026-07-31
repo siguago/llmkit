@@ -67,14 +67,11 @@ func (i Input) isZero() bool {
 }
 
 func (i Input) MarshalJSON() ([]byte, error) {
-	if len(i.Raw) > 0 {
-		if err := validateRaw(i.Raw, "input Raw"); err != nil {
-			return nil, err
-		}
-		return cloneRaw(i.Raw), nil
-	}
 	if err := i.validate(); err != nil {
 		return nil, err
+	}
+	if len(i.Raw) > 0 {
+		return cloneRaw(i.Raw), nil
 	}
 	switch {
 	case i.Text != nil:

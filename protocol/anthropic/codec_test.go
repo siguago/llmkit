@@ -110,6 +110,50 @@ func TestMessageResponseRoundTripAndHelpers(t *testing.T) {
 	assertJSONEqual(t, input, encoded)
 }
 
+func TestStopDetailsPreservesRequiredNullFields(t *testing.T) {
+	input := []byte(`{"type":"refusal","category":null,"explanation":null,"future_detail":true}`)
+	var details StopDetails
+	if err := json.Unmarshal(input, &details); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSONEqual(t, input, encoded)
+
+	encoded, err = json.Marshal(StopDetails{Type: "refusal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSONEqual(t, []byte(`{"type":"refusal","category":null,"explanation":null}`), encoded)
+}
+
+func TestToolUsesDeepCopiesCacheControlTTL(t *testing.T) {
+	ttl := "1h"
+	message := &MessageResponse{Content: []ContentBlock{{
+		Type: ContentBlockTypeToolUse,
+		ToolUse: &ToolUseBlock{
+			Type:  ContentBlockTypeToolUse,
+			ID:    "toolu_1",
+			Name:  "lookup",
+			Input: json.RawMessage(`{}`),
+			CacheControl: &CacheControl{
+				Type: "ephemeral",
+				TTL:  &ttl,
+			},
+		},
+	}}}
+	uses := ToolUses(message)
+	if len(uses) != 1 || uses[0].CacheControl == nil || uses[0].CacheControl.TTL == nil {
+		t.Fatalf("ToolUses = %#v", uses)
+	}
+	*uses[0].CacheControl.TTL = "5m"
+	if got := *message.Content[0].ToolUse.CacheControl.TTL; got != "1h" {
+		t.Fatalf("original TTL mutated to %q", got)
+	}
+}
+
 func TestContentStringAndEmptyBlockArrayRemainDistinct(t *testing.T) {
 	tests := []struct {
 		name string

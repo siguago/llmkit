@@ -681,6 +681,7 @@ func DrainStream(stream Stream, accumulator *Accumulator) (*MessageResponse, err
 	if accumulator == nil {
 		accumulator = NewAccumulator()
 	}
+	accumulator.SetRequestID(stream.RequestID())
 	for {
 		event, err := stream.Recv()
 		if err != nil {

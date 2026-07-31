@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
@@ -26,6 +27,9 @@ func TestChatWireRegressionGolden(t *testing.T) {
 		}
 		if got := request.Header.Get("anthropic-version"); got != "2023-06-01" {
 			t.Errorf("anthropic-version = %q", got)
+		}
+		if got := request.Header.Get("accept"); got != "" {
+			t.Errorf("legacy stream Accept = %q, want empty", got)
 		}
 		captured, _ = io.ReadAll(request.Body)
 		w.Header().Set("content-type", "application/json")
@@ -105,6 +109,94 @@ func TestChatStreamWireAndOutputRegressionGolden(t *testing.T) {
 	usage := stream.GetUsage()
 	if usage == nil || usage.PromptTokens != 1 || usage.CompletionTokens != 1 || usage.TotalTokens != 2 {
 		t.Fatalf("stream usage = %+v", usage)
+	}
+}
+
+func TestLegacyChatErrorsRemainDirectProviderError(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(*Provider) error
+	}{
+		{
+			name: "sync",
+			invoke: func(client *Provider) error {
+				_, err := client.ChatCompletion(context.Background(), "chat-key", "claude-test", &provider.ChatCompletionRequest{
+					Messages: []provider.Message{{Role: "user", Content: "hello"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "stream",
+			invoke: func(client *Provider) error {
+				stream, err := client.ChatCompletionStream(context.Background(), "chat-key", "claude-test", &provider.ChatCompletionRequest{
+					Messages: []provider.Message{{Role: "user", Content: "hello"}},
+				})
+				if stream != nil {
+					_ = stream.Close()
+				}
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if got := request.Header.Get("accept"); got != "" {
+					t.Errorf("legacy %s Accept = %q, want empty", test.name, got)
+				}
+				w.Header().Set("request-id", "req_legacy_error")
+				w.Header().Set("retry-after", "9")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`)
+			}))
+			defer server.Close()
+
+			err := test.invoke(NewWithBaseURL(server.URL))
+			if err == nil {
+				t.Fatal("expected API error")
+			}
+			providerErr, ok := err.(*provider.ProviderError)
+			if !ok {
+				t.Fatalf("error concrete type = %T, want *provider.ProviderError", err)
+			}
+			if providerErr.StatusCode != http.StatusUnauthorized ||
+				providerErr.RequestID != "req_legacy_error" ||
+				providerErr.RetryAfter != "9" {
+				t.Fatalf("ProviderError = %+v", providerErr)
+			}
+		})
+	}
+}
+
+func TestLegacyChatErrorBodyRemainsLimitedTo10KiB(t *testing.T) {
+	limited := strings.Repeat("x", maxLegacyErrorBodyBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, limited+"TAIL_MUST_NOT_APPEAR")
+	}))
+	defer server.Close()
+
+	_, err := NewWithBaseURL(server.URL).ChatCompletion(
+		context.Background(), "chat-key", "claude-test",
+		&provider.ChatCompletionRequest{Messages: []provider.Message{{Role: "user", Content: "hello"}}},
+	)
+	providerErr, ok := err.(*provider.ProviderError)
+	if !ok {
+		t.Fatalf("error concrete type = %T, want *provider.ProviderError", err)
+	}
+	wantPrefix := "anthropic api error (status 500): "
+	if len(providerErr.Message) != len(wantPrefix)+maxLegacyErrorBodyBytes {
+		t.Fatalf("error message length = %d, want %d", len(providerErr.Message), len(wantPrefix)+maxLegacyErrorBodyBytes)
+	}
+	if !strings.HasPrefix(providerErr.Message, wantPrefix) ||
+		!strings.HasSuffix(providerErr.Message, limited) ||
+		strings.Contains(providerErr.Message, "TAIL_MUST_NOT_APPEAR") {
+		t.Fatalf("legacy error body limit changed: prefix=%t suffix=%t tail=%t",
+			strings.HasPrefix(providerErr.Message, wantPrefix),
+			strings.HasSuffix(providerErr.Message, limited),
+			strings.Contains(providerErr.Message, "TAIL_MUST_NOT_APPEAR"))
 	}
 }
 

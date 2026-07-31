@@ -263,6 +263,41 @@ func TestAccumulatorFunctionArgumentsAndTerminalSnapshot(t *testing.T) {
 	}
 }
 
+func TestAccumulatorTerminalClonePreservesNestedNullableConfig(t *testing.T) {
+	completed := mustEvent(t, `{
+  "type":"response.completed","sequence_number":1,
+  "response":{
+    "id":"resp_nullable","object":"response","created_at":1,"status":"completed",
+    "model":"gpt-test","output":[],"parallel_tool_calls":false,"store":false,
+    "reasoning":{"effort":null,"summary":null,"generate_summary":null},
+    "text":{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null}
+  }
+}`)
+	var accumulator Accumulator
+	if err := accumulator.Add(completed); err != nil {
+		t.Fatalf("Accumulator.Add: %v", err)
+	}
+	encoded, err := json.Marshal(accumulator.FinalResponse())
+	if err != nil {
+		t.Fatalf("Marshal terminal clone: %v", err)
+	}
+	var nested struct {
+		Reasoning json.RawMessage `json:"reasoning"`
+		Text      json.RawMessage `json:"text"`
+	}
+	if err := json.Unmarshal(encoded, &nested); err != nil {
+		t.Fatalf("Unmarshal terminal clone: %v", err)
+	}
+	assertSemanticJSONEqual(t,
+		[]byte(`{"effort":null,"summary":null,"generate_summary":null}`),
+		nested.Reasoning,
+	)
+	assertSemanticJSONEqual(t,
+		[]byte(`{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null}`),
+		nested.Text,
+	)
+}
+
 func TestAccumulatorPreservesFailedAndIncompleteSnapshots(t *testing.T) {
 	tests := []struct {
 		name       string

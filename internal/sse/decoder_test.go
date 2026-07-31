@@ -167,30 +167,45 @@ func TestDecoder_IsIndependentOfReadChunking(t *testing.T) {
 	}
 }
 
-func TestDecoder_EOFDispatchesPendingDataExactlyOnce(t *testing.T) {
-	d := NewDecoder(strings.NewReader("event: final\ndata: unterminated"), 1024)
-	event, err := d.Next()
-	if err != nil {
-		t.Fatalf("first Next: %v", err)
-	}
-	if event.Name != "final" || string(event.Data) != "unterminated" {
-		t.Fatalf("event = %#v", event)
-	}
-	for i := 0; i < 2; i++ {
+func TestDecoder_CRLFAndLoneCRAcrossReadChunks(t *testing.T) {
+	input := []byte("event: mixed\r\ndata: cr\rdata: lf\ndata: crlf\r\n\r")
+	want := Event{Name: "mixed", Data: []byte("cr\nlf\ncrlf")}
+
+	for chunkSize := 1; chunkSize <= 3; chunkSize++ {
+		d := NewDecoder(&chunkReader{data: append([]byte(nil), input...), size: chunkSize}, 1024)
+		event := mustNext(t, d)
+		if !reflect.DeepEqual(event, want) {
+			t.Fatalf("chunk size %d: event = %#v, want %#v", chunkSize, event, want)
+		}
 		if _, err := d.Next(); !errors.Is(err, io.EOF) {
-			t.Fatalf("Next after final event (%d) = %v, want EOF", i, err)
+			t.Fatalf("chunk size %d: final error = %v, want EOF", chunkSize, err)
 		}
 	}
 }
 
-func TestDecoder_HandlesReaderReturningDataAndEOFTogether(t *testing.T) {
-	d := NewDecoder(&dataAndEOFReader{data: []byte("data: final")}, 1024)
-	event := mustNext(t, d)
-	if got := string(event.Data); got != "final" {
-		t.Fatalf("Data = %q, want final", got)
+func TestDecoder_EOFDiscardsPendingData(t *testing.T) {
+	inputs := []string{
+		"event: final\ndata: unterminated",
+		"data: line-ended-with-lf\n",
+		"data: line-ended-with-cr\r",
+		"data: line-ended-with-crlf\r\n",
 	}
-	if _, err := d.Next(); !errors.Is(err, io.EOF) {
-		t.Fatalf("second Next error = %v, want EOF", err)
+	for _, input := range inputs {
+		d := NewDecoder(strings.NewReader(input), 1024)
+		for call := 0; call < 2; call++ {
+			if event, err := d.Next(); !errors.Is(err, io.EOF) {
+				t.Fatalf("input %q call %d: event = %#v, error = %v, want EOF", input, call, event, err)
+			}
+		}
+	}
+}
+
+func TestDecoder_DataAndEOFTogetherDiscardsPendingData(t *testing.T) {
+	d := NewDecoder(&dataAndEOFReader{data: []byte("data: final")}, 1024)
+	for call := 0; call < 2; call++ {
+		if event, err := d.Next(); !errors.Is(err, io.EOF) {
+			t.Fatalf("call %d: event = %#v, error = %v, want EOF", call, event, err)
+		}
 	}
 }
 
@@ -250,6 +265,16 @@ func TestDecoder_UnknownAndCommentPhysicalLinesAreBounded(t *testing.T) {
 		_, err := d.Next()
 		assertTooLarge(t, err, 4, 21)
 	}
+}
+
+func TestDecoder_PhysicalLineLimitCountsCRLF(t *testing.T) {
+	// With a logical limit of 4, lineSyntaxAllowance permits 20 physical
+	// bytes. Nineteen content bytes plus CR fit; the delayed LF is byte 21 and
+	// must still fail even though CR already terminated the ignored comment.
+	input := ":" + strings.Repeat("x", 18) + "\r\n"
+	d := NewDecoder(strings.NewReader(input), 4)
+	_, err := d.Next()
+	assertTooLarge(t, err, 4, 21)
 }
 
 func TestDecoder_NonPositiveLimitUsesDefault(t *testing.T) {

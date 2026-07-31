@@ -249,7 +249,11 @@ func TestNativeMessagesHTTPError_PreservesCodeCategoryAndRequestID(t *testing.T)
 		{"invalid", http.StatusBadRequest, "invalid_request_error", provider.ErrorCategoryInvalidRequest, "", "req_invalid", "req_invalid"},
 		{"not_found", http.StatusNotFound, "not_found_error", provider.ErrorCategoryNotFound, "", "req_missing", "req_missing"},
 		{"overloaded", 529, "overloaded_error", provider.ErrorCategoryServer, "req_overload", "", "req_overload"},
-		{"future_code", http.StatusInternalServerError, "future_error", "", "req_future", "", "req_future"},
+		{"future_code", http.StatusInternalServerError, "future_error", provider.ErrorCategoryServer, "req_future", "", "req_future"},
+		{"500_overrides_rate_body", http.StatusInternalServerError, "rate_limit_error", provider.ErrorCategoryServer, "req_500", "", "req_500"},
+		{"529_overrides_rate_body", 529, "rate_limit_error", provider.ErrorCategoryServer, "req_529", "", "req_529"},
+		{"429_overrides_overloaded_body", http.StatusTooManyRequests, "overloaded_error", provider.ErrorCategoryRateLimit, "req_429", "", "req_429"},
+		{"401_overrides_rate_body", http.StatusUnauthorized, "rate_limit_error", provider.ErrorCategoryAuth, "req_401", "", "req_401"},
 	}
 
 	for _, test := range tests {
@@ -287,6 +291,114 @@ func TestNativeMessagesHTTPError_PreservesCodeCategoryAndRequestID(t *testing.T)
 				t.Errorf("ErrorCategoryOf = %q, want %q", got, test.wantCategory)
 			}
 		})
+	}
+}
+
+func TestNativeMessagesHTTPError_PreservesStatusMetadataWhenBodyReadFails(t *testing.T) {
+	readErr := errors.New("body read failed")
+	body := &nativeErrorBody{
+		payload: []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"busy"},"request_id":"req_body"}`),
+		err:     readErr,
+	}
+	client := &http.Client{Transport: nativeRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Header: http.Header{
+				"Request-Id":  []string{"req_header"},
+				"Retry-After": []string{"11"},
+			},
+			Body:    body,
+			Request: request,
+		}, nil
+	})}
+	clientProvider := &Provider{client: client}
+
+	_, err := clientProvider.doNativeRequest(
+		context.Background(), "key", "https://api.anthropic.test/v1/messages", []byte(`{}`), false,
+	)
+	if err == nil {
+		t.Fatal("expected combined HTTP/body-read error")
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("combined error lost body read cause: %v", err)
+	}
+	var providerErr *provider.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("combined error lost ProviderError: %T %v", err, err)
+	}
+	if providerErr.StatusCode != http.StatusInternalServerError ||
+		providerErr.RequestID != "req_header" || providerErr.RetryAfter != "11" {
+		t.Fatalf("ProviderError = %+v", providerErr)
+	}
+	if got := provider.ProviderCode(err); got != "rate_limit_error" {
+		t.Fatalf("ProviderCode = %q", got)
+	}
+	if got := provider.ErrorCategoryOf(err); got != provider.ErrorCategoryServer {
+		t.Fatalf("ErrorCategory = %q", got)
+	}
+	if !body.closed {
+		t.Fatal("error response body was not closed")
+	}
+}
+
+func TestNativeMessagesRedirect_DoesNotSendAPIKeyAcrossOrigin(t *testing.T) {
+	targetHit := make(chan http.Header, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		targetHit <- request.Header.Clone()
+		writeNativeJSONResponse(w)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("x-api-key"); got != "secret-key" {
+			t.Errorf("source x-api-key = %q", got)
+		}
+		w.Header().Set("location", target.URL+"/v1/messages")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	_, err := NewWithBaseURL(source.URL).CreateAnthropicMessage(
+		context.Background(), "secret-key", nativeMessageRequest(8),
+	)
+	if err == nil {
+		t.Fatal("expected cross-origin redirect to remain an HTTP error")
+	}
+	var providerErr *provider.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("redirect error = %T %v", err, err)
+	}
+	select {
+	case header := <-targetHit:
+		t.Fatalf("cross-origin target was contacted with x-api-key %q", header.Get("x-api-key"))
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestNativeMessagesRedirect_FollowsSameOriginWithAPIKey(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/messages":
+			w.Header().Set("location", server.URL+"/redirected/messages")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case "/redirected/messages":
+			if got := request.Header.Get("x-api-key"); got != "secret-key" {
+				t.Errorf("redirected x-api-key = %q", got)
+			}
+			writeNativeJSONResponse(w)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	message, err := NewWithBaseURL(server.URL+"/v1").CreateAnthropicMessage(
+		context.Background(), "secret-key", nativeMessageRequest(8),
+	)
+	if err != nil || message == nil {
+		t.Fatalf("same-origin redirect = %#v, %v", message, err)
 	}
 }
 
@@ -451,6 +563,8 @@ func TestNativeMessagesStream_ErrorEventThenClassifiedError(t *testing.T) {
 		w.Header().Set("request-id", "req_stream_error")
 		writeNativeSSE(w, []nativeSSEFrame{
 			{"message_start", nativeMessageStartJSON()},
+			{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_partial","name":"lookup","input":{}}}`},
+			{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Par"}}`},
 			{"error", `{"type":"error","error":{"type":"overloaded_error","message":"busy","future":1}}`},
 		})
 	}))
@@ -464,8 +578,14 @@ func TestNativeMessagesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	}
 	defer stream.Close()
 
-	if event, err := stream.Recv(); err != nil || event.Type != protocol.EventTypeMessageStart {
-		t.Fatalf("first Recv = event=%+v err=%v", event, err)
+	for index, want := range []protocol.EventType{
+		protocol.EventTypeMessageStart,
+		protocol.EventTypeContentBlockStart,
+		protocol.EventTypeContentBlockDelta,
+	} {
+		if event, err := stream.Recv(); err != nil || event == nil || event.Type != want {
+			t.Fatalf("Recv %d = event=%+v err=%v, want %q", index, event, err, want)
+		}
 	}
 	errorEvent, err := stream.Recv()
 	if err != nil || errorEvent.Type != protocol.EventTypeError || errorEvent.Error == nil {
@@ -486,6 +606,9 @@ func TestNativeMessagesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if provider.ProviderCode(err) != "overloaded_error" || provider.ErrorCategoryOf(err) != provider.ErrorCategoryServer {
 		t.Fatalf("classified stream error: code=%q category=%q", provider.ProviderCode(err), provider.ErrorCategoryOf(err))
 	}
+	if !provider.IsMarkedUnsafeToReplay(err) {
+		t.Fatalf("stream error was not marked unsafe to replay: %T %v", err, err)
+	}
 	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Recv after pending error = %v, want EOF", err)
 	}
@@ -493,14 +616,46 @@ func TestNativeMessagesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if partial == nil || partial.ID != "msg_stream" || partial.RequestID != "req_stream_error" {
 		t.Fatalf("partial FinalMessage = %+v", partial)
 	}
+	if len(partial.Content) != 1 || partial.Content[0].PartialJSON != `{"city":"Par` ||
+		partial.Content[0].ToolUse == nil || string(partial.Content[0].ToolUse.Input) != `{}` {
+		t.Fatalf("partial tool FinalMessage = %+v", partial.Content)
+	}
+}
+
+func TestNativeMessagesStream_UnterminatedMessageStopIsUnexpectedEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", nativeMessageStartJSON())
+		_, _ = io.WriteString(w, `event: message_stop
+data: {"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	stream, err := NewWithBaseURL(server.URL).CreateAnthropicMessageStream(
+		context.Background(), "key", nativeMessageRequest(8),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event == nil || event.Type != protocol.EventTypeMessageStart {
+		t.Fatalf("first Recv = %#v, %v", event, err)
+	}
+	if event, err := stream.Recv(); event != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("unterminated message_stop Recv = %#v, %v", event, err)
+	}
+	partial := stream.FinalMessage()
+	if partial == nil || partial.ID != "msg_stream" {
+		t.Fatalf("partial FinalMessage = %#v", partial)
+	}
 }
 
 func TestNativeMessagesStream_ReportsUnexpectedEOFBeforeTerminal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeNativeSSE(w, []nativeSSEFrame{
 			{"message_start", nativeMessageStartJSON()},
-			{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
-			{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`},
+			{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_partial","name":"lookup","input":{}}}`},
+			{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Par"}}`},
 		})
 	}))
 	defer server.Close()
@@ -523,7 +678,8 @@ func TestNativeMessagesStream_ReportsUnexpectedEOFBeforeTerminal(t *testing.T) {
 		t.Fatalf("terminal-before-EOF error = %v, want io.ErrUnexpectedEOF", err)
 	}
 	partial := stream.FinalMessage()
-	if partial == nil || partial.Text() != "partial" {
+	if partial == nil || len(partial.Content) != 1 || partial.Content[0].PartialJSON != `{"city":"Par` ||
+		partial.Content[0].ToolUse == nil || string(partial.Content[0].ToolUse.Input) != `{}` {
 		t.Fatalf("partial FinalMessage = %+v", partial)
 	}
 }
@@ -561,6 +717,32 @@ type nativeBlockingBody struct {
 	started chan struct{}
 	closed  chan struct{}
 	once    sync.Once
+}
+
+type nativeRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip nativeRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+type nativeErrorBody struct {
+	payload   []byte
+	err       error
+	delivered bool
+	closed    bool
+}
+
+func (body *nativeErrorBody) Read(target []byte) (int, error) {
+	if body.delivered {
+		return 0, body.err
+	}
+	body.delivered = true
+	return copy(target, body.payload), body.err
+}
+
+func (body *nativeErrorBody) Close() error {
+	body.closed = true
+	return nil
 }
 
 func newNativeBlockingBody() *nativeBlockingBody {

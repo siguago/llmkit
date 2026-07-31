@@ -3,8 +3,10 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,13 +46,52 @@ func NewWithBaseURL(baseURL string) *Provider {
 		tokenCountURL: baseURL + "/messages/count_tokens",
 		modelsURL:     baseURL + "/models",
 		client: &http.Client{
-			Timeout:   300 * time.Second,
-			Transport: outboundTransport,
+			Timeout:       300 * time.Second,
+			Transport:     outboundTransport,
+			CheckRedirect: checkAnthropicRedirect,
 		},
 		streamClient: &http.Client{
-			Timeout:   900 * time.Second, // generous safety-net; WriteTimeout (600s) handles normal cutoff
-			Transport: outboundTransport,
+			Timeout:       900 * time.Second, // generous safety-net; WriteTimeout (600s) handles normal cutoff
+			Transport:     outboundTransport,
+			CheckRedirect: checkAnthropicRedirect,
 		},
+	}
+}
+
+// checkAnthropicRedirect permits the ordinary same-origin redirect behavior,
+// but never forwards Anthropic's x-api-key to another origin. Defining a
+// callback replaces net/http's default ten-hop limit, so preserve that limit
+// explicitly as well.
+func checkAnthropicRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !sameHTTPOrigin(via[0].URL, req.URL) {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectiveHTTPPort(left) == effectiveHTTPPort(right)
+}
+
+func effectiveHTTPPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
 	}
 }
 
@@ -74,7 +115,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 	if betas := requiredBetas(model, req); betas != "" {
 		requestOptions = append(requestOptions, anthropicapi.WithBetas(betas))
 	}
-	resp, err := p.doNativeRequest(ctx, apiKey, p.messagesURL, jsonBody, false, requestOptions...)
+	resp, err := p.doLegacyChatRequest(ctx, apiKey, p.messagesURL, jsonBody, false, requestOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +159,7 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	if betas := requiredBetas(model, req); betas != "" {
 		requestOptions = append(requestOptions, anthropicapi.WithBetas(betas))
 	}
-	resp, err := p.doNativeRequest(ctx, apiKey, p.messagesURL, jsonBody, true, requestOptions...)
+	resp, err := p.doLegacyChatRequest(ctx, apiKey, p.messagesURL, jsonBody, true, requestOptions...)
 	if err != nil {
 		return nil, err
 	}

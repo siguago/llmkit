@@ -94,6 +94,26 @@ func TestCreateResponseUsesReplaySafeRetryPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("conflicting 408 body is retryable but not replayed", func(t *testing.T) {
+		var calls atomic.Int32
+		client := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusRequestTimeout)
+			_, _ = io.WriteString(w, `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"timed out"}}`)
+		}, WithRetry(RetryConfig{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}))
+
+		_, err := client.CreateResponse(context.Background(), testResponseCreateRequest())
+		if err == nil {
+			t.Fatal("expected create error")
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("408 create calls = %d, want 1", calls.Load())
+		}
+		if !IsRetryable(err) || IsRateLimited(err) || IsSafeToReplay(err) {
+			t.Fatalf("classification: retryable=%t rateLimit=%t safe=%t err=%v", IsRetryable(err), IsRateLimited(err), IsSafeToReplay(err), err)
+		}
+	})
+
 	t.Run("explicit rate-limit refusal is replayed", func(t *testing.T) {
 		var calls atomic.Int32
 		client := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +131,50 @@ func TestCreateResponseUsesReplaySafeRetryPolicy(t *testing.T) {
 		}
 		if response.ID != "resp_retry" || calls.Load() != 2 {
 			t.Fatalf("response=%+v calls=%d", response, calls.Load())
+		}
+	})
+}
+
+func TestCreateAnthropicMessageUsesReplaySafeRetryPolicy(t *testing.T) {
+	retry := WithRetry(RetryConfig{MaxAttempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+
+	t.Run("conflicting 500 body is not replayed", func(t *testing.T) {
+		var calls atomic.Int32
+		client := newTestClientFor(t, Anthropic, func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"conflicting body"}}`)
+		}, retry)
+
+		_, err := client.CreateAnthropicMessage(context.Background(), testAnthropicMessageRequest())
+		if err == nil {
+			t.Fatal("expected create error")
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("500 create calls = %d, want 1", calls.Load())
+		}
+		if !IsServerError(err) || IsRateLimited(err) || IsSafeToReplay(err) {
+			t.Fatalf("classification: server=%t rateLimit=%t safe=%t err=%v", IsServerError(err), IsRateLimited(err), IsSafeToReplay(err), err)
+		}
+	})
+
+	t.Run("explicit 429 refusal is replayed", func(t *testing.T) {
+		var calls atomic.Int32
+		client := newTestClientFor(t, Anthropic, func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"api_error","message":"conflicting body"}}`)
+				return
+			}
+			writeTestAnthropicMessage(w, "msg_retry")
+		}, retry)
+
+		message, err := client.CreateAnthropicMessage(context.Background(), testAnthropicMessageRequest())
+		if err != nil {
+			t.Fatalf("CreateAnthropicMessage: %v", err)
+		}
+		if message.ID != "msg_retry" || calls.Load() != 2 {
+			t.Fatalf("message=%+v calls=%d", message, calls.Load())
 		}
 	})
 }
@@ -193,6 +257,25 @@ func testResponseCreateRequest() *responsesapi.CreateRequest {
 		Input: responsesapi.NewTextInput("hello"),
 		Store: &store,
 	}
+}
+
+func testAnthropicMessageRequest() *anthropicapi.MessageRequest {
+	return &anthropicapi.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 16,
+		Messages: []anthropicapi.MessageParam{{
+			Role: anthropicapi.RoleUser, Content: anthropicapi.StringContent("hello"),
+		}},
+	}
+}
+
+func writeTestAnthropicMessage(w http.ResponseWriter, id string) {
+	w.Header().Set("content-type", "application/json")
+	_, _ = fmt.Fprintf(w, `{
+  "id":%q,"type":"message","role":"assistant","model":"claude-test",
+  "content":[],"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,
+  "usage":{"input_tokens":1,"output_tokens":1}
+}`, id)
 }
 
 func writeTestResponse(w http.ResponseWriter, id, status string) {
