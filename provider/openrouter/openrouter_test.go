@@ -1,12 +1,124 @@
 package openrouter
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
 )
+
+func TestListModelsWithTaskTypes_UsesOutputModalities(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.URL.Query().Get("output_modalities"); got != "all" {
+			t.Errorf("output_modalities = %q, want all", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[
+			{"id":"text/model","name":"Text","architecture":{"output_modalities":["text"]}},
+			{"id":"image/model","architecture":{"output_modalities":["text","image"]}},
+			{"id":"pure-image/model","architecture":{"output_modalities":["image"]}},
+			{"id":"video/model","architecture":{"output_modalities":["video"]}},
+			{"id":"chat/model","architecture":{"output_modalities":["chat","text"]}},
+			{"id":"audio/model","architecture":{"output_modalities":["audio"]}},
+			{"id":"embedding/model","architecture":{"output_modalities":["embeddings"]}},
+			{"id":"rerank/model","architecture":{"output_modalities":["rerank"]}},
+			{"id":"speech/model","architecture":{"output_modalities":["speech"]}},
+			{"id":"transcription/model","architecture":{"output_modalities":["transcription"]}},
+			{"id":"future/model","architecture":{"output_modalities":["hologram"]}},
+			{"id":"empty/model","architecture":{"output_modalities":[]}},
+			{"id":"legacy/model"}
+		]}`)
+	}))
+	defer srv.Close()
+
+	models, taskTypes, err := NewWithBaseURL(srv.URL).ListModelsWithTaskTypes(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModelsWithTaskTypes: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("catalog requests = %d, want exactly one", calls)
+	}
+	if len(models) != 6 {
+		t.Fatalf("models = %+v, want five supported/unknown entries plus metadata-less legacy entry", models)
+	}
+	if got := strings.Join(taskTypes["text/model"], ","); got != provider.RemoteModelTaskChat {
+		t.Errorf("text tasks = %q", got)
+	}
+	wantImage := provider.RemoteModelTaskChat + "," + provider.RemoteModelTaskImageGenerate
+	if got := strings.Join(taskTypes["image/model"], ","); got != wantImage {
+		t.Errorf("image tasks = %q, want %q", got, wantImage)
+	}
+	if _, ok := taskTypes["pure-image/model"]; ok {
+		t.Error("pure image model must remain unknown until the dedicated /images route is implemented")
+	}
+	if got := strings.Join(taskTypes["video/model"], ","); got != provider.RemoteModelTaskVideoGenerate {
+		t.Errorf("video tasks = %q", got)
+	}
+	if got := strings.Join(taskTypes["chat/model"], ","); got != provider.RemoteModelTaskChat {
+		t.Errorf("chat alias should deduplicate to chat, got %q", got)
+	}
+	if _, ok := taskTypes["legacy/model"]; ok {
+		t.Error("a model with genuinely missing modality metadata must remain unknown")
+	}
+	gotModels := make(map[string]bool, len(models))
+	for _, model := range models {
+		gotModels[model.ModelID] = true
+	}
+	for _, id := range []string{
+		"audio/model", "embedding/model", "rerank/model", "speech/model",
+		"transcription/model", "future/model", "empty/model",
+	} {
+		if gotModels[id] {
+			t.Errorf("explicitly unsupported catalog entry %s must be filtered", id)
+		}
+	}
+}
+
+func TestListModels_PreservesLegacyRequestAndResults(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"data":[
+			{"id":"text/model","architecture":{"output_modalities":["text"]}},
+			{"id":"audio/model","architecture":{"output_modalities":["audio"]}},
+			{"id":"legacy/model"}
+		]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewWithBaseURL(srv.URL).ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if query != "" {
+		t.Errorf("legacy ListModels added query %q; want the historical bare /models request", query)
+	}
+	if len(models) != 3 {
+		t.Fatalf("legacy ListModels filtered catalog entries: %+v", models)
+	}
+}
+
+func TestListModels_EmptyCatalogPreservesNilSlice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewWithBaseURL(srv.URL).ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if models != nil {
+		t.Fatalf("legacy empty catalog = %#v, want nil slice", models)
+	}
+}
 
 func TestNormalizeReasoningOnResponse_LiftsStringField(t *testing.T) {
 	// OpenRouter ships reasoning as message.reasoning (string) for OpenAI-shaped

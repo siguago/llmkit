@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -22,6 +23,26 @@ func TestNewProviderErrorFromResponse_CapturesRetryAfter(t *testing.T) {
 	}
 	if pe.RetryAfter != "30" {
 		t.Fatalf("retry-after not captured: %q", pe.RetryAfter)
+	}
+}
+
+func TestListModels_LeavesTaskTypesUnknownWithoutMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"could-be-chat-or-embedding"}]}`)
+	}))
+	defer srv.Close()
+
+	p := New(Config{ProviderName: "unknown", BaseURL: srv.URL})
+	models, err := p.ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("models = %+v, want one", models)
+	}
+	if _, ok := any(p).(provider.ModelTaskLister); ok {
+		t.Fatal("generic compat catalogs have no reliable metadata and must not claim ModelTaskLister")
 	}
 }
 

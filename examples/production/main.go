@@ -30,7 +30,7 @@ import (
 const (
 	serviceName  = "my-service"
 	providerName = llmkit.DeepSeek
-	model        = "deepseek-chat"
+	model        = "deepseek-v4-flash"
 )
 
 func main() {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -399,46 +400,136 @@ func TestModelNameHelpers(t *testing.T) {
 	}
 }
 
-// Embedding models advertise embedContent and never generateContent, so a
-// filter that only looks for generateContent hides every one of them. That was
-// the state when embeddings shipped: the capability said yes, and Models()
-// could not name a single model to use it with — while the vendor's own 404 for
-// a retired model tells you to call ListModels to find one.
-func TestDispatchableModel(t *testing.T) {
+func TestRemoteModelTaskTypes(t *testing.T) {
 	cases := []struct {
 		name    string
+		model   string
 		methods []string
-		want    bool
+		want    string
 	}{
-		{"chat model", []string{"generateContent", "countTokens"}, true},
-		{"embedding model", []string{"embedContent"}, true},
-		{"batch embedding model", []string{"batchEmbedContents", "embedContent"}, true},
-		{"legacy text model", []string{"generateText"}, false},
-		{"tuning-only", []string{"createTunedModel"}, false},
-		{"nothing", nil, false},
+		{"chat", "gemini-2.5-flash", []string{"generateContent", "countTokens"}, provider.RemoteModelTaskChat},
+		{"current Gemini 3 chat", "gemini-3.1-pro-preview", []string{"generateContent"}, provider.RemoteModelTaskChat},
+		{"latest Gemini chat", "gemini-3.6-flash", []string{"generateContent"}, provider.RemoteModelTaskChat},
+		{"rolling Gemini alias", "gemini-flash-latest", []string{"generateContent"}, provider.RemoteModelTaskChat},
+		{"gemma chat", "gemma-3-27b-it", []string{"generateContent"}, provider.RemoteModelTaskChat},
+		{"current Gemma 4 chat", "gemma-4-26b-a4b-it", []string{"generateContent"}, provider.RemoteModelTaskChat},
+		{"embedding methods deduplicated", "gemini-embedding-001", []string{"embedContent", "batchEmbedContents"}, provider.RemoteModelTaskEmbedding},
+		{"unknown family is not guessed chat", "mixed", []string{"embedContent", "generateContent"}, provider.RemoteModelTaskEmbedding},
+		{"image is media not chat", "gemini-2.5-flash-image", []string{"generateContent"}, provider.RemoteModelTaskImageGenerate + "," + provider.RemoteModelTaskImageEdit},
+		{"Gemini 3 image family", "gemini-3-pro-image", []string{"generateContent"}, provider.RemoteModelTaskImageGenerate + "," + provider.RemoteModelTaskImageEdit},
+		{"Gemini 3.1 image family", "gemini-3.1-flash-image", []string{"generateContent"}, provider.RemoteModelTaskImageGenerate + "," + provider.RemoteModelTaskImageEdit},
+		{"marketing alias is not an API contract", "nano-banana-pro-preview", []string{"generateContent"}, ""},
+		{"unknown image-named family is not guessed", "future-image-analyzer", []string{"generateContent"}, ""},
+		{"future Gemini generation is not guessed chat", "gemini-4-pro-preview", []string{"generateContent"}, ""},
+		{"future Gemini image generation is not guessed", "gemini-4-pro-image-preview", []string{"generateContent"}, ""},
+		{"future Gemma generation is not guessed chat", "gemma-5-27b-it", []string{"generateContent"}, ""},
+		{"LearnLM family is not guessed chat", "learnlm-future", []string{"generateContent"}, ""},
+		{"shut down Gemini 2.0 is not classified", "gemini-2.0-flash", []string{"generateContent"}, ""},
+		{"shut down image preview is not classified", "gemini-3-pro-image-preview", []string{"generateContent"}, ""},
+		{"image name still method gated", "gemini-image-preview", []string{"countTokens"}, ""},
+		{"Veo long-running", "veo-3.1-generate-preview", []string{"predictLongRunning"}, provider.RemoteModelTaskVideoGenerate},
+		{"unknown long-running is not guessed video", "future-renderer", []string{"predictLongRunning"}, ""},
+		{"future Veo generation is not guessed video", "veo-4-generate-preview", []string{"predictLongRunning"}, ""},
+		{"TTS is not chat", "gemini-2.5-flash-preview-tts", []string{"generateContent"}, ""},
+		{"native audio is not chat", "gemini-2.5-flash-native-audio-preview", []string{"generateContent"}, ""},
+		{"Live is not chat", "gemini-live-2.5-flash-preview", []string{"generateContent"}, ""},
+		{"Lyria is not chat", "lyria-realtime-exp", []string{"generateContent"}, ""},
+		{"generic realtime is not chat", "gemini-realtime-preview", []string{"generateContent"}, ""},
+		{"Omni is not chat", "gemini-2.5-flash-omni-preview", []string{"generateContent"}, ""},
+		{"Imagen needs an unimplemented endpoint", "imagen-4.0-generate-001", []string{"generateContent", "predictLongRunning"}, ""},
+		{"unsupported", "legacy", []string{"generateText"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := dispatchableModel(tc.methods); got != tc.want {
-				t.Errorf("dispatchableModel(%v) = %v, want %v", tc.methods, got, tc.want)
+			if got := strings.Join(remoteModelTaskTypes(tc.model, tc.methods), ","); got != tc.want {
+				t.Errorf("remoteModelTaskTypes(%q, %v) = %q, want %q", tc.model, tc.methods, got, tc.want)
 			}
 		})
 	}
 }
 
-// ListModels must surface embedding models, or the embeddings capability has
-// no discoverable model to point at.
-func TestListModels_IncludesEmbeddingModels(t *testing.T) {
+// ListModelsWithTaskTypes surfaces the mixed catalog while refusing to label
+// generateContent-only audio/music/image models as chat.
+func TestListModelsWithTaskTypes_ClassifiesRealCatalogFamilies(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/list_models_mixed.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"models":[
-			{"name":"models/gemini-2.5-flash","displayName":"Flash","inputTokenLimit":1000000,
-			 "supportedGenerationMethods":["generateContent"]},
-			{"name":"models/some-embedding","displayName":"Embed","inputTokenLimit":2048,
-			 "supportedGenerationMethods":["embedContent","batchEmbedContents"]},
-			{"name":"models/legacy-text","displayName":"Legacy",
-			 "supportedGenerationMethods":["generateText"]}
-		]}`)
+		_, _ = w.Write(fixture)
+	}))
+	defer srv.Close()
+
+	models, taskTypes, err := NewWithBaseURL(srv.URL).ListModelsWithTaskTypes(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+
+	got := make(map[string]provider.RemoteModel, len(models))
+	for _, m := range models {
+		got[m.ModelID] = m
+	}
+	if _, ok := got["gemini-embedding-001"]; !ok {
+		t.Error("an embedding model must be listed — otherwise SupportsEmbeddings is true with no model to use")
+	}
+	if _, ok := got["gemini-2.5-flash"]; !ok {
+		t.Error("chat models must still be listed")
+	}
+	if _, ok := got["gemini-2.5-flash-image"]; !ok {
+		t.Error("Gemini image models must remain discoverable")
+	}
+	if _, ok := got["veo-3.1-generate-preview"]; !ok {
+		t.Error("Veo predictLongRunning models must remain discoverable")
+	}
+	if _, ok := got["future-multimodal-001"]; !ok {
+		t.Error("a future generateContent family should remain visible as unknown")
+	}
+	for _, id := range []string{
+		"legacy-text",
+		"gemini-2.5-flash-preview-tts",
+		"gemini-live-2.5-flash-preview",
+		"gemini-2.5-flash-native-audio-preview-12-2025",
+		"lyria-realtime-exp",
+		"gemini-2.5-flash-omni-preview",
+		"imagen-4.0-generate-001",
+	} {
+		if _, ok := got[id]; ok {
+			t.Errorf("unsupported catalog family %q should stay filtered out", id)
+		}
+	}
+	if tasks := strings.Join(taskTypes["gemini-embedding-001"], ","); tasks != provider.RemoteModelTaskEmbedding {
+		t.Errorf("embedding task types = %q, want %q", tasks, provider.RemoteModelTaskEmbedding)
+	}
+	if tasks := strings.Join(taskTypes["gemini-2.5-flash"], ","); tasks != provider.RemoteModelTaskChat {
+		t.Errorf("chat task types = %q, want %q", tasks, provider.RemoteModelTaskChat)
+	}
+	wantImage := provider.RemoteModelTaskImageGenerate + "," + provider.RemoteModelTaskImageEdit
+	if tasks := strings.Join(taskTypes["gemini-2.5-flash-image"], ","); tasks != wantImage {
+		t.Errorf("image task types = %q, want %q", tasks, wantImage)
+	}
+	if tasks := strings.Join(taskTypes["veo-3.1-generate-preview"], ","); tasks != provider.RemoteModelTaskVideoGenerate {
+		t.Errorf("video task types = %q, want %q", tasks, provider.RemoteModelTaskVideoGenerate)
+	}
+	if _, ok := taskTypes["future-multimodal-001"]; ok {
+		t.Error("a future family with ambiguous output must have no task-map entry")
+	}
+	// The "models/" prefix is stripped so the ID can be handed straight back in.
+	for _, m := range models {
+		if strings.HasPrefix(m.ModelID, "models/") {
+			t.Errorf("ModelID %q still carries the resource prefix", m.ModelID)
+		}
+	}
+}
+
+func TestListModels_PreservesLegacyMethodFilter(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/list_models_mixed.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fixture)
 	}))
 	defer srv.Close()
 
@@ -446,25 +537,83 @@ func TestListModels_IncludesEmbeddingModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-
 	got := make(map[string]bool, len(models))
-	for _, m := range models {
-		got[m.ModelID] = true
+	for _, model := range models {
+		got[model.ModelID] = true
 	}
-	if !got["some-embedding"] {
-		t.Error("an embedding model must be listed — otherwise SupportsEmbeddings is true with no model to use")
-	}
-	if !got["gemini-2.5-flash"] {
-		t.Error("chat models must still be listed")
-	}
-	if got["legacy-text"] {
-		t.Error("a model this SDK has no route for should stay filtered out")
-	}
-	// The "models/" prefix is stripped so the ID can be handed straight back in.
-	for _, m := range models {
-		if strings.HasPrefix(m.ModelID, "models/") {
-			t.Errorf("ModelID %q still carries the resource prefix", m.ModelID)
+	// Legacy ListModels only inspected methods. These media models therefore
+	// remain present even though the rich method safely filters/classifies them.
+	for _, id := range []string{
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-image",
+		"gemini-embedding-001",
+		"gemini-2.5-flash-preview-tts",
+		"gemini-live-2.5-flash-preview",
+		"lyria-realtime-exp",
+		"future-multimodal-001",
+	} {
+		if !got[id] {
+			t.Errorf("legacy dispatchable model %q was filtered out", id)
 		}
+	}
+	for _, id := range []string{"veo-3.1-generate-preview", "imagen-4.0-generate-001", "legacy-text"} {
+		if got[id] {
+			t.Errorf("legacy ListModels unexpectedly added %q", id)
+		}
+	}
+}
+
+func TestListModels_EmptyCatalogPreservesNilSlice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewWithBaseURL(srv.URL).ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if models != nil {
+		t.Fatalf("legacy empty catalog = %#v, want nil slice", models)
+	}
+}
+
+func TestListModelsWithTaskTypes_PaginatesOpaqueTokenWithoutDuplicateRequests(t *testing.T) {
+	const opaqueToken = "page+2/="
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			if got := r.URL.Query().Get("pageToken"); got != "" {
+				t.Errorf("first page token = %q, want empty", got)
+			}
+			_, _ = io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"`+opaqueToken+`"}`)
+		case 2:
+			if got := r.URL.Query().Get("pageToken"); got != opaqueToken {
+				t.Errorf("second page token = %q, want %q", got, opaqueToken)
+			}
+			_, _ = io.WriteString(w, `{"models":[{"name":"models/veo-3.1-generate-preview","supportedGenerationMethods":["predictLongRunning"]}]}`)
+		default:
+			t.Errorf("unexpected duplicate catalog request %d", calls)
+			_, _ = io.WriteString(w, `{"models":[]}`)
+		}
+	}))
+	defer srv.Close()
+
+	models, taskTypes, err := NewWithBaseURL(srv.URL).ListModelsWithTaskTypes(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModelsWithTaskTypes: %v", err)
+	}
+	if calls != 2 || len(models) != 2 {
+		t.Fatalf("calls = %d, models = %+v; want two pages and two models", calls, models)
+	}
+	if got := strings.Join(taskTypes["gemini-2.5-flash"], ","); got != provider.RemoteModelTaskChat {
+		t.Errorf("first-page task types = %q", got)
+	}
+	if got := strings.Join(taskTypes["veo-3.1-generate-preview"], ","); got != provider.RemoteModelTaskVideoGenerate {
+		t.Errorf("second-page task types = %q", got)
 	}
 }
 

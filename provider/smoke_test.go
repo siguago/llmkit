@@ -65,6 +65,24 @@ func TestExtractReasoningTokens(t *testing.T) {
 	}
 }
 
+func TestRemoteModelRemainsComparableAndThreeFields(t *testing.T) {
+	// RemoteModel is a long-standing public value type. Keep both positional
+	// literals and map-key use compiling; task metadata belongs in the separate
+	// ModelTaskLister result rather than changing this struct's shape.
+	model := RemoteModel{"legacy", "Legacy", 8192}
+	set := map[RemoteModel]struct{}{model: {}}
+	if _, ok := set[RemoteModel{"legacy", "Legacy", 8192}]; !ok {
+		t.Fatal("RemoteModel comparison changed")
+	}
+	encoded, err := json.Marshal(model)
+	if err != nil {
+		t.Fatalf("marshal RemoteModel: %v", err)
+	}
+	if got, want := string(encoded), `{"model_id":"legacy","display_name":"Legacy","context_window":8192}`; got != want {
+		t.Fatalf("RemoteModel JSON = %s, want %s", got, want)
+	}
+}
+
 func TestMessageToMap_DoesNotLeakPrefillField(t *testing.T) {
 	// Prefill field name is provider-specific (DeepSeek "prefix" / Kimi
 	// "partial"), so MessageToMap MUST NOT emit either field — that's the

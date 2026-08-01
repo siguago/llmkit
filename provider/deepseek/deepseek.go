@@ -132,24 +132,35 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 }
 
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
+	models, _, err := p.listModelsWithTaskTypes(ctx, apiKey)
+	return models, err
+}
+
+// ListModelsWithTaskTypes returns the DeepSeek model catalog with its
+// per-model chat classification kept separate from RemoteModel.
+func (p *Provider) ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
+	return p.listModelsWithTaskTypes(ctx, apiKey)
+}
+
+func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	provider.SetBearer(httpReq.Header, apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, name, respBody)
+		return nil, nil, provider.NewProviderErrorFromResponse(resp, name, respBody)
 	}
 
 	var result struct {
@@ -158,18 +169,37 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	models := make([]provider.RemoteModel, 0, len(result.Data))
+	taskTypes := make(map[string][]string, len(result.Data))
 	for _, m := range result.Data {
 		models = append(models, provider.RemoteModel{
 			ModelID:     m.ID,
 			DisplayName: m.ID,
 		})
+		if tasks := deepSeekModelTaskTypes(m.ID); len(tasks) > 0 {
+			taskTypes[m.ID] = tasks
+		}
 	}
-	return models, nil
+	return models, taskTypes, nil
 }
+
+// deepSeekModelTaskTypes is intentionally an allowlist because /v1/models
+// exposes only IDs, not capability metadata. Only the current documented V4
+// IDs are classified. Retired aliases and future IDs remain visible in the
+// catalog but unknown until DeepSeek documents current endpoint semantics.
+func deepSeekModelTaskTypes(modelID string) []string {
+	switch modelID {
+	case "deepseek-v4-flash", "deepseek-v4-pro":
+		return []string{provider.RemoteModelTaskChat}
+	default:
+		return nil
+	}
+}
+
+var _ provider.ModelTaskLister = (*Provider)(nil)
 
 type streamReader struct {
 	inner          *compat.StreamReader

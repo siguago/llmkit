@@ -224,7 +224,7 @@ func ChunkReasoning(chunk *Chunk) string {
 
 // Say is the one-liner: send a single user message, get the reply text back.
 //
-//	answer, err := client.Say(ctx, "deepseek-chat", "What is a monad?")
+//	answer, err := client.Say(ctx, "deepseek-v4-flash", "What is a monad?")
 func (c *Client) Say(ctx context.Context, model, prompt string) (string, error) {
 	resp, err := c.Chat(ctx, &ChatRequest{
 		Model:    model,
