@@ -12,6 +12,8 @@
 
 这是纯 additive API 变更：`RemoteModel` 仍是原来的三个字段，JSON 形状、可比较性、map key 用法和不带字段名的 composite literal 均不受影响；旧 `ListModels` / `Client.Models` 的历史过滤结果、顺序以及空目录的 nil/非 nil 语义保持不变。Gemini 的 Veo、Vercel 的扩展图片目录和 OpenRouter 的 `output_modalities=all` 只由新 `ListModelsWithTaskTypes` / `Client.ModelsWithTaskTypes` 暴露，避免升级后悄悄改变既有调用方看到的目录。唯一的旧请求编码修复是 Gemini 分页：不透明 `pageToken` 现在通过 query encoder 转义，带 `+`、`/`、`=` 的合法 token 不再被破坏。
 
+`llmkit-probe` 新增「模型任务」探测，用真实目录跑一次分类并列出**未分类的模型**。分类靠的是硬编码白名单（Gemini、DeepSeek）或上游元数据字段（Vercel、OpenRouter），两者过时都不会报错、不会让离线测试变红 —— 厂商发新模型时，它只是安静地变成未知。未分类清单就是白名单该更新的信号；整个目录都未分类则判定为失败。
+
 DeepSeek 的运行示例、probe 和 integration 默认模型同步更新为当前 `deepseek-v4-flash`（推理示例使用 `deepseek-v4-pro`）。官方已于 2026-07-24 停用 `deepseek-chat` / `deepseek-reasoner`；旧 ID 只留在专门验证历史请求协议的离线测试中，远程目录即使返回它们也不会自动分类。
 
 ## v0.3.1 — 2026-08-01
