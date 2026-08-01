@@ -604,6 +604,7 @@ DEEPSEEK_API_KEY=sk-... go run ./cmd/llmkit-probe deepseek
 llmkit probe · deepseek · deepseek-v4-flash
 ──────────────────────────────────────────────────────────────────────────────
   PASS  模型列表              2 个模型                                    412ms
+  PASS  模型任务             2/2 已分类 · 0 未知                          301ms
   PASS  非流式对话           38 字 · 96 tokens                             1.2s
   PASS  流式对话             47 chunks · 首字 340ms                        2.1s
   PASS  多轮上下文           正确记住 42                                   1.8s
