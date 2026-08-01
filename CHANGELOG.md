@@ -2,7 +2,22 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## 未发布
+## v0.4.0 — 2026-08-01
+
+一项新能力：逐模型任务发现，让混合目录里的对话 / 向量 / 图片 / 视频模型第一次能被区分开。**没有破坏性变更，`RemoteModel` 一个字节都没动 —— 升级不需要改任何代码。**
+
+### 从 v0.3.1 升级
+
+**没有必须做的迁移。** 下表第一行不是本次升级造成的，但它会实实在在地咬人，所以放在这里。
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| 硬编码 `deepseek-chat` / `deepseek-reasoner` | **和升级无关地失败** —— DeepSeek 官方已于 2026-07-24 停用这两个 ID，留在 v0.3.1 也一样调不通 | 换成 `deepseek-v4-flash` / `deepseek-v4-pro` |
+| 遍历 `Models()` / `ListModels()` | 不受影响 —— 上游请求、过滤结果、顺序、空目录的 nil 语义都没变 | — |
+| 用 `RemoteModel` 当 map key、比较、或不带字段名构造 | 不受影响 —— 仍是原来的三个字段 | — |
+| 想按任务筛选模型 | 可选采用新增的 `ModelsWithTaskTypes()` | 缺 map key 表示**未知**，不能当成 chat |
+
+Gemini、Vercel、OpenRouter 的混合媒体目录扩展**只发生在新方法里**：`Models()` 看到的东西和 v0.3.1 完全一致，升级不会让既有调用方突然多出一批不能用的模型。
 
 ### 新增
 
@@ -15,6 +30,14 @@
 `llmkit-probe` 新增「模型任务」探测，用真实目录跑一次分类并列出**未分类的模型**。分类靠的是硬编码白名单（Gemini、DeepSeek）或上游元数据字段（Vercel、OpenRouter），两者过时都不会报错、不会让离线测试变红 —— 厂商发新模型时，它只是安静地变成未知。未分类清单就是白名单该更新的信号；整个目录都未分类则判定为失败。
 
 DeepSeek 的运行示例、probe 和 integration 默认模型同步更新为当前 `deepseek-v4-flash`（推理示例使用 `deepseek-v4-pro`）。官方已于 2026-07-24 停用 `deepseek-chat` / `deepseek-reasoner`；旧 ID 只留在专门验证历史请求协议的离线测试中，远程目录即使返回它们也不会自动分类。
+
+### 已知问题
+
+- **Gemini 和 DeepSeek 的分类白名单会随厂商发新模型而过时。** 硬编码模型 ID 是这两家目录唯一可靠的判据（都没有逐模型能力字段），代价是新模型上线后会先显示为「未知」。**失效方向是安全的** —— 过时导致漏分类，不会导致误分类成 chat 然后在 `ChatCompletion` 里丢掉媒体输出。`llmkit-probe` 的「模型任务」探测就是用来发现这种漂移的：它列出未分类模型，整个目录都未分类则判失败。
+- **OpenRouter 的纯 `image` 输出型号不声明图片生成。** 本 adapter 的 `GenerateImage` 走 chat/completions + `modalities`，只有 `text+image` 型号能这么用；纯 image 型号需要 OpenRouter 专用的 `/images` 路由，尚未实现。这些型号在目录里可见但保持未分类 —— 不承诺一条会调错端点的路由。
+- **`ModelsWithTaskTypes` 在多数 provider 上返回 `nil` task map。** 通用 OpenAI 兼容的 `/v1/models` 只给 ID，没有能力字段，所以 compat 层继续只实现旧 `ModelLister`。目前有逐模型分类的是 anthropic、deepseek、gemini、openrouter、vercel 五家；其余照常返回模型列表，只是 map 为空。用 `SupportsModelTaskTypes()` 可以先探测。
+
+---
 
 ## v0.3.1 — 2026-08-01
 
