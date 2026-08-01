@@ -3,6 +3,8 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -190,6 +192,31 @@ func TestListModels_FiltersDeprecatedPastNow(t *testing.T) {
 				t.Fatalf("%s: included=%v want %v", c.ID, included, c.WantIncluded)
 			}
 		})
+	}
+}
+
+func TestListModels_ClassifiesOnlyClaudeFamilyAsChat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"claude-test","display_name":"Claude Test"},
+			{"id":"future-media-model","display_name":"Future Media"}
+		],"has_more":false}`))
+	}))
+	defer srv.Close()
+
+	models, taskTypes, err := NewWithBaseURL(srv.URL).ListModelsWithTaskTypes(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v, want both catalog entries", models)
+	}
+	if got := strings.Join(taskTypes["claude-test"], ","); got != provider.RemoteModelTaskChat {
+		t.Fatalf("task_types = %q, want %q", got, provider.RemoteModelTaskChat)
+	}
+	if _, ok := taskTypes["future-media-model"]; ok {
+		t.Fatal("an unknown Anthropic model family must remain unclassified")
 	}
 }
 

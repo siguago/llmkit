@@ -24,7 +24,7 @@ func main() {
 
 	// Style 1: callback. The stream is drained and closed for you.
 	fmt.Println("--- StreamText ---")
-	_, usage, err := client.StreamText(ctx, "deepseek-chat", "数到五，每个数字一行。",
+	_, usage, err := client.StreamText(ctx, "deepseek-v4-flash", "数到五，每个数字一行。",
 		func(delta string) { fmt.Print(delta) })
 	if err != nil {
 		log.Fatal(err)
@@ -37,7 +37,7 @@ func main() {
 	// call deltas, or finish reasons.
 	fmt.Println("\n--- raw chunks ---")
 	stream, err := client.ChatStream(ctx, &llmkit.ChatRequest{
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		Messages: []llmkit.Message{llmkit.User("13 和 17 哪个更接近 15？只回答数字。")},
 		// Ask upstream to report usage on the final chunk.
 		StreamOptions: &llmkit.StreamOptions{IncludeUsage: true},

@@ -2,6 +2,18 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## 未发布
+
+### 新增
+
+**新增可选的逐模型任务发现接口，且保持 `provider.RemoteModel` 完全不变。** `provider.ModelTaskLister` 在原 `ModelLister` 上增加 `ListModelsWithTaskTypes`，以独立的 `map[model_id][]task_type` 返回可靠分类；未知模型不写入 map，不能被默认为 chat。根包同步导出 `ModelTaskLister`、`Client.ModelsWithTaskTypes` 与 `Client.SupportsModelTaskTypes`。旧 adapter 自动回退为普通模型列表加 nil map。
+
+任务名与网关 binding 对齐：`chat`、`embedding`、`image.generate`、`image.edit`、`video.generate`，并在根包与 `provider` 包通过 `RemoteModelTask*` 常量公开。Anthropic、DeepSeek、Gemini、Vercel、OpenRouter 实现任务发现：Anthropic 的 `/v1/models` 至今只出对话模型，因此按 `claude-` 前缀标成 chat，非 `claude-` 前缀的条目保持未知；DeepSeek 的目录同样没有能力字段，但混着退役别名和非对话型号，只能走白名单，只对当前 V4 Chat 模型分类，退役别名和未来 ID 保持未知。Gemini 只分类已经核验过请求/响应契约的文本、embedding、generateContent 图片和 Veo 型号，明确排除已停用型号与 TTS / Live / native-audio / Lyria / Imagen，并让未来代际保持未知；Vercel 按目录 `type` 区分 language / embedding / image；OpenRouter 使用 `architecture.output_modalities`，过滤 embeddings / rerank / speech / transcription / audio 等未实现端点，并只给能走现有 chat/completions 路由的 text+image 型号声明图片生成，纯 image 型号在专用 `/images` 路由实现前保持未知。通用 compat 目录缺少可靠类型元数据，继续只实现旧 `ModelLister`。
+
+这是纯 additive API 变更：`RemoteModel` 仍是原来的三个字段，JSON 形状、可比较性、map key 用法和不带字段名的 composite literal 均不受影响；旧 `ListModels` / `Client.Models` 的历史过滤结果、顺序以及空目录的 nil/非 nil 语义保持不变。Gemini 的 Veo、Vercel 的扩展图片目录和 OpenRouter 的 `output_modalities=all` 只由新 `ListModelsWithTaskTypes` / `Client.ModelsWithTaskTypes` 暴露，避免升级后悄悄改变既有调用方看到的目录。唯一的旧请求编码修复是 Gemini 分页：不透明 `pageToken` 现在通过 query encoder 转义，带 `+`、`/`、`=` 的合法 token 不再被破坏。
+
+DeepSeek 的运行示例、probe 和 integration 默认模型同步更新为当前 `deepseek-v4-flash`（推理示例使用 `deepseek-v4-pro`）。官方已于 2026-07-24 停用 `deepseek-chat` / `deepseek-reasoner`；旧 ID 只留在专门验证历史请求协议的离线测试中，远程目录即使返回它们也不会自动分类。
+
 ## v0.3.1 — 2026-08-01
 
 一个性能修复。**没有破坏性变更，也没有 API 变化 —— 升级不需要改任何代码。**

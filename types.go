@@ -100,11 +100,24 @@ type (
 
 	// RemoteModel is one entry from a provider's model catalog.
 	RemoteModel = provider.RemoteModel
+	// ModelTaskLister is the optional provider capability for returning a model
+	// catalog together with per-model task classifications.
+	ModelTaskLister = provider.ModelTaskLister
 	// APIError is an error returned by an upstream vendor API.
 	APIError = provider.ProviderError
 	// ErrorCategory is a provider-independent classification for vendors whose
 	// API reports failures inside an HTTP 200 response body.
 	ErrorCategory = provider.ErrorCategory
+)
+
+// Remote-model task names returned by ModelTaskLister. Callers should ignore
+// names they do not recognize so future operations remain additive.
+const (
+	RemoteModelTaskChat          = provider.RemoteModelTaskChat
+	RemoteModelTaskEmbedding     = provider.RemoteModelTaskEmbedding
+	RemoteModelTaskImageGenerate = provider.RemoteModelTaskImageGenerate
+	RemoteModelTaskImageEdit     = provider.RemoteModelTaskImageEdit
+	RemoteModelTaskVideoGenerate = provider.RemoteModelTaskVideoGenerate
 )
 
 // Provider-independent API error categories. Most adapters rely on HTTP status;

@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/siguago/llmkit/provider"
 )
 
 // Users configure either a host root or a full /v1 URL; both must end up at the
@@ -54,8 +57,8 @@ func TestName(t *testing.T) {
 }
 
 // ListModels exists to surface Vercel's richer metadata and to hide models the
-// gateway cannot actually dispatch to.
-func TestListModels_MapsAndFilters(t *testing.T) {
+// SDK cannot actually dispatch to.
+func TestListModelsWithTaskTypes_MapsAndFilters(t *testing.T) {
 	var gotPath, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -74,7 +77,7 @@ func TestListModels_MapsAndFilters(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	models, err := New(srv.URL).ListModels(context.Background(), "vk-test")
+	models, taskTypes, err := New(srv.URL).ListModelsWithTaskTypes(context.Background(), "vk-test")
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
@@ -91,14 +94,14 @@ func TestListModels_MapsAndFilters(t *testing.T) {
 		got[m.ModelID] = m.DisplayName
 	}
 
-	for _, id := range []string{"openai/gpt-5", "openai/text-embedding-3", "legacy/no-type", "openai/gpt-image-2", "unnamed/model"} {
+	for _, id := range []string{"openai/gpt-5", "openai/text-embedding-3", "legacy/no-type", "openai/gpt-image-2", "bfl/flux", "unnamed/model"} {
 		if _, ok := got[id]; !ok {
 			t.Errorf("dispatchable model %q was filtered out", id)
 		}
 	}
-	// Per-image-billed images, video and reranking have no dispatch path; if
-	// they were imported they would become chat bindings with no token price.
-	for _, id := range []string{"bfl/flux", "some/video", "some/rerank"} {
+	// Video and reranking have no adapter endpoint and remain filtered. Image
+	// billing shape does not change whether /images/generations can dispatch it.
+	for _, id := range []string{"some/video", "some/rerank"} {
 		if _, ok := got[id]; ok {
 			t.Errorf("model %q has no dispatch path and should be filtered out", id)
 		}
@@ -111,10 +114,60 @@ func TestListModels_MapsAndFilters(t *testing.T) {
 	if got["unnamed/model"] != "unnamed/model" {
 		t.Errorf("missing name should fall back to the ID, got %q", got["unnamed/model"])
 	}
+	for _, id := range []string{"openai/gpt-5", "unnamed/model"} {
+		if tasks := strings.Join(taskTypes[id], ","); tasks != provider.RemoteModelTaskChat {
+			t.Errorf("%s task types = %q, want %q", id, tasks, provider.RemoteModelTaskChat)
+		}
+	}
+	if tasks := strings.Join(taskTypes["openai/text-embedding-3"], ","); tasks != provider.RemoteModelTaskEmbedding {
+		t.Errorf("embedding task types = %q, want %q", tasks, provider.RemoteModelTaskEmbedding)
+	}
+	for _, id := range []string{"openai/gpt-image-2", "bfl/flux"} {
+		if tasks := strings.Join(taskTypes[id], ","); tasks != provider.RemoteModelTaskImageGenerate {
+			t.Errorf("%s task types = %q, want %q", id, tasks, provider.RemoteModelTaskImageGenerate)
+		}
+	}
+	if _, ok := taskTypes["legacy/no-type"]; ok {
+		t.Error("an untyped entry is unknown and must not be silently classified as chat")
+	}
 
 	for _, m := range models {
 		if m.ModelID == "openai/gpt-5" && m.ContextWindow != 400000 {
 			t.Errorf("context_window lost: %d", m.ContextWindow)
+		}
+	}
+}
+
+func TestListModels_PreservesLegacyPricingFilter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"language","type":"language"},
+			{"id":"embedding","type":"embedding"},
+			{"id":"legacy"},
+			{"id":"token-image","type":"image","pricing":{"input":"0.1"}},
+			{"id":"per-image","type":"image","pricing":{"image":"0.04"}},
+			{"id":"unpriced-image","type":"image"},
+			{"id":"video","type":"video"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	models, err := New(srv.URL).ListModels(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	got := make(map[string]bool, len(models))
+	for _, model := range models {
+		got[model.ModelID] = true
+	}
+	for _, id := range []string{"language", "embedding", "legacy", "token-image"} {
+		if !got[id] {
+			t.Errorf("legacy ListModels filtered %q", id)
+		}
+	}
+	for _, id := range []string{"per-image", "unpriced-image", "video"} {
+		if got[id] {
+			t.Errorf("legacy ListModels unexpectedly added %q", id)
 		}
 	}
 }
@@ -215,31 +268,16 @@ func TestVercelModelImportable(t *testing.T) {
 	}{
 		{"language", vercelModelEntry{Type: "language"}, true},
 		{"embedding", vercelModelEntry{Type: "embedding"}, true},
-		{"missing type treated as language", vercelModelEntry{Type: ""}, true},
+		{"missing type remains listable", vercelModelEntry{Type: ""}, true},
+		{"unpriced image stays hidden", vercelModelEntry{Type: "image"}, false},
+		{"token-billed image", vercelModelEntry{Type: "image", Pricing: &vercelPricing{Input: "0.1"}}, true},
+		{"output-token-billed image", vercelModelEntry{Type: "image", Pricing: &vercelPricing{Output: "0.1"}}, true},
+		{"per-image-billed image", vercelModelEntry{Type: "image", Pricing: &vercelPricing{Input: "0.1", Image: "0.04"}}, false},
+		{"empty pricing", vercelModelEntry{Type: "image", Pricing: &vercelPricing{}}, false},
+		{"case and whitespace preserve historical exact filter", vercelModelEntry{Type: " IMAGE "}, false},
 		{"video", vercelModelEntry{Type: "video"}, false},
 		{"reranking", vercelModelEntry{Type: "reranking"}, false},
 		{"unknown type", vercelModelEntry{Type: "speech"}, false},
-
-		// Image models split on how they are billed, because only the
-		// token-billed ones have a working chat/completions dispatch.
-		{"image with no pricing", vercelModelEntry{Type: "image"}, false},
-		{"image billed per image", vercelModelEntry{
-			Type: "image", Pricing: &vercelPricing{Image: "0.04"},
-		}, false},
-		{"image billed per token", vercelModelEntry{
-			Type: "image", Pricing: &vercelPricing{Input: "0.01", Output: "0.02"},
-		}, true},
-		{"image with output price only", vercelModelEntry{
-			Type: "image", Pricing: &vercelPricing{Output: "0.02"},
-		}, true},
-		// Both set: per-image billing wins, since importing it as a chat
-		// binding would price the image at zero.
-		{"image billed both ways", vercelModelEntry{
-			Type: "image", Pricing: &vercelPricing{Input: "0.01", Image: "0.04"},
-		}, false},
-		{"image with empty pricing block", vercelModelEntry{
-			Type: "image", Pricing: &vercelPricing{},
-		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,5 +285,43 @@ func TestVercelModelImportable(t *testing.T) {
 				t.Errorf("vercelModelImportable(%+v) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestVercelRichModelImportable(t *testing.T) {
+	for _, tc := range []struct {
+		typeName string
+		want     bool
+	}{
+		{"", true},
+		{"language", true},
+		{"embedding", true},
+		{"image", true},
+		{" IMAGE ", true},
+		{"video", false},
+		{"reranking", false},
+		{"speech", false},
+	} {
+		if got := vercelRichModelImportable(vercelModelEntry{Type: tc.typeName}); got != tc.want {
+			t.Errorf("type %q rich importable = %v, want %v", tc.typeName, got, tc.want)
+		}
+	}
+}
+
+func TestVercelModelTaskTypes(t *testing.T) {
+	cases := []struct {
+		typeName string
+		want     string
+	}{
+		{"language", provider.RemoteModelTaskChat},
+		{"embedding", provider.RemoteModelTaskEmbedding},
+		{"image", provider.RemoteModelTaskImageGenerate},
+		{"", ""},
+		{"video", ""},
+	}
+	for _, tc := range cases {
+		if got := strings.Join(vercelModelTaskTypes(vercelModelEntry{Type: tc.typeName}), ","); got != tc.want {
+			t.Errorf("type %q tasks = %q, want %q", tc.typeName, got, tc.want)
+		}
 	}
 }

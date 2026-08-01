@@ -21,7 +21,7 @@ func main() {
 	ctx := context.Background()
 
 	// One-liner form.
-	answer, err := client.Say(ctx, "deepseek-chat", "用一句话解释 CAP 定理。")
+	answer, err := client.Say(ctx, "deepseek-v4-flash", "用一句话解释 CAP 定理。")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func main() {
 	temp := 0.3
 	maxTokens := 512
 	resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-		Model: "deepseek-chat",
+		Model: "deepseek-v4-flash",
 		Messages: []llmkit.Message{
 			llmkit.System("你是一个简洁的技术助手，回答不超过三句话。"),
 			llmkit.User("Go 的 channel 和 mutex 该怎么选？"),

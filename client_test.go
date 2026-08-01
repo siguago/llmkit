@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/siguago/llmkit/provider"
 )
 
 const chatOK = `{
@@ -343,7 +345,8 @@ func TestStreamChat_InvokesCallbackPerDelta(t *testing.T) {
 
 type caps struct {
 	chat                  bool
-	models, embeddings    bool
+	models, modelTasks    bool
+	embeddings            bool
 	rerank                bool
 	imageGen, imageEdit   bool
 	videoGen, videoCancel bool
@@ -359,7 +362,7 @@ type caps struct {
 // would have to round one way or the other, and either way it lies to callers.
 func TestCapabilityMatrix(t *testing.T) {
 	want := map[string]caps{
-		Anthropic: {chat: true, models: true},
+		Anthropic: {chat: true, models: true, modelTasks: true},
 		// No embeddings route this SDK can reach, so these adapters withhold the
 		// capability (compat.NoEmbeddings) rather than answer 404 to a caller who
 		// asked first. Each is a different flavor of "not there", all verified
@@ -378,15 +381,15 @@ func TestCapabilityMatrix(t *testing.T) {
 		Moonshot:   {chat: true, models: true},
 		Volcengine: {chat: true, models: true, videoGen: true, videoCancel: true},
 		DashScope:  {chat: true, models: true, embeddings: true, videoGen: true},
-		DeepSeek:   {chat: true, models: true},
+		DeepSeek:   {chat: true, models: true, modelTasks: true},
 		Fireworks:  {chat: true, models: true, embeddings: true},
 		EasyRouter: {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true},
-		Gemini:     {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true}, // hand-written, not compat's
-		MiniMax:    {chat: true, models: true, embeddings: true},                                                  // hand-written, not compat's
+		Gemini:     {chat: true, models: true, modelTasks: true, embeddings: true, imageGen: true, imageEdit: true, videoGen: true}, // hand-written, not compat's
+		MiniMax:    {chat: true, models: true, embeddings: true},                                                                    // hand-written, not compat's
 		Mistral:    {chat: true, models: true, embeddings: true},
 		Ollama:     {chat: true, models: true, embeddings: true},
 		OpenAI:     {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
-		OpenRouter: {chat: true, models: true, imageGen: true, videoGen: true},
+		OpenRouter: {chat: true, models: true, modelTasks: true, imageGen: true, videoGen: true},
 		// The only bundled adapter with a rerank route. Rerank is not part of the
 		// OpenAI API, so compat does not get it by default — it is opted into via
 		// compat.NewWithRerank, which is why every other compat provider is false
@@ -394,7 +397,7 @@ func TestCapabilityMatrix(t *testing.T) {
 		SiliconFlow: {chat: true, models: true, embeddings: true, rerank: true},
 		Together:    {chat: true, models: true, embeddings: true},
 		VLLM:        {chat: true, models: true, embeddings: true},
-		Vercel:      {chat: true, models: true, embeddings: true, imageGen: true},
+		Vercel:      {chat: true, models: true, modelTasks: true, embeddings: true, imageGen: true},
 		Zhipu:       {chat: true, models: true, embeddings: true},
 	}
 	if len(want) != len(factories) {
@@ -408,6 +411,7 @@ func TestCapabilityMatrix(t *testing.T) {
 		got := caps{
 			chat:        c.SupportsChat(),
 			models:      c.SupportsModels(),
+			modelTasks:  c.SupportsModelTaskTypes(),
 			embeddings:  c.SupportsEmbeddings(),
 			rerank:      c.SupportsRerank(),
 			imageGen:    c.SupportsImageGeneration(),
@@ -658,6 +662,69 @@ func TestModels(t *testing.T) {
 	}
 	if len(models) != 2 || models[0].ModelID != "m-1" {
 		t.Errorf("models = %+v", models)
+	}
+}
+
+func TestModelsWithTaskTypes_RichListerUsesSingleRequest(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"deepseek-v4-flash"}]}`)
+	})
+
+	models, taskTypes, err := c.ModelsWithTaskTypes(context.Background())
+	if err != nil {
+		t.Fatalf("ModelsWithTaskTypes: %v", err)
+	}
+	if len(models) != 1 || models[0].ModelID != "deepseek-v4-flash" {
+		t.Fatalf("models = %+v", models)
+	}
+	if got := strings.Join(taskTypes["deepseek-v4-flash"], ","); got != RemoteModelTaskChat {
+		t.Fatalf("task types = %q, want chat", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("catalog requests = %d, want exactly one", got)
+	}
+	if !c.SupportsModelTaskTypes() {
+		t.Fatal("DeepSeek should expose model task metadata")
+	}
+}
+
+type legacyModelLister struct {
+	provider.Provider
+	calls int
+}
+
+func (p *legacyModelLister) Name() string { return "legacy-model-lister" }
+
+func (p *legacyModelLister) ListModels(context.Context, string) ([]provider.RemoteModel, error) {
+	p.calls++
+	return []provider.RemoteModel{{ModelID: "legacy"}}, nil
+}
+
+func TestModelsWithTaskTypes_LegacyListerFallsBack(t *testing.T) {
+	adapter := &legacyModelLister{}
+	c, err := Wrap(adapter, WithAPIKey("k"))
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	models, taskTypes, err := c.ModelsWithTaskTypes(context.Background())
+	if err != nil {
+		t.Fatalf("ModelsWithTaskTypes: %v", err)
+	}
+	if len(models) != 1 || models[0].ModelID != "legacy" {
+		t.Fatalf("models = %+v", models)
+	}
+	if taskTypes != nil {
+		t.Fatalf("legacy task map = %v, want nil", taskTypes)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("legacy catalog calls = %d, want one", adapter.calls)
+	}
+	if c.SupportsModelTaskTypes() {
+		t.Fatal("legacy ModelLister must not claim per-model task metadata")
 	}
 }
 

@@ -432,6 +432,19 @@ type ModelLister interface {
 	ListModels(ctx context.Context, apiKey string) ([]RemoteModel, error)
 }
 
+// ModelTaskLister is an optional extension to ModelLister for providers whose
+// model catalog carries enough metadata to classify individual models by the
+// public operations they can serve.
+//
+// The returned map is keyed by RemoteModel.ModelID. A missing key means the
+// adapter cannot reliably classify that model; it does not mean chat. Callers
+// should ignore task names they do not recognize so new operations can be
+// added without breaking older consumers.
+type ModelTaskLister interface {
+	ModelLister
+	ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]RemoteModel, map[string][]string, error)
+}
+
 // Embedder is an optional interface for providers that support /v1/embeddings.
 // Currently implemented by the OpenAI-compat layer (which means any compat-based
 // provider — vercel, openai, deepseek, siliconflow, etc. — automatically
@@ -468,6 +481,18 @@ type EmbeddingItem struct {
 	Index     int    `json:"index"`
 	Embedding any    `json:"embedding"` // []float32 | string (base64) depending on EncodingFormat
 }
+
+// Remote-model task names are shared with gateway model bindings. They name
+// the public operation a particular model can serve; they are deliberately
+// independent from the optional interfaces implemented by the provider as a
+// whole.
+const (
+	RemoteModelTaskChat          = "chat"
+	RemoteModelTaskEmbedding     = "embedding"
+	RemoteModelTaskImageGenerate = "image.generate"
+	RemoteModelTaskImageEdit     = "image.edit"
+	RemoteModelTaskVideoGenerate = "video.generate"
+)
 
 // RemoteModel represents a model fetched from a provider's API.
 type RemoteModel struct {

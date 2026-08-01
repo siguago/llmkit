@@ -9,8 +9,8 @@
 //
 // [Provider] is the one interface every adapter must satisfy — chat, streaming
 // chat, and a name. Everything else is optional and discovered by type
-// assertion: [ModelLister], [Embedder], [ImageGenerator], [ImageEditor],
-// [VideoCreator], [VideoCanceller].
+// assertion: [ModelLister], [ModelTaskLister], [Embedder], [Reranker],
+// [ImageGenerator], [ImageEditor], [VideoCreator], [VideoCanceller].
 //
 // Implement an optional interface only when the vendor endpoint genuinely
 // exists. Do not satisfy one with a method that always returns [ErrUnsupported]:

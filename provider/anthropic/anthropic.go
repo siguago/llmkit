@@ -147,10 +147,23 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 
 // ListModels fetches available models from the Anthropic API.
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
+	models, _, err := p.listModelsWithTaskTypes(ctx, apiKey)
+	return models, err
+}
+
+// ListModelsWithTaskTypes fetches the same catalog as ListModels and classifies
+// the claude- family as chat. Anything else remains listed but deliberately has
+// no task-map entry.
+func (p *Provider) ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
+	return p.listModelsWithTaskTypes(ctx, apiKey)
+}
+
+func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	var allModels []provider.RemoteModel
+	taskTypes := make(map[string][]string)
 	afterID := ""
 
 	for {
@@ -161,20 +174,20 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 
 		httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		provider.SetKeyHeader(httpReq.Header, "x-api-key", apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 		resp, err := p.client.Do(httpReq)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
 			resp.Body.Close()
-			return nil, provider.NewProviderErrorFromResponse(resp, "anthropic", respBody)
+			return nil, nil, provider.NewProviderErrorFromResponse(resp, "anthropic", respBody)
 		}
 
 		var result struct {
@@ -187,7 +200,7 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			resp.Body.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		resp.Body.Close()
 
@@ -206,6 +219,9 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 				ModelID:     m.ID,
 				DisplayName: m.DisplayName,
 			})
+			if tasks := anthropicModelTaskTypes(m.ID); len(tasks) > 0 {
+				taskTypes[m.ID] = tasks
+			}
 		}
 
 		if !result.HasMore || len(result.Data) == 0 {
@@ -214,8 +230,23 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		afterID = result.Data[len(result.Data)-1].ID
 	}
 
-	return allModels, nil
+	return allModels, taskTypes, nil
 }
+
+// anthropicModelTaskTypes is a prefix test rather than a per-ID allowlist,
+// because /v1/models has only ever returned chat models and Anthropic ships new
+// Claude IDs faster than an allowlist could track. This deliberately differs
+// from the DeepSeek adapter, whose catalog mixes retired aliases and non-chat
+// models and therefore cannot be classified by prefix. Should Anthropic ever
+// list a non-chat claude- model, this must become an allowlist.
+func anthropicModelTaskTypes(modelID string) []string {
+	if strings.HasPrefix(modelID, "claude-") {
+		return []string{provider.RemoteModelTaskChat}
+	}
+	return nil
+}
+
+var _ provider.ModelTaskLister = (*Provider)(nil)
 
 func setHeaders(req *http.Request, apiKey string) {
 	provider.SetKeyHeader(req.Header, "x-api-key", apiKey)

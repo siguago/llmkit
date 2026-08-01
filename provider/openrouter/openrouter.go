@@ -238,10 +238,72 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 
 // ListModels fetches available models from the OpenRouter API.
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
+	entries, err := p.listRemoteModels(ctx, apiKey, p.modelsURL)
+	if err != nil {
+		return nil, err
+	}
+	var models []provider.RemoteModel
+	for _, entry := range entries {
+		models = append(models, entry.remoteModel())
+	}
+	return models, nil
+}
+
+// ListModelsWithTaskTypes returns OpenRouter's catalog plus task metadata
+// derived from architecture.output_modalities. Missing metadata remains
+// unknown; explicitly unsupported or unfamiliar output modalities are omitted.
+func (p *Provider) ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
+	// OpenRouter's ordinary models request defaults to text output. Only the
+	// additive rich method opts into the mixed catalog; ListModels deliberately
+	// retains its historical request and result behavior.
+	entries, err := p.listRemoteModels(ctx, apiKey, p.modelsURL+"?output_modalities=all")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	models := make([]provider.RemoteModel, 0, len(entries))
+	taskTypes := make(map[string][]string)
+	for _, entry := range entries {
+		modalities := entry.Architecture.OutputModalities
+		if !openRouterRichCatalogModel(modalities) {
+			continue
+		}
+		models = append(models, entry.remoteModel())
+		if modalities != nil {
+			if tasks := openRouterModelTaskTypes(*modalities); len(tasks) > 0 {
+				taskTypes[entry.ID] = tasks
+			}
+		}
+	}
+	return models, taskTypes, nil
+}
+
+type openRouterCatalogModel struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ContextLength int    `json:"context_length"`
+	Architecture  struct {
+		OutputModalities *[]string `json:"output_modalities"`
+	} `json:"architecture"`
+}
+
+func (m openRouterCatalogModel) remoteModel() provider.RemoteModel {
+	displayName := m.Name
+	if displayName == "" {
+		displayName = m.ID
+	}
+	return provider.RemoteModel{
+		ModelID:       m.ID,
+		DisplayName:   displayName,
+		ContextWindow: m.ContextLength,
+	}
+}
+
+func (p *Provider) listRemoteModels(ctx context.Context, apiKey, endpoint string) ([]openRouterCatalogModel, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", p.modelsURL, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -259,30 +321,68 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	}
 
 	var result struct {
-		Data []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			ContextLength int    `json:"context_length"`
-		} `json:"data"`
+		Data []openRouterCatalogModel `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-
-	var models []provider.RemoteModel
-	for _, m := range result.Data {
-		displayName := m.Name
-		if displayName == "" {
-			displayName = m.ID
-		}
-		models = append(models, provider.RemoteModel{
-			ModelID:       m.ID,
-			DisplayName:   displayName,
-			ContextWindow: m.ContextLength,
-		})
-	}
-	return models, nil
+	return result.Data, nil
 }
+
+// openRouterRichCatalogModel rejects entries whose advertised output requires
+// an SDK route we do not implement (embeddings, rerank, speech/transcription,
+// audio, or a future unfamiliar modality). Only a genuinely absent modalities
+// field remains listable as unknown.
+func openRouterRichCatalogModel(outputModalities *[]string) bool {
+	if outputModalities == nil {
+		return true
+	}
+	if len(*outputModalities) == 0 {
+		return false
+	}
+	for _, modality := range *outputModalities {
+		switch strings.ToLower(strings.TrimSpace(modality)) {
+		case "text", "chat", "image", "video":
+			// Supported by this adapter.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func openRouterModelTaskTypes(outputModalities []string) []string {
+	var chat, image, video bool
+	for _, modality := range outputModalities {
+		switch strings.ToLower(strings.TrimSpace(modality)) {
+		case "text", "chat":
+			chat = true
+		case "image":
+			image = true
+		case "video":
+			video = true
+		}
+	}
+
+	tasks := make([]string, 0, 3)
+	if chat {
+		tasks = append(tasks, provider.RemoteModelTaskChat)
+	}
+	// This adapter's ImageGenerator currently uses chat/completions with
+	// modalities=[image,text]. Pure image-output models require OpenRouter's
+	// dedicated /images endpoint, which is not implemented here yet. Keep those
+	// catalog entries visible but unclassified instead of promising a route that
+	// will call the wrong endpoint.
+	if image && chat {
+		tasks = append(tasks, provider.RemoteModelTaskImageGenerate)
+	}
+	if video {
+		tasks = append(tasks, provider.RemoteModelTaskVideoGenerate)
+	}
+	return tasks
+}
+
+var _ provider.ModelTaskLister = (*Provider)(nil)
 
 // buildReasoningDetails packs an assistant message's reasoning state into
 // OpenRouter's reasoning_details array shape. OpenRouter routes these through

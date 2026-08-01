@@ -8,9 +8,11 @@ import (
 	"github.com/siguago/llmkit/provider"
 )
 
-// GenerateImage 通过 OpenRouter chat/completions + modalities=["image","text"] 路径生成图像。
-// OpenRouter 没有独立的 /v1/images/generations 接口（截止设计文档审核日），
-// 因此 adapter 构造一个 chat 请求并把响应中的 message.images[] 提取成 MediaAsset 返回。
+// GenerateImage supports OpenRouter models that generate text and images via
+// chat/completions + modalities=["image","text"]. Pure image-output models use
+// OpenRouter's newer dedicated /v1/images API and are deliberately left
+// unclassified by model discovery until that route is implemented here.
+// The response's message.images[] entries are normalized into MediaAsset.
 func (p *Provider) GenerateImage(ctx context.Context, apiKey, model string, req *provider.ImageGenerationRequest) (*provider.ImageGenerationResponse, error) {
 	chatReq := &provider.ChatCompletionRequest{
 		Model: model,

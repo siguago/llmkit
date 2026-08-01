@@ -7,7 +7,7 @@
 //	DEEPSEEK_API_KEY=sk-... llmkit-probe deepseek
 //
 //	# key inline, specific model
-//	llmkit-probe deepseek -key sk-... -model deepseek-reasoner
+//	llmkit-probe deepseek -key sk-... -model deepseek-v4-pro
 //
 //	# every provider whose key is configured
 //	llmkit-probe
@@ -108,7 +108,7 @@ USAGE
 
 EXAMPLES
   DEEPSEEK_API_KEY=sk-... llmkit-probe deepseek
-  llmkit-probe deepseek -key sk-... -model deepseek-reasoner
+  llmkit-probe deepseek -key sk-... -model deepseek-v4-pro
   llmkit-probe openai -media
   llmkit-probe deepseek -base-url https://my-relay.example/v1
   llmkit-probe ollama                # 本地运行时，无需 key
