@@ -590,6 +590,9 @@ func cloneContentBlock(block ContentBlock) (ContentBlock, error) {
 	if err := json.Unmarshal(data, &cloned); err != nil {
 		return ContentBlock{}, err
 	}
+	if block.Raw != nil {
+		cloned.Raw = cloneRaw(block.Raw)
+	}
 	cloned.PartialJSON = block.PartialJSON
 	return cloned, nil
 }

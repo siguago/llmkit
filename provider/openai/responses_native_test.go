@@ -687,6 +687,46 @@ func TestNativeResponsesStream_ReasoningContentPartDoesNotAbort(t *testing.T) {
 	}
 }
 
+func TestNativeResponsesStream_UnknownContentPartDoesNotHideTerminal(t *testing.T) {
+	frames := []responsesSSEFrame{
+		{"response.created", responsesStreamCreatedJSON()},
+		{"response.output_item.added", `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_future","role":"assistant","status":"in_progress","content":[]}}`},
+		{"response.content_part.added", `{"type":"response.content_part.added","sequence_number":2,"item_id":"msg_future","output_index":0,"content_index":0,"part":{"type":"future_part","value":1}}`},
+		{"response.content_part.added", `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_future","output_index":0,"content_index":1,"part":{"type":"output_text","text":"","annotations":[]}}`},
+		{"response.output_text.delta", `{"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_future","output_index":0,"content_index":1,"delta":"still readable","logprobs":[]}`},
+		{"response.completed", `{"type":"response.completed","sequence_number":5,"response":{"id":"resp_future","object":"response","created_at":1,"status":"completed","model":"gpt-test","output":[{"type":"message","id":"msg_future","role":"assistant","status":"completed","content":[{"type":"future_part","value":1},{"type":"output_text","text":"still readable","annotations":[]}]}],"parallel_tool_calls":true,"store":false}}`},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeResponsesSSE(w, frames)
+	}))
+	defer server.Close()
+
+	stream, err := NewWithBaseURL(server.URL).CreateResponseStream(
+		context.Background(), "key", newResponsesCreateRequest(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	for {
+		event, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("Recv before terminal: %v", recvErr)
+		}
+		if event.IsTerminal() {
+			break
+		}
+	}
+	final := stream.FinalResponse()
+	if final == nil || final.ID != "resp_future" || final.OutputText() != "still readable" {
+		t.Fatalf("FinalResponse = %#v", final)
+	}
+	if parts := final.Output[0].Message.Content.Parts; len(parts) != 2 || parts[0].Raw == nil {
+		t.Fatalf("terminal content = %#v", parts)
+	}
+}
+
 func TestNativeResponsesStream_TerminalEventFirstThenEOF(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("x-request-id", "req_terminal_first")
@@ -720,7 +760,7 @@ func TestNativeResponsesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("x-request-id", "req_stream_error")
 		writeResponsesSSE(w, []responsesSSEFrame{{
-			"error", `{"type":"error","sequence_number":7,"code":"rate_limit_exceeded","message":"slow down","param":null}`,
+			"error", `{"type":"error","sequence_number":7,"code":"rate_limit_exceeded","message":"slow down","param":"input","future_error":{"scope":"request"}}`,
 		}})
 	}))
 	defer server.Close()
@@ -740,13 +780,22 @@ func TestNativeResponsesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if event.Error.Code != "rate_limit_exceeded" || event.Error.Message != "slow down" {
 		t.Fatalf("error event = %+v", event.Error)
 	}
+	event.Error.Code = "mutated"
+	event.Error.Message = "mutated"
+	*event.Error.Param = "mutated"
+	event.ExtraFields["future_error"][0] = '['
+	finalBeforeError := stream.FinalResponse()
+	finalBeforeError.Error.Code = "final mutation"
+	finalBeforeError.Error.Message = "final mutation"
+	*finalBeforeError.Error.Param = "final mutation"
 
 	_, err = stream.Recv()
 	if err == nil {
 		t.Fatal("expected classified error after error event")
 	}
 	var streamError *responsesapi.ErrorEvent
-	if !errors.As(err, &streamError) || streamError.Code != "rate_limit_exceeded" {
+	if !errors.As(err, &streamError) || streamError.Code != "rate_limit_exceeded" ||
+		streamError.Message != "slow down" || streamError.Param == nil || *streamError.Param != "input" {
 		t.Fatalf("errors.As(*responses.ErrorEvent) failed: %T %v", err, err)
 	}
 	if provider.ProviderCode(err) != "rate_limit_exceeded" || provider.ErrorCategoryOf(err) != provider.ErrorCategoryRateLimit {
@@ -755,6 +804,17 @@ func TestNativeResponsesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if !provider.IsMarkedUnsafeToReplay(err) {
 		t.Fatal("an in-stream error must never assert that replay is safe")
 	}
+	streamError.Code = "pending mutation"
+	streamError.Message = "pending mutation"
+	*streamError.Param = "pending mutation"
+	if finalBeforeError.Error.Code != "final mutation" ||
+		finalBeforeError.Error.Message != "final mutation" ||
+		*finalBeforeError.Error.Param != "final mutation" {
+		t.Fatalf("pending error mutation leaked into FinalResponse: %+v", finalBeforeError.Error)
+	}
+	finalBeforeError.Error.Code = "rate_limit_exceeded"
+	finalBeforeError.Error.Message = "slow down"
+	*finalBeforeError.Error.Param = "input"
 	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Recv after pending error = %v, want EOF", err)
 	}
@@ -762,7 +822,10 @@ func TestNativeResponsesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if final == nil || final.Status != responsesapi.StatusFailed || final.Error == nil {
 		t.Fatalf("FinalResponse = %+v", final)
 	}
-	if final.Error.Code != "rate_limit_exceeded" || final.RequestID != "req_stream_error" {
+	if final.Error.Code != "rate_limit_exceeded" || final.Error.Message != "slow down" ||
+		final.Error.Param == nil || *final.Error.Param != "input" ||
+		string(final.Error.ExtraFields["future_error"]) != `{"scope":"request"}` ||
+		final.RequestID != "req_stream_error" {
 		t.Fatalf("final error/request ID = %+v / %q", final.Error, final.RequestID)
 	}
 }

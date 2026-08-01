@@ -1,9 +1,12 @@
 package anthropic
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -368,6 +371,78 @@ func TestAccumulatorCompactionDeltaPreservesExplicitNullMetadata(t *testing.T) {
 	}
 }
 
+func TestAccumulatorClonesUnknownBlockRawWithoutCanonicalizing(t *testing.T) {
+	blockWire := []byte(`{ "type" : "future_block", "large" : 900719925474099312345 }`)
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+	event, err := ParseEvent([]byte(`{"type":"content_block_start","index":0,"content_block":` + string(blockWire) + `}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Add(event); err != nil {
+		t.Fatal(err)
+	}
+	event.ContentBlockStart.ContentBlock.Raw[0] = '['
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
+	applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+	message, err := accumulator.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.Content) != 1 || !bytes.Equal(message.Content[0].Raw, blockWire) {
+		t.Fatalf("unknown block Raw = %q, want %q", message.Content[0].Raw, blockWire)
+	}
+}
+
+func TestAccumulatorNormalizesProgrammaticContentBlockDiscriminators(t *testing.T) {
+	t.Run("known block defaults its type", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+		event := &Event{
+			Type: EventTypeContentBlockStart,
+			ContentBlockStart: &ContentBlockStartEvent{
+				Index:        0,
+				ContentBlock: ContentBlock{Text: &TextBlock{Text: "hello"}},
+			},
+		}
+		if err := accumulator.Add(event); err != nil {
+			t.Fatal(err)
+		}
+		applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+		applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
+		applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+		message, err := accumulator.Result()
+		if err != nil || len(message.Content) != 1 ||
+			message.Content[0].Type != ContentBlockTypeText || message.Content[0].Text == nil ||
+			message.Content[0].Text.Type != ContentBlockTypeText {
+			t.Fatalf("Result = %#v, %v", message, err)
+		}
+	})
+
+	t.Run("raw fallback derives its type", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"requested","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+		raw := json.RawMessage(`{ "type" : "fallback", "to" : { "model" : "fallback-model" } }`)
+		event := &Event{
+			Type: EventTypeContentBlockStart,
+			ContentBlockStart: &ContentBlockStartEvent{
+				Index:        0,
+				ContentBlock: ContentBlock{Raw: raw},
+			},
+		}
+		if err := accumulator.Add(event); err != nil {
+			t.Fatal(err)
+		}
+		message := accumulator.Message()
+		if message == nil || message.Model != "fallback-model" {
+			t.Fatalf("Message = %#v", message)
+		}
+	})
+}
+
 func TestAccumulatorFallbackRelabelsModelUsingFinalHop(t *testing.T) {
 	accumulator := NewAccumulator()
 	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"requested-alias","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
@@ -481,13 +556,15 @@ func TestAccumulatorReportsPrematureEOFAndStreamError(t *testing.T) {
 func TestAccumulatorRejectsGappedBlockIndexes(t *testing.T) {
 	accumulator := NewAccumulator()
 	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
-	applyFixture(t, accumulator, `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"x"}}`)
-	applyFixture(t, accumulator, `{"type":"content_block_stop","index":1}`)
-	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
-	event, _ := ParseEvent([]byte(`{"type":"message_stop"}`))
+	event, _ := ParseEvent([]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"x"}}`))
 	if err := accumulator.Add(event); !errors.Is(err, ErrStreamState) {
 		t.Fatalf("Add error = %v, want ErrStreamState", err)
 	}
+
+	// Reject the gap immediately: accepting index 1 and later backfilling 0
+	// would let snapshot sorting disguise an invalid wire order as valid.
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"x"}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"y"}}`)
 }
 
 func TestAccumulatorEnforcesMessageStreamPhases(t *testing.T) {
@@ -507,12 +584,46 @@ func TestAccumulatorEnforcesMessageStreamPhases(t *testing.T) {
 		}
 	})
 
+	for _, test := range []struct {
+		name    string
+		content string
+	}{
+		{name: "content is required", content: ""},
+		{name: "content cannot be null", content: `,"content":null`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accumulator := NewAccumulator()
+			fixture := `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}` +
+				test.content + `}}`
+			err := applyFixtureError(t, accumulator, fixture)
+			if !errors.Is(err, ErrStreamState) {
+				t.Fatalf("Add error = %v, want ErrStreamState", err)
+			}
+		})
+	}
+
 	t.Run("message_stop requires message_delta", func(t *testing.T) {
 		accumulator := NewAccumulator()
 		applyFixture(t, accumulator, emptyStart)
 		err := applyFixtureError(t, accumulator, messageStop)
 		if !errors.Is(err, ErrStreamState) {
 			t.Fatalf("Add error = %v, want ErrStreamState", err)
+		}
+	})
+
+	t.Run("message_stop requires a final stop reason", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":1}}`)
+		err := applyFixtureError(t, accumulator, messageStop)
+		if !errors.Is(err, ErrStreamState) || accumulator.Complete() {
+			t.Fatalf("Add error = %v, complete = %t; want ErrStreamState/false", err, accumulator.Complete())
+		}
+
+		applyFixture(t, accumulator, finalDelta)
+		applyFixture(t, accumulator, messageStop)
+		if _, err := accumulator.Result(); err != nil {
+			t.Fatalf("Result after final stop reason: %v", err)
 		}
 	})
 
@@ -542,11 +653,61 @@ func TestAccumulatorEnforcesMessageStreamPhases(t *testing.T) {
 		applyFixture(t, accumulator, textBlock)
 		applyFixture(t, accumulator, textBlockEnd)
 		applyFixture(t, accumulator, finalDelta)
+		applyFixture(t, accumulator, `{"type":"ping"}`)
+		applyFixture(t, accumulator, `{"type":"future_event","value":1}`)
 		applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":2}}`)
 		applyFixture(t, accumulator, messageStop)
 		message, err := accumulator.Result()
 		if err != nil || message.StopReason == nil || *message.StopReason != StopReasonMaxTokens ||
 			message.Usage.OutputTokens != 2 {
+			t.Fatalf("Result = %#v, %v", message, err)
+		}
+		if unknown := accumulator.UnknownEvents(); len(unknown) != 1 ||
+			!bytes.Contains(unknown[0], []byte(`"future_event"`)) {
+			t.Fatalf("UnknownEvents = %q", unknown)
+		}
+	})
+
+	t.Run("error can terminate an open content block", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, textBlock)
+		applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`)
+		applyFixture(t, accumulator, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+		message, err := accumulator.Result()
+		var apiError *APIError
+		if !errors.As(err, &apiError) || apiError.Type != "overloaded_error" ||
+			message == nil || message.MessageText() != "partial" || accumulator.Complete() {
+			t.Fatalf("Result = %#v, %#v; complete = %t", message, err, accumulator.Complete())
+		}
+	})
+
+	t.Run("failed message_delta is transactional", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		accumulator.SetRequestID("req_transactional")
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, textBlock)
+		applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`)
+		applyFixture(t, accumulator, textBlockEnd)
+		before := accumulator.Message()
+
+		err := applyFixtureError(t, accumulator, `{
+  "type":"message_delta",
+  "delta":{"stop_reason":"end_turn","stop_sequence":null,"container":{"id":"mutated"}},
+  "usage":{"output_tokens":9,"cache_creation":"bad"},
+  "context_management":{"applied_edits":[]}
+}`)
+		if err == nil || !strings.Contains(err.Error(), "cache_creation") {
+			t.Fatalf("Add error = %v, want cache_creation decode error", err)
+		}
+		if after := accumulator.Message(); !reflect.DeepEqual(after, before) {
+			t.Fatalf("failed message_delta mutated snapshot:\nbefore = %#v\nafter  = %#v", before, after)
+		}
+
+		applyFixture(t, accumulator, finalDelta)
+		applyFixture(t, accumulator, messageStop)
+		message, err := accumulator.Result()
+		if err != nil || message.RequestID != "req_transactional" || message.MessageText() != "partial" {
 			t.Fatalf("Result = %#v, %v", message, err)
 		}
 	})

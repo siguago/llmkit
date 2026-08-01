@@ -330,6 +330,18 @@ func anthropicErrorCategory(status int, code string) provider.ErrorCategory {
 	}
 }
 
+func cloneNativeAPIError(source anthropicapi.APIError) anthropicapi.APIError {
+	cloned := source
+	if source.ExtraFields == nil {
+		return cloned
+	}
+	cloned.ExtraFields = make(anthropicapi.ExtraFields, len(source.ExtraFields))
+	for key, value := range source.ExtraFields {
+		cloned.ExtraFields[key] = append(json.RawMessage(nil), value...)
+	}
+	return cloned
+}
+
 type nativeMessageStream struct {
 	body        io.ReadCloser
 	decoder     *sse.Decoder
@@ -424,7 +436,7 @@ func (stream *nativeMessageStream) Recv() (*anthropicapi.Event, error) {
 			stream.terminal.Store(true)
 			_ = stream.Close()
 			if event.Error != nil {
-				apiErr := event.Error.Error
+				apiErr := cloneNativeAPIError(event.Error.Error)
 				stream.pendingErr = provider.MarkUnsafeToReplay(provider.WithErrorMetadata(
 					&apiErr,
 					apiErr.Type,

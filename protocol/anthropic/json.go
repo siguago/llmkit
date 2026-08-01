@@ -105,18 +105,29 @@ func unmarshalWithExtra(data []byte, target any, reserved ...string) (ExtraField
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, err
 	}
-	known := make(map[string]json.RawMessage, len(reserved))
+	known := []byte{'{'}
+	first := true
 	for _, name := range reserved {
-		if raw, exists := object[name]; exists {
-			known[name] = raw
-			delete(object, name)
+		raw, exists := object[name]
+		if !exists {
+			continue
 		}
+		if !first {
+			known = append(known, ',')
+		}
+		encodedName, err := json.Marshal(name)
+		if err != nil {
+			return nil, err
+		}
+		known = append(known, encodedName...)
+		known = append(known, ':')
+		known = append(known, raw...)
+		first = false
+		delete(object, name)
 	}
-	knownJSON, err := json.Marshal(known)
-	if err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(knownJSON))
+	known = append(known, '}')
+
+	decoder := json.NewDecoder(bytes.NewReader(known))
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
 		return nil, err

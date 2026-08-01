@@ -594,20 +594,41 @@ func TestNativeMessagesStream_ErrorEventThenClassifiedError(t *testing.T) {
 	if errorEvent.Error.Error.Type != "overloaded_error" {
 		t.Fatalf("stream error payload = %+v", errorEvent.Error.Error)
 	}
+	if got := string(errorEvent.Error.Error.ExtraFields["future"]); got != "1" {
+		t.Fatalf("stream error future field = %s", got)
+	}
+	errorEvent.Error.Error.Type = "mutated"
+	errorEvent.Error.Error.Message = "mutated"
+	errorEvent.Error.Error.ExtraFields["future"][0] = '2'
+	errorEvent.Error.Error.ExtraFields["injected"] = json.RawMessage(`true`)
 
 	_, err = stream.Recv()
 	if err == nil {
 		t.Fatal("expected classified error after error event")
 	}
 	var apiError *protocol.APIError
-	if !errors.As(err, &apiError) || apiError.Type != "overloaded_error" {
+	if !errors.As(err, &apiError) || apiError.Type != "overloaded_error" ||
+		apiError.Message != "busy" || string(apiError.ExtraFields["future"]) != "1" {
 		t.Fatalf("errors.As(*APIError) failed: %T %v", err, err)
+	}
+	if _, exists := apiError.ExtraFields["injected"]; exists {
+		t.Fatalf("event mutation leaked into pending error: %#v", apiError.ExtraFields)
 	}
 	if provider.ProviderCode(err) != "overloaded_error" || provider.ErrorCategoryOf(err) != provider.ErrorCategoryServer {
 		t.Fatalf("classified stream error: code=%q category=%q", provider.ProviderCode(err), provider.ErrorCategoryOf(err))
 	}
 	if !provider.IsMarkedUnsafeToReplay(err) {
 		t.Fatalf("stream error was not marked unsafe to replay: %T %v", err, err)
+	}
+	apiError.Type = "pending mutation"
+	apiError.Message = "pending mutation"
+	apiError.ExtraFields["future"][0] = '3'
+	_, accumulatedErr := stream.(*nativeMessageStream).accumulator.Result()
+	var accumulatedAPIError *protocol.APIError
+	if !errors.As(accumulatedErr, &accumulatedAPIError) ||
+		accumulatedAPIError.Type != "overloaded_error" || accumulatedAPIError.Message != "busy" ||
+		string(accumulatedAPIError.ExtraFields["future"]) != "1" {
+		t.Fatalf("pending error mutation leaked into accumulator: %#v, %v", accumulatedAPIError, accumulatedErr)
 	}
 	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Recv after pending error = %v, want EOF", err)

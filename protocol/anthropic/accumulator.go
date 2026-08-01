@@ -115,7 +115,7 @@ func (accumulator *Accumulator) addMessageStart(event *MessageStartEvent) error 
 	if accumulator.message != nil {
 		return fmt.Errorf("%w: duplicate message_start", ErrStreamState)
 	}
-	if len(event.Message.Content) != 0 {
+	if event.Message.Content == nil || len(event.Message.Content) != 0 {
 		return fmt.Errorf("%w: message_start content must be empty", ErrStreamState)
 	}
 	message, err := cloneMessageResponse(&event.Message)
@@ -140,6 +140,12 @@ func (accumulator *Accumulator) addContentBlockStart(event *ContentBlockStartEve
 	}
 	if event.Index < 0 {
 		return fmt.Errorf("%w: negative content block index %d", ErrStreamState, event.Index)
+	}
+	if expected := len(accumulator.startedBlocks); event.Index != expected {
+		return fmt.Errorf(
+			"%w: content block index %d started out of order; expected %d",
+			ErrStreamState, event.Index, expected,
+		)
 	}
 	if accumulator.startedBlocks[event.Index] {
 		return fmt.Errorf("%w: duplicate content block index %d", ErrStreamState, event.Index)
@@ -312,20 +318,21 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 			return fmt.Errorf("%w: message_delta before content block %d stopped", ErrStreamState, index)
 		}
 	}
-	accumulator.message.StopReason = cloneStopReason(event.Delta.StopReason)
-	accumulator.message.StopSequence = cloneString(event.Delta.StopSequence)
-	accumulator.message.StopDetails = cloneStopDetails(event.Delta.StopDetails)
+	next := copyMessageResponse(accumulator.message)
+	next.StopReason = cloneStopReason(event.Delta.StopReason)
+	next.StopSequence = cloneString(event.Delta.StopSequence)
+	next.StopDetails = cloneStopDetails(event.Delta.StopDetails)
 	if event.Delta.Container != nil {
-		accumulator.message.Container = cloneRaw(event.Delta.Container)
+		next.Container = cloneRaw(event.Delta.Container)
 	}
 	if contextManagement, exists := event.ExtraFields["context_management"]; exists {
-		if accumulator.message.ExtraFields == nil {
-			accumulator.message.ExtraFields = make(ExtraFields)
+		if next.ExtraFields == nil {
+			next.ExtraFields = make(ExtraFields)
 		}
-		accumulator.message.ExtraFields["context_management"] = cloneRaw(contextManagement)
+		next.ExtraFields["context_management"] = cloneRaw(contextManagement)
 	}
 
-	usage := &accumulator.message.Usage
+	usage := &next.Usage
 	usage.OutputTokens = event.Usage.OutputTokens
 	if event.Usage.InputTokens != nil {
 		usage.InputTokens = *event.Usage.InputTokens
@@ -380,6 +387,7 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 			}
 		}
 	}
+	accumulator.message = next
 	accumulator.seenMessageDelta = true
 	return nil
 }
@@ -403,6 +411,9 @@ func (accumulator *Accumulator) addMessageStop(event *MessageStopEvent) error {
 	}
 	if !accumulator.seenMessageDelta {
 		return fmt.Errorf("%w: message_stop before message_delta", ErrStreamState)
+	}
+	if accumulator.message.StopReason == nil {
+		return fmt.Errorf("%w: message_stop before message_delta supplies stop_reason", ErrStreamState)
 	}
 	accumulator.messageStop = true
 	accumulator.terminal = true

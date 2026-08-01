@@ -202,6 +202,43 @@ func TestMessageRequestExtraFieldsCannotOverrideKnownFields(t *testing.T) {
 	}
 }
 
+func TestUnmarshalExtraFieldsDoNotCaseFoldIntoKnownFields(t *testing.T) {
+	t.Run("ordinary object", func(t *testing.T) {
+		wire := []byte(`{"model":"good","MODEL":"bad","max_tokens":1,"messages":[]}`)
+		var request MessageRequest
+		if err := json.Unmarshal(wire, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Model != "good" || string(request.ExtraFields["MODEL"]) != `"bad"` {
+			t.Fatalf("request = %#v", request)
+		}
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertJSONEqual(t, wire, encoded)
+	})
+
+	t.Run("tagged union", func(t *testing.T) {
+		wire := []byte(`{"type":"text","TYPE":"future_block","text":"good","TEXT":"bad"}`)
+		var block ContentBlock
+		if err := json.Unmarshal(wire, &block); err != nil {
+			t.Fatal(err)
+		}
+		if block.Type != ContentBlockTypeText || block.Text == nil ||
+			block.Text.Type != ContentBlockTypeText || block.Text.Text != "good" ||
+			string(block.Text.ExtraFields["TYPE"]) != `"future_block"` ||
+			string(block.Text.ExtraFields["TEXT"]) != `"bad"` {
+			t.Fatalf("block = %#v", block)
+		}
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertJSONEqual(t, wire, encoded)
+	})
+}
+
 func TestTokenCountRequestAndResponseRoundTrip(t *testing.T) {
 	requestJSON := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hello"}],"future_count_option":1}`)
 	var request TokenCountRequest

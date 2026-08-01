@@ -188,6 +188,274 @@ func TestAccumulatorRoutesReasoningAndIgnoresUnknownContentPartBoundaries(t *tes
 	}
 }
 
+func TestAccumulatorPreservesUnknownContentPartIndexesForKnownOwners(t *testing.T) {
+	created := `{"type":"response.created","sequence_number":0,"response":{"id":"resp","object":"response","created_at":1,"status":"in_progress","model":"gpt-test","output":[],"parallel_tool_calls":true,"store":false}}`
+	tests := []struct {
+		name         string
+		item         string
+		knownPart    string
+		delta        string
+		terminalItem string
+		parts        func(*Response) []ContentPart
+	}{
+		{
+			name:      "message",
+			item:      `{"type":"message","id":"item_1","role":"assistant","status":"in_progress","content":[]}`,
+			knownPart: `{"type":"output_text","text":"","annotations":[]}`,
+			delta:     `{"type":"response.output_text.delta","sequence_number":4,"item_id":"item_1","output_index":0,"content_index":1,"delta":"hello","logprobs":[]}`,
+			terminalItem: `{"type":"message","id":"item_1","role":"assistant","status":"completed","content":[` +
+				`{"type":"future_part","value":2},{"type":"output_text","text":"hello","annotations":[]}]}`,
+			parts: func(response *Response) []ContentPart {
+				return response.Output[0].Message.Content.Parts
+			},
+		},
+		{
+			name:      "reasoning",
+			item:      `{"type":"reasoning","id":"item_1","status":"in_progress","summary":[],"content":[]}`,
+			knownPart: `{"type":"reasoning_text","text":""}`,
+			delta:     `{"type":"response.reasoning_text.delta","sequence_number":4,"item_id":"item_1","output_index":0,"content_index":1,"delta":"hello"}`,
+			terminalItem: `{"type":"reasoning","id":"item_1","status":"completed","summary":[],"content":[` +
+				`{"type":"future_part","value":2},{"type":"reasoning_text","text":"hello"}]}`,
+			parts: func(response *Response) []ContentPart {
+				return response.Output[0].Reasoning.Content
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var accumulator Accumulator
+			fixtures := []string{
+				created,
+				`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":` + test.item + `}`,
+				`{"type":"response.content_part.added","sequence_number":2,"item_id":"item_1","output_index":0,"content_index":0,"part":{"type":"future_part","value":1}}`,
+				`{"type":"response.content_part.added","sequence_number":3,"item_id":"item_1","output_index":0,"content_index":1,"part":` + test.knownPart + `}`,
+				test.delta,
+				`{"type":"response.content_part.done","sequence_number":5,"item_id":"item_1","output_index":0,"content_index":0,"part":{"type":"future_part","value":2}}`,
+			}
+			for index, fixture := range fixtures {
+				if err := accumulator.Add(mustEvent(t, fixture)); err != nil {
+					t.Fatalf("event %d: %v", index, err)
+				}
+			}
+
+			parts := test.parts(accumulator.Response())
+			if len(parts) != 2 || parts[0].Type != "future_part" ||
+				!bytes.Contains(parts[0].Raw, []byte(`"value":2`)) {
+				t.Fatalf("partial parts = %#v", parts)
+			}
+			switch test.name {
+			case "message":
+				if parts[1].OutputText == nil || parts[1].OutputText.Text != "hello" {
+					t.Fatalf("partial message part = %#v", parts[1])
+				}
+			case "reasoning":
+				if parts[1].ReasoningText == nil || parts[1].ReasoningText.Text != "hello" {
+					t.Fatalf("partial reasoning part = %#v", parts[1])
+				}
+			}
+
+			terminal := `{"type":"response.completed","sequence_number":6,"response":{"id":"resp","object":"response","created_at":1,"status":"completed","model":"gpt-test","output":[` +
+				test.terminalItem + `],"parallel_tool_calls":true,"store":false}}`
+			if err := accumulator.Add(mustEvent(t, terminal)); err != nil {
+				t.Fatalf("terminal event: %v", err)
+			}
+			parts = test.parts(accumulator.FinalResponse())
+			if !accumulator.IsTerminal() || len(parts) != 2 || parts[0].Raw == nil {
+				t.Fatalf("terminal response = %#v", accumulator.FinalResponse())
+			}
+		})
+	}
+}
+
+func TestAccumulatorIgnoresKnownContentForUnknownOwnerUntilTerminal(t *testing.T) {
+	fixtures := []string{
+		`{"type":"response.created","sequence_number":0,"response":{"id":"resp","object":"response","created_at":1,"status":"in_progress","model":"gpt-test","output":[],"parallel_tool_calls":true,"store":false}}`,
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"future_item","id":"future_1"}}`,
+		`{"type":"response.content_part.added","sequence_number":2,"item_id":"future_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`,
+		`{"type":"response.output_text.delta","sequence_number":3,"item_id":"future_1","output_index":0,"content_index":0,"delta":"future text","logprobs":[]}`,
+		`{"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"future_1","output_index":0,"delta":"{\"x\":"}`,
+		`{"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"future_1","output_index":0,"name":"future_call","arguments":"{\"x\":1}"}`,
+		`{"type":"response.completed","sequence_number":6,"response":{"id":"resp","object":"response","created_at":1,"status":"completed","model":"gpt-test","output":[{"type":"future_item","id":"future_1","content":[{"type":"output_text","text":"future text","annotations":[]}]}],"parallel_tool_calls":true,"store":false}}`,
+	}
+	var accumulator Accumulator
+	for index, fixture := range fixtures {
+		if err := accumulator.Add(mustEvent(t, fixture)); err != nil {
+			t.Fatalf("event %d: %v", index, err)
+		}
+	}
+	if !accumulator.IsTerminal() || len(accumulator.FinalResponse().Output) != 1 ||
+		accumulator.FinalResponse().Output[0].Raw == nil {
+		t.Fatalf("terminal response = %#v", accumulator.FinalResponse())
+	}
+}
+
+func TestAccumulatorDefersSparseUnknownPartsUntilOwnerIsKnown(t *testing.T) {
+	part0 := []byte(`{ "type" : "future_zero", "large" : 900719925474099312345 }`)
+	part1 := []byte(`{ "type" : "future_one", "value" : 1 }`)
+	fixtures := []string{
+		`{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":1,"part":` + string(part1) + `}`,
+		`{"type":"response.content_part.added","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"part":` + string(part0) + `}`,
+	}
+
+	var accumulator Accumulator
+	for index, fixture := range fixtures {
+		event := mustEvent(t, fixture)
+		want := part1
+		if index == 1 {
+			want = part0
+		}
+		if !bytes.Equal(event.ContentPart.Part.RawJSON(), want) {
+			t.Fatalf("event %d raw = %q, want %q", index, event.ContentPart.Part.RawJSON(), want)
+		}
+		if err := accumulator.Add(event); err != nil {
+			t.Fatalf("event %d: %v", index, err)
+		}
+		event.ContentPart.Part.Raw[0] = '['
+		if _, err := json.Marshal(accumulator.Response()); err != nil {
+			t.Fatalf("marshal with sparse sidecar: %v", err)
+		}
+	}
+
+	owner := mustEvent(t, `{"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`)
+	if err := accumulator.Add(owner); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	parts := accumulator.Response().Output[0].Message.Content.Parts
+	if len(parts) != 2 || !bytes.Equal(parts[0].RawJSON(), part0) || !bytes.Equal(parts[1].RawJSON(), part1) {
+		t.Fatalf("flushed parts = %q / %q", parts[0].RawJSON(), parts[1].RawJSON())
+	}
+}
+
+func TestAccumulatorUnknownPartStateMachineEdges(t *testing.T) {
+	t.Run("done without added occupies its index", func(t *testing.T) {
+		var accumulator Accumulator
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.content_part.done","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"future_part","value":"done"}}`)); err != nil {
+			t.Fatal(err)
+		}
+		parts := accumulator.Response().Output[0].Message.Content.Parts
+		if len(parts) != 1 || !bytes.Contains(parts[0].Raw, []byte(`"done"`)) {
+			t.Fatalf("parts = %#v", parts)
+		}
+	})
+
+	t.Run("item ID mismatch remains an error", func(t *testing.T) {
+		var accumulator Accumulator
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`)); err != nil {
+			t.Fatal(err)
+		}
+		err := accumulator.Add(mustEvent(t, `{"type":"response.content_part.added","sequence_number":2,"item_id":"msg_other","output_index":0,"content_index":0,"part":{"type":"future_part"}}`))
+		if err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("mismatch error = %v", err)
+		}
+	})
+
+	t.Run("output item done clears pending parts", func(t *testing.T) {
+		var accumulator Accumulator
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":1,"part":{"type":"future_part"}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[]}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"x","logprobs":[]}`)); err != nil {
+			t.Fatal(err)
+		}
+		parts := accumulator.Response().Output[0].Message.Content.Parts
+		if len(parts) != 1 || parts[0].OutputText == nil {
+			t.Fatalf("stale pending part was restored: %#v", parts)
+		}
+	})
+
+	t.Run("lifecycle snapshot clears pending parts", func(t *testing.T) {
+		var accumulator Accumulator
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":1,"part":{"type":"future_part"}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.in_progress","sequence_number":2,"response":{"id":"resp","object":"response","created_at":1,"status":"in_progress","model":"gpt-test","output":[{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}],"parallel_tool_calls":true,"store":false}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := accumulator.Add(mustEvent(t, `{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"x","logprobs":[]}`)); err != nil {
+			t.Fatal(err)
+		}
+		parts := accumulator.Response().Output[0].Message.Content.Parts
+		if len(parts) != 1 || parts[0].OutputText == nil {
+			t.Fatalf("stale pending part was restored: %#v", parts)
+		}
+	})
+}
+
+func TestAccumulatorClonesUnknownItemRawWithoutCanonicalizing(t *testing.T) {
+	rawItem := []byte(`{ "type" : "future_item", "large" : 900719925474099312345 }`)
+	event := mustEvent(t, `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":`+string(rawItem)+`}`)
+	var accumulator Accumulator
+	if err := accumulator.Add(event); err != nil {
+		t.Fatal(err)
+	}
+	event.OutputItem.Item.Raw[0] = '['
+	got := accumulator.Response().Output[0].RawJSON()
+	if !bytes.Equal(got, rawItem) {
+		t.Fatalf("accumulated Raw = %q, want %q", got, rawItem)
+	}
+}
+
+func TestAccumulatorClonesNestedRawLeavesWithoutCanonicalizing(t *testing.T) {
+	rawItem := []byte(`{ "type" : "future_item", "large" : 900719925474099312345 }`)
+	rawPart := []byte(`{ "type" : "future_part", "nested" : { "value" : 1 } }`)
+	rawTool := []byte(`{ "type" : "future_tool", "limit" : 900719925474099312345 }`)
+	wire := `{
+  "type":"response.completed","sequence_number":1,
+  "response":{"id":"resp_raw","object":"response","created_at":1,"status":"completed","model":"gpt-test",
+    "output":[` + string(rawItem) + `,{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[` + string(rawPart) + `]}],
+    "tools":[` + string(rawTool) + `],"parallel_tool_calls":true,"store":false}
+}`
+	event := mustEvent(t, wire)
+	if !bytes.Equal(event.Response.Output[0].RawJSON(), rawItem) ||
+		!bytes.Equal(event.Response.Output[1].Message.Content.Parts[0].RawJSON(), rawPart) ||
+		!bytes.Equal(event.Response.Tools[0].RawJSON(), rawTool) {
+		t.Fatalf("fixture Raw leaves were not preserved before accumulation")
+	}
+
+	var accumulator Accumulator
+	if err := accumulator.Add(event); err != nil {
+		t.Fatal(err)
+	}
+	event.Response.Output[0].Raw[0] = '['
+	event.Response.Output[1].Message.Content.Parts[0].Raw[0] = '['
+	event.Response.Tools[0].Raw[0] = '['
+
+	final := accumulator.FinalResponse()
+	if !bytes.Equal(final.Output[0].RawJSON(), rawItem) ||
+		!bytes.Equal(final.Output[1].Message.Content.Parts[0].RawJSON(), rawPart) ||
+		!bytes.Equal(final.Tools[0].RawJSON(), rawTool) {
+		t.Fatalf("terminal Raw leaves = %q / %q / %q",
+			final.Output[0].RawJSON(),
+			final.Output[1].Message.Content.Parts[0].RawJSON(),
+			final.Tools[0].RawJSON(),
+		)
+	}
+}
+
+func TestAccumulatorClonesKnownOutputItemNestedRawWithoutCanonicalizing(t *testing.T) {
+	rawPart := []byte(`{ "type" : "future_part", "large" : 900719925474099312345 }`)
+	event := mustEvent(t, `{
+  "type":"response.output_item.added","sequence_number":1,"output_index":0,
+  "item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[`+string(rawPart)+`]}
+}`)
+	var accumulator Accumulator
+	if err := accumulator.Add(event); err != nil {
+		t.Fatal(err)
+	}
+	event.OutputItem.Item.Message.Content.Parts[0].Raw[0] = '['
+	got := accumulator.Response().Output[0].Message.Content.Parts[0].RawJSON()
+	if !bytes.Equal(got, rawPart) {
+		t.Fatalf("nested Raw = %q, want %q", got, rawPart)
+	}
+}
+
 func TestAccumulatorCreatedThenDeltasRemainVisibleWhenMarshaled(t *testing.T) {
 	created := mustEvent(t, `{
   "type":"response.created","sequence_number":0,
@@ -387,13 +655,33 @@ func TestAccumulatorPreservesFailedAndIncompleteSnapshots(t *testing.T) {
 func TestAccumulatorErrorEventCreatesFailedPartialResponse(t *testing.T) {
 	var accumulator Accumulator
 	accumulator.SetRequestID("req_error")
-	err := accumulator.Add(mustEvent(t, `{"type":"error","sequence_number":1,"code":"bad_gateway","message":"relay failed","param":null}`))
+	event := mustEvent(t, `{"type":"error","sequence_number":1,"code":"bad_gateway","message":"relay failed","param":"input","future_error":{"retryable":false}}`)
+	err := accumulator.Add(event)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := accumulator.FinalResponse()
-	if response == nil || response.Status != StatusFailed || response.Error == nil || response.Error.Code != "bad_gateway" || response.RequestID != "req_error" {
+	if response == nil || response.Status != StatusFailed || response.Error == nil ||
+		response.Error.Code != "bad_gateway" || response.Error.Param == nil ||
+		*response.Error.Param != "input" || response.RequestID != "req_error" {
 		t.Fatalf("failed partial = %#v", response)
+	}
+	event.Error.Code = "mutated"
+	event.Error.Message = "mutated"
+	*event.Error.Param = "mutated"
+	event.ExtraFields["future_error"][0] = '['
+	if response.Error.Code != "bad_gateway" || response.Error.Message != "relay failed" ||
+		response.Error.Param == nil || *response.Error.Param != "input" ||
+		string(response.Error.ExtraFields["future_error"]) != `{"retryable":false}` {
+		t.Fatalf("event mutation leaked into failed response: %#v", response.Error)
+	}
+
+	var nilParamAccumulator Accumulator
+	if err := nilParamAccumulator.Add(mustEvent(t, `{"type":"error","sequence_number":2,"code":null,"message":"unknown","param":null}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := nilParamAccumulator.FinalResponse().Error; got == nil || got.Param != nil {
+		t.Fatalf("nil param error = %#v", got)
 	}
 }
 

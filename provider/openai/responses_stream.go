@@ -133,10 +133,15 @@ func (stream *responsesStream) Recv() (*responsesapi.Event, error) {
 			stream.terminal.Store(true)
 			_ = stream.Close()
 			if event.Type == responsesapi.EventTypeError && event.Error != nil {
+				streamError := *event.Error
+				if event.Error.Param != nil {
+					param := *event.Error.Param
+					streamError.Param = &param
+				}
 				stream.pendingErr = provider.MarkUnsafeToReplay(provider.WithErrorMetadata(
-					event.Error,
-					event.Error.Code,
-					responsesStreamErrorCategory(event.Error.Code),
+					&streamError,
+					streamError.Code,
+					responsesStreamErrorCategory(streamError.Code),
 				))
 			}
 		}
