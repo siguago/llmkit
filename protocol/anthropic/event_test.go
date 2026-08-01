@@ -308,8 +308,8 @@ func TestDrainStreamCarriesRequestIDOnSuccessfulCompletion(t *testing.T) {
 func TestAccumulatorAppliesBetaContextManagementAndCompactionDelta(t *testing.T) {
 	accumulator := NewAccumulator()
 	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0},"context_management":null}}`)
-	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":""}}`)
-	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":"Summary so far."}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":"","encrypted_content":"stale"}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":"Summary so far.","encrypted_content":"opaque-next-turn"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
 	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4},"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]}}`)
 	applyFixture(t, accumulator, `{"type":"message_stop"}`)
@@ -325,17 +325,73 @@ func TestAccumulatorAppliesBetaContextManagementAndCompactionDelta(t *testing.T)
 		t.Fatalf("content = %#v", message.Content)
 	}
 	var block struct {
-		Type    string `json:"type"`
-		Content string `json:"content"`
+		Type             string `json:"type"`
+		Content          string `json:"content"`
+		EncryptedContent string `json:"encrypted_content"`
 	}
 	if err := json.Unmarshal(message.Content[0].Raw, &block); err != nil {
 		t.Fatal(err)
 	}
-	if block.Type != "compaction" || block.Content != "Summary so far." {
+	if block.Type != "compaction" || block.Content != "Summary so far." || block.EncryptedContent != "opaque-next-turn" {
 		t.Fatalf("compaction block = %#v", block)
 	}
-	if got := accumulator.UnknownEvents(); len(got) != 1 || string(got[0]) != `{"type":"compaction_delta","content":"Summary so far."}` {
+	if got := accumulator.UnknownEvents(); len(got) != 1 || string(got[0]) != `{"type":"compaction_delta","content":"Summary so far.","encrypted_content":"opaque-next-turn"}` {
 		t.Fatalf("unknown delta retention = %q", got)
+	}
+
+	message.Content[0].Raw[0] = '['
+	fresh := accumulator.FinalMessage()
+	if fresh == nil || fresh.Content[0].Raw[0] != '{' {
+		t.Fatal("FinalMessage returned aliased compaction metadata")
+	}
+}
+
+func TestAccumulatorCompactionDeltaPreservesExplicitNullMetadata(t *testing.T) {
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":"before","encrypted_content":"before"}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":null,"encrypted_content":null}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+	message, err := accumulator.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(message.Content[0].Raw, &block); err != nil {
+		t.Fatal(err)
+	}
+	if string(block["content"]) != "null" || string(block["encrypted_content"]) != "null" {
+		t.Fatalf("compaction block = %s", message.Content[0].Raw)
+	}
+}
+
+func TestAccumulatorFallbackRelabelsModelUsingFinalHop(t *testing.T) {
+	accumulator := NewAccumulator()
+	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"requested-alias","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"from requested model"}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":1,"content_block":{"type":"fallback","from":{"model":"requested-alias"},"to":{"model":"claude-sonnet-fallback"},"trigger":{"type":"refusal"}}}`)
+	if got := accumulator.Message().Model; got != "claude-sonnet-fallback" {
+		t.Fatalf("model after first fallback = %q", got)
+	}
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":1}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":2,"content_block":{"type":"fallback","from":{"model":"claude-sonnet-fallback"},"to":{"model":"claude-haiku-final"},"trigger":{"type":"refusal"}}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":2}`)
+	applyFixture(t, accumulator, `{"type":"content_block_start","index":3,"content_block":{"type":"text","text":"from final model"}}`)
+	applyFixture(t, accumulator, `{"type":"content_block_stop","index":3}`)
+	applyFixture(t, accumulator, `{"type":"message_stop"}`)
+
+	message, err := accumulator.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Model != "claude-haiku-final" {
+		t.Fatalf("final model = %q", message.Model)
+	}
+	if len(message.Content) != 4 || message.Content[1].Raw == nil || message.Content[2].Raw == nil {
+		t.Fatalf("fallback blocks were not preserved: %#v", message.Content)
 	}
 }
 

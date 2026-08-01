@@ -56,6 +56,9 @@ type InputImage struct {
 	FileID      string      `json:"file_id,omitempty"`
 	ImageURL    string      `json:"image_url,omitempty"`
 	ExtraFields ExtraFields `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type InputFile struct {
@@ -66,6 +69,9 @@ type InputFile struct {
 	Filename    string      `json:"filename,omitempty"`
 	Detail      string      `json:"detail,omitempty"`
 	ExtraFields ExtraFields `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type SummaryText struct {
@@ -94,17 +100,22 @@ type Annotation struct {
 	StartIndex  *int        `json:"start_index,omitempty"`
 	EndIndex    *int        `json:"end_index,omitempty"`
 	ExtraFields ExtraFields `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 var (
-	inputTextFields     = reservedFields("type", "text")
-	outputTextFields    = reservedFields("type", "text", "annotations", "logprobs")
-	refusalFields       = reservedFields("type", "refusal")
-	inputImageFields    = reservedFields("type", "detail", "file_id", "image_url")
-	inputFileFields     = reservedFields("type", "file_data", "file_id", "file_url", "filename", "detail")
-	summaryTextFields   = reservedFields("type", "text")
-	reasoningTextFields = reservedFields("type", "text")
-	annotationFields    = reservedFields("type", "file_id", "filename", "container_id", "index", "url", "title", "start_index", "end_index")
+	inputTextFields          = reservedFields("type", "text")
+	outputTextFields         = reservedFields("type", "text", "annotations", "logprobs")
+	refusalFields            = reservedFields("type", "refusal")
+	inputImageFields         = reservedFields("type", "detail", "file_id", "image_url")
+	inputFileFields          = reservedFields("type", "file_data", "file_id", "file_url", "filename", "detail")
+	inputImageNullableFields = reservedFields("detail", "file_id", "image_url")
+	inputFileNullableFields  = reservedFields("file_data", "file_id", "file_url", "filename")
+	summaryTextFields        = reservedFields("type", "text")
+	reasoningTextFields      = reservedFields("type", "text")
+	annotationFields         = reservedFields("type", "file_id", "filename", "container_id", "index", "url", "title", "start_index", "end_index")
 )
 
 func NewInputTextPart(text string) ContentPart {
@@ -348,11 +359,22 @@ func (v InputImage) MarshalJSON() ([]byte, error) {
 	if err := checkDiscriminator(v.Type, ContentTypeInputImage, "InputImage"); err != nil {
 		return nil, err
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		Detail   string `json:"detail,omitempty"`
 		FileID   string `json:"file_id,omitempty"`
 		ImageURL string `json:"image_url,omitempty"`
-	}{v.Detail, v.FileID, v.ImageURL}, v.ExtraFields, ContentTypeInputImage, inputImageFields)
+	}{v.Detail, v.FileID, v.ImageURL}, v.ExtraFields, ContentTypeInputImage, inputImageFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			switch name {
+			case "detail":
+				return v.Detail, true
+			case "file_id":
+				return v.FileID, true
+			case "image_url":
+				return v.ImageURL, true
+			}
+			return nil, false
+		})
 }
 
 func (v *InputImage) UnmarshalJSON(data []byte) error {
@@ -373,6 +395,9 @@ func (v *InputImage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = InputImage{Type: wire.Type, Detail: wire.Detail, FileID: wire.FileID, ImageURL: wire.ImageURL, ExtraFields: extra}
+	if err := captureFieldPresence(data, inputImageNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -380,13 +405,26 @@ func (v InputFile) MarshalJSON() ([]byte, error) {
 	if err := checkDiscriminator(v.Type, ContentTypeInputFile, "InputFile"); err != nil {
 		return nil, err
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		FileData string `json:"file_data,omitempty"`
 		FileID   string `json:"file_id,omitempty"`
 		FileURL  string `json:"file_url,omitempty"`
 		Filename string `json:"filename,omitempty"`
 		Detail   string `json:"detail,omitempty"`
-	}{v.FileData, v.FileID, v.FileURL, v.Filename, v.Detail}, v.ExtraFields, ContentTypeInputFile, inputFileFields)
+	}{v.FileData, v.FileID, v.FileURL, v.Filename, v.Detail}, v.ExtraFields, ContentTypeInputFile, inputFileFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			switch name {
+			case "file_data":
+				return v.FileData, true
+			case "file_id":
+				return v.FileID, true
+			case "file_url":
+				return v.FileURL, true
+			case "filename":
+				return v.Filename, true
+			}
+			return nil, false
+		})
 }
 
 func (v *InputFile) UnmarshalJSON(data []byte) error {
@@ -409,6 +447,9 @@ func (v *InputFile) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = InputFile{Type: wire.Type, FileData: wire.FileData, FileID: wire.FileID, FileURL: wire.FileURL, Filename: wire.Filename, Detail: wire.Detail, ExtraFields: extra}
+	if err := captureFieldPresence(data, inputFileNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -480,10 +521,71 @@ func (a Annotation) MarshalJSON() ([]byte, error) {
 		StartIndex  *int   `json:"start_index,omitempty"`
 		EndIndex    *int   `json:"end_index,omitempty"`
 	}
-	return marshalObjectWithExtra(wire{
+	required := annotationRequiredFields(a.Type)
+	for _, name := range required {
+		switch name {
+		case "index":
+			if a.Index == nil {
+				return nil, fmt.Errorf("responses: annotation type %q requires index", a.Type)
+			}
+		case "start_index":
+			if a.StartIndex == nil {
+				return nil, fmt.Errorf("responses: annotation type %q requires start_index", a.Type)
+			}
+		case "end_index":
+			if a.EndIndex == nil {
+				return nil, fmt.Errorf("responses: annotation type %q requires end_index", a.Type)
+			}
+		}
+	}
+	presence := make(map[string]struct{}, len(a.fieldPresence)+len(required))
+	for name := range a.fieldPresence {
+		presence[name] = struct{}{}
+	}
+	for _, name := range required {
+		presence[name] = struct{}{}
+	}
+	return marshalObjectPreservingFieldPresence(wire{
 		a.Type, a.FileID, a.Filename, a.ContainerID, a.Index,
 		a.URL, a.Title, a.StartIndex, a.EndIndex,
-	}, a.ExtraFields, annotationFields)
+	}, a.ExtraFields, annotationFields, presence, a.nullFields,
+		func(name string) (any, bool) {
+			switch name {
+			case "file_id":
+				return a.FileID, true
+			case "filename":
+				return a.Filename, true
+			case "container_id":
+				return a.ContainerID, true
+			case "index":
+				return a.Index, true
+			case "url":
+				return a.URL, true
+			case "title":
+				return a.Title, true
+			case "start_index":
+				return a.StartIndex, true
+			case "end_index":
+				return a.EndIndex, true
+			}
+			return nil, false
+		},
+	)
+}
+
+func annotationRequiredFields(annotationType string) []string {
+	switch annotationType {
+	case "file_citation":
+		return []string{"file_id", "filename", "index"}
+	case "url_citation":
+		return []string{"end_index", "start_index", "title", "url"}
+	case "container_file_citation":
+		return []string{"container_id", "end_index", "file_id", "filename", "start_index"}
+	case "file_path":
+		return []string{"file_id", "index"}
+	default:
+		return nil
+	}
 }
 
 func (a *Annotation) UnmarshalJSON(data []byte) error {
@@ -511,6 +613,9 @@ func (a *Annotation) UnmarshalJSON(data []byte) error {
 		ContainerID: decoded.ContainerID, Index: decoded.Index, URL: decoded.URL,
 		Title: decoded.Title, StartIndex: decoded.StartIndex, EndIndex: decoded.EndIndex,
 		ExtraFields: extra,
+	}
+	if err := captureFieldPresence(data, annotationFields, &a.fieldPresence, &a.nullFields); err != nil {
+		return err
 	}
 	return nil
 }

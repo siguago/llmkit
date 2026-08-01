@@ -169,6 +169,9 @@ type Prompt struct {
 	Version     string                     `json:"version,omitempty"`
 	Variables   map[string]json.RawMessage `json:"variables,omitempty"`
 	ExtraFields ExtraFields                `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type PromptCacheOptions struct {
@@ -187,6 +190,7 @@ var (
 	textConfigFields         = reservedFields("format", "verbosity")
 	textFormatFields         = reservedFields("type", "name", "description", "schema", "strict")
 	promptFields             = reservedFields("id", "version", "variables")
+	promptNullableFields     = reservedFields("version", "variables")
 	promptCacheOptionsFields = reservedFields("mode", "ttl")
 	streamOptionsFields      = reservedFields("include_obfuscation")
 )
@@ -300,6 +304,22 @@ func marshalObjectPreservingFieldPresence(
 	return marshalObjectWithExtra(fields, extra, known)
 }
 
+func marshalDiscriminatedObjectPreservingFieldPresence(
+	base any,
+	extra ExtraFields,
+	canonical string,
+	known, presence, nulls map[string]struct{},
+	fieldValue func(string) (any, bool),
+) ([]byte, error) {
+	encoded, err := marshalObjectPreservingFieldPresence(
+		base, extra, known, presence, nulls, fieldValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return marshalDiscriminatedObject(json.RawMessage(encoded), nil, canonical, known)
+}
+
 func captureFieldPresence(data []byte, known map[string]struct{}, presence, nulls *map[string]struct{}) error {
 	var fields ExtraFields
 	if err := json.Unmarshal(data, &fields); err != nil {
@@ -366,7 +386,18 @@ func (v *TextFormat) UnmarshalJSON(data []byte) error {
 
 func (v Prompt) MarshalJSON() ([]byte, error) {
 	type plain Prompt
-	return marshalObjectWithExtra(plain(v), v.ExtraFields, promptFields)
+	return marshalObjectPreservingFieldPresence(
+		plain(v), v.ExtraFields, promptFields, v.fieldPresence, v.nullFields,
+		func(name string) (any, bool) {
+			switch name {
+			case "version":
+				return v.Version, true
+			case "variables":
+				return v.Variables, true
+			}
+			return nil, false
+		},
+	)
 }
 
 func (v *Prompt) UnmarshalJSON(data []byte) error {
@@ -381,6 +412,9 @@ func (v *Prompt) UnmarshalJSON(data []byte) error {
 	}
 	*v = Prompt(decoded)
 	v.ExtraFields = extra
+	if err := captureFieldPresence(data, promptNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -439,9 +473,15 @@ type FunctionTool struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 	Strict      *bool           `json:"strict,omitempty"`
 	ExtraFields ExtraFields     `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
-var functionToolFields = reservedFields("type", "name", "description", "parameters", "strict")
+var (
+	functionToolFields         = reservedFields("type", "name", "description", "parameters", "strict")
+	functionToolNullableFields = reservedFields("description")
+)
 
 func NewFunctionTool(tool FunctionTool) Tool {
 	tool.Type = "function"
@@ -502,12 +542,18 @@ func (t FunctionTool) MarshalJSON() ([]byte, error) {
 	if err := checkDiscriminator(t.Type, "function", "FunctionTool"); err != nil {
 		return nil, err
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description,omitempty"`
 		Parameters  json.RawMessage `json:"parameters,omitempty"`
 		Strict      *bool           `json:"strict,omitempty"`
-	}{t.Name, t.Description, t.Parameters, t.Strict}, t.ExtraFields, "function", functionToolFields)
+	}{t.Name, t.Description, t.Parameters, t.Strict}, t.ExtraFields, "function", functionToolFields,
+		t.fieldPresence, t.nullFields, func(name string) (any, bool) {
+			if name == "description" {
+				return t.Description, true
+			}
+			return nil, false
+		})
 }
 
 func (t *FunctionTool) UnmarshalJSON(data []byte) error {
@@ -529,6 +575,9 @@ func (t *FunctionTool) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*t = FunctionTool{Type: wire.Type, Name: wire.Name, Description: wire.Description, Parameters: cloneRaw(wire.Parameters), Strict: wire.Strict, ExtraFields: extra}
+	if err := captureFieldPresence(data, functionToolNullableFields, &t.fieldPresence, &t.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 

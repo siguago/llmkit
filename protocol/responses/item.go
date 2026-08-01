@@ -34,7 +34,11 @@ type Item struct {
 type EasyInputMessage struct {
 	Role        string         `json:"role"`
 	Content     MessageContent `json:"content"`
+	Phase       string         `json:"phase,omitempty"`
 	ExtraFields ExtraFields    `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type Message struct {
@@ -45,6 +49,9 @@ type Message struct {
 	Phase       string         `json:"phase,omitempty"`
 	Content     MessageContent `json:"content"`
 	ExtraFields ExtraFields    `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type Reasoning struct {
@@ -55,6 +62,9 @@ type Reasoning struct {
 	Content          []ContentPart `json:"content,omitempty"`
 	EncryptedContent string        `json:"encrypted_content,omitempty"`
 	ExtraFields      ExtraFields   `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 type FunctionCall struct {
@@ -78,11 +88,14 @@ type FunctionCallOutput struct {
 	Caller      json.RawMessage `json:"caller,omitempty"`
 	CreatedBy   string          `json:"created_by,omitempty"`
 	ExtraFields ExtraFields     `json:"-"`
+
+	fieldPresence map[string]struct{} `json:"-"`
+	nullFields    map[string]struct{} `json:"-"`
 }
 
 var (
 	messageFields     = reservedFields("type", "id", "role", "status", "phase", "content")
-	easyMessageFields = reservedFields("type", "role", "content")
+	easyMessageFields = reservedFields("type", "role", "content", "phase")
 	reasoningFields   = reservedFields(
 		"type", "id", "status", "summary", "content", "encrypted_content",
 	)
@@ -92,6 +105,10 @@ var (
 	functionCallOutputFields = reservedFields(
 		"type", "id", "call_id", "output", "status", "caller", "created_by",
 	)
+	messageNullableFields            = reservedFields("phase")
+	easyMessageNullableFields        = reservedFields("phase")
+	reasoningNullableFields          = reservedFields("encrypted_content")
+	functionCallOutputNullableFields = reservedFields("id", "status")
 )
 
 func NewMessageItem(message Message) Item {
@@ -206,10 +223,17 @@ func (i *Item) UnmarshalJSON(data []byte) error {
 func (i Item) RawJSON() json.RawMessage { return cloneRaw(i.Raw) }
 
 func (v EasyInputMessage) MarshalJSON() ([]byte, error) {
-	return marshalObjectWithExtra(struct {
+	return marshalObjectPreservingFieldPresence(struct {
 		Role    string         `json:"role"`
 		Content MessageContent `json:"content"`
-	}{v.Role, v.Content}, v.ExtraFields, easyMessageFields)
+		Phase   string         `json:"phase,omitempty"`
+	}{v.Role, v.Content, v.Phase}, v.ExtraFields, easyMessageFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			if name == "phase" {
+				return v.Phase, true
+			}
+			return nil, false
+		})
 }
 
 func (v *EasyInputMessage) UnmarshalJSON(data []byte) error {
@@ -242,11 +266,20 @@ func (v *EasyInputMessage) UnmarshalJSON(data []byte) error {
 	if content.Text == nil && content.Parts == nil {
 		return fmt.Errorf("responses: easy input message content must be a string or content array")
 	}
+	var phase string
+	if phaseJSON, exists := fields["phase"]; exists && !bytes.Equal(bytes.TrimSpace(phaseJSON), []byte("null")) {
+		if err := json.Unmarshal(phaseJSON, &phase); err != nil {
+			return fmt.Errorf("responses: easy input message phase must be a string or null")
+		}
+	}
 	extra, err := decodeExtraFields(data, easyMessageFields)
 	if err != nil {
 		return err
 	}
-	*v = EasyInputMessage{Role: role, Content: content, ExtraFields: extra}
+	*v = EasyInputMessage{Role: role, Content: content, Phase: phase, ExtraFields: extra}
+	if err := captureFieldPresence(data, easyMessageNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -263,13 +296,19 @@ func (v Message) MarshalJSON() ([]byte, error) {
 	if err := checkDiscriminator(v.Type, ItemTypeMessage, "Message"); err != nil {
 		return nil, err
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		ID      string         `json:"id,omitempty"`
 		Role    string         `json:"role"`
 		Status  string         `json:"status,omitempty"`
 		Phase   string         `json:"phase,omitempty"`
 		Content MessageContent `json:"content"`
-	}{v.ID, v.Role, v.Status, v.Phase, v.Content}, v.ExtraFields, ItemTypeMessage, messageFields)
+	}{v.ID, v.Role, v.Status, v.Phase, v.Content}, v.ExtraFields, ItemTypeMessage, messageFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			if name == "phase" {
+				return v.Phase, true
+			}
+			return nil, false
+		})
 }
 
 func (v *Message) UnmarshalJSON(data []byte) error {
@@ -292,6 +331,9 @@ func (v *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = Message{Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, Phase: wire.Phase, Content: wire.Content, ExtraFields: extra}
+	if err := captureFieldPresence(data, messageNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -307,13 +349,19 @@ func (v Reasoning) MarshalJSON() ([]byte, error) {
 	if v.Content != nil {
 		content = &v.Content
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		ID               string         `json:"id,omitempty"`
 		Status           string         `json:"status,omitempty"`
 		Summary          []ContentPart  `json:"summary"`
 		Content          *[]ContentPart `json:"content,omitempty"`
 		EncryptedContent string         `json:"encrypted_content,omitempty"`
-	}{v.ID, v.Status, summary, content, v.EncryptedContent}, v.ExtraFields, ItemTypeReasoning, reasoningFields)
+	}{v.ID, v.Status, summary, content, v.EncryptedContent}, v.ExtraFields, ItemTypeReasoning, reasoningFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			if name == "encrypted_content" {
+				return v.EncryptedContent, true
+			}
+			return nil, false
+		})
 }
 
 func (v *Reasoning) UnmarshalJSON(data []byte) error {
@@ -336,6 +384,9 @@ func (v *Reasoning) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = Reasoning{Type: wire.Type, ID: wire.ID, Status: wire.Status, Summary: wire.Summary, Content: wire.Content, EncryptedContent: wire.EncryptedContent, ExtraFields: extra}
+	if err := captureFieldPresence(data, reasoningNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -383,14 +434,23 @@ func (v FunctionCallOutput) MarshalJSON() ([]byte, error) {
 	if err := checkDiscriminator(v.Type, ItemTypeFunctionCallOutput, "FunctionCallOutput"); err != nil {
 		return nil, err
 	}
-	return marshalDiscriminatedObject(struct {
+	return marshalDiscriminatedObjectPreservingFieldPresence(struct {
 		ID        string          `json:"id,omitempty"`
 		CallID    string          `json:"call_id"`
 		Output    FunctionOutput  `json:"output"`
 		Status    string          `json:"status,omitempty"`
 		Caller    json.RawMessage `json:"caller,omitempty"`
 		CreatedBy string          `json:"created_by,omitempty"`
-	}{v.ID, v.CallID, v.Output, v.Status, v.Caller, v.CreatedBy}, v.ExtraFields, ItemTypeFunctionCallOutput, functionCallOutputFields)
+	}{v.ID, v.CallID, v.Output, v.Status, v.Caller, v.CreatedBy}, v.ExtraFields, ItemTypeFunctionCallOutput, functionCallOutputFields,
+		v.fieldPresence, v.nullFields, func(name string) (any, bool) {
+			switch name {
+			case "id":
+				return v.ID, true
+			case "status":
+				return v.Status, true
+			}
+			return nil, false
+		})
 }
 
 func (v *FunctionCallOutput) UnmarshalJSON(data []byte) error {
@@ -414,5 +474,8 @@ func (v *FunctionCallOutput) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*v = FunctionCallOutput{Type: wire.Type, ID: wire.ID, CallID: wire.CallID, Output: wire.Output, Status: wire.Status, Caller: cloneRaw(wire.Caller), CreatedBy: wire.CreatedBy, ExtraFields: extra}
+	if err := captureFieldPresence(data, functionCallOutputNullableFields, &v.fieldPresence, &v.nullFields); err != nil {
+		return err
+	}
 	return nil
 }

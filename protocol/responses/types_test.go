@@ -293,6 +293,162 @@ func TestNestedResponseConfigNullablePresenceRoundTrip(t *testing.T) {
 	})
 }
 
+func TestTypedNullableFieldsPreserveWirePresence(t *testing.T) {
+	tests := []struct {
+		name       string
+		newTarget  func() any
+		absentWire string
+		nullWire   string
+		valueWire  string
+		edit       func(any)
+		editedWire string
+	}{
+		{
+			name:       "easy input message phase",
+			newTarget:  func() any { return new(EasyInputMessage) },
+			absentWire: `{"role":"assistant","content":"prior"}`,
+			nullWire:   `{"role":"assistant","content":"prior","phase":null}`,
+			valueWire:  `{"role":"assistant","content":"prior","phase":"commentary"}`,
+			edit:       func(target any) { target.(*EasyInputMessage).Phase = "final_answer" },
+			editedWire: `{"role":"assistant","content":"prior","phase":"final_answer"}`,
+		},
+		{
+			name:       "output message phase",
+			newTarget:  func() any { return new(Message) },
+			absentWire: `{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[]}`,
+			nullWire:   `{"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":null,"content":[]}`,
+			valueWire:  `{"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":"commentary","content":[]}`,
+			edit:       func(target any) { target.(*Message).Phase = "final_answer" },
+			editedWire: `{"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":"final_answer","content":[]}`,
+		},
+		{
+			name:       "reasoning encrypted content",
+			newTarget:  func() any { return new(Reasoning) },
+			absentWire: `{"type":"reasoning","id":"rs_1","summary":[],"content":[],"status":"completed"}`,
+			nullWire:   `{"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":null,"status":"completed"}`,
+			valueWire:  `{"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":"opaque","status":"completed"}`,
+			edit:       func(target any) { target.(*Reasoning).EncryptedContent = "replacement" },
+			editedWire: `{"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":"replacement","status":"completed"}`,
+		},
+		{
+			name:       "function call output identity",
+			newTarget:  func() any { return new(FunctionCallOutput) },
+			absentWire: `{"type":"function_call_output","call_id":"call_1","output":"ok"}`,
+			nullWire:   `{"type":"function_call_output","id":null,"call_id":"call_1","output":"ok","status":null}`,
+			valueWire:  `{"type":"function_call_output","id":"out_1","call_id":"call_1","output":"ok","status":"completed"}`,
+			edit: func(target any) {
+				value := target.(*FunctionCallOutput)
+				value.ID = "out_2"
+				value.Status = "completed"
+			},
+			editedWire: `{"type":"function_call_output","id":"out_2","call_id":"call_1","output":"ok","status":"completed"}`,
+		},
+		{
+			name:       "input image",
+			newTarget:  func() any { return new(InputImage) },
+			absentWire: `{"type":"input_image"}`,
+			nullWire:   `{"type":"input_image","detail":null,"file_id":null,"image_url":null}`,
+			valueWire:  `{"type":"input_image","detail":"auto","file_id":"file_1","image_url":"https://example.test/image.png"}`,
+			edit: func(target any) {
+				value := target.(*InputImage)
+				value.Detail = "high"
+				value.FileID = "file_2"
+				value.ImageURL = "https://example.test/replacement.png"
+			},
+			editedWire: `{"type":"input_image","detail":"high","file_id":"file_2","image_url":"https://example.test/replacement.png"}`,
+		},
+		{
+			name:       "input file",
+			newTarget:  func() any { return new(InputFile) },
+			absentWire: `{"type":"input_file"}`,
+			nullWire:   `{"type":"input_file","file_data":null,"file_id":null,"file_url":null,"filename":null}`,
+			valueWire:  `{"type":"input_file","file_data":"Zg==","file_id":"file_1","file_url":"https://example.test/file","filename":"a.txt"}`,
+			edit: func(target any) {
+				value := target.(*InputFile)
+				value.FileData = "YmFy"
+				value.FileID = "file_2"
+				value.FileURL = "https://example.test/replacement"
+				value.Filename = "b.txt"
+			},
+			editedWire: `{"type":"input_file","file_data":"YmFy","file_id":"file_2","file_url":"https://example.test/replacement","filename":"b.txt"}`,
+		},
+		{
+			name:       "prompt",
+			newTarget:  func() any { return new(Prompt) },
+			absentWire: `{"id":"pmpt_1"}`,
+			nullWire:   `{"id":"pmpt_1","version":null,"variables":null}`,
+			valueWire:  `{"id":"pmpt_1","version":"","variables":{}}`,
+			edit: func(target any) {
+				value := target.(*Prompt)
+				value.Version = "2"
+				value.Variables = map[string]json.RawMessage{"name": json.RawMessage(`"Ada"`)}
+			},
+			editedWire: `{"id":"pmpt_1","version":"2","variables":{"name":"Ada"}}`,
+		},
+		{
+			name:       "function tool description",
+			newTarget:  func() any { return new(FunctionTool) },
+			absentWire: `{"type":"function","name":"lookup","parameters":{},"strict":false}`,
+			nullWire:   `{"type":"function","name":"lookup","description":null,"parameters":{},"strict":false}`,
+			valueWire:  `{"type":"function","name":"lookup","description":"","parameters":{},"strict":false}`,
+			edit:       func(target any) { target.(*FunctionTool).Description = "Lookup a value" },
+			editedWire: `{"type":"function","name":"lookup","description":"Lookup a value","parameters":{},"strict":false}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, wire := range []string{test.absentWire, test.nullWire, test.valueWire} {
+				target := test.newTarget()
+				if err := json.Unmarshal([]byte(wire), target); err != nil {
+					t.Fatalf("Unmarshal %s: %v", wire, err)
+				}
+				encoded, err := json.Marshal(target)
+				if err != nil {
+					t.Fatalf("Marshal %s: %v", wire, err)
+				}
+				assertSemanticJSONEqual(t, []byte(wire), encoded)
+			}
+
+			target := test.newTarget()
+			if err := json.Unmarshal([]byte(test.nullWire), target); err != nil {
+				t.Fatal(err)
+			}
+			test.edit(target)
+			encoded, err := json.Marshal(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSemanticJSONEqual(t, []byte(test.editedWire), encoded)
+		})
+	}
+}
+
+func TestAnnotationRequiredZeroValuesRoundTrip(t *testing.T) {
+	fixtures := []string{
+		`{"type":"file_citation","file_id":"","filename":"","index":0}`,
+		`{"type":"url_citation","start_index":0,"end_index":0,"title":"","url":"https://example.test"}`,
+		`{"type":"container_file_citation","container_id":"","file_id":"","filename":"","start_index":0,"end_index":0}`,
+		`{"type":"file_path","file_id":"","index":0}`,
+		`{"type":"future_citation","title":"","index":0}`,
+	}
+	for _, fixture := range fixtures {
+		var annotation Annotation
+		if err := json.Unmarshal([]byte(fixture), &annotation); err != nil {
+			t.Fatalf("Unmarshal %s: %v", fixture, err)
+		}
+		encoded, err := json.Marshal(annotation)
+		if err != nil {
+			t.Fatalf("Marshal %s: %v", fixture, err)
+		}
+		assertSemanticJSONEqual(t, []byte(fixture), encoded)
+	}
+
+	if _, err := json.Marshal(Annotation{Type: "url_citation"}); err == nil {
+		t.Fatal("Marshal incomplete url_citation unexpectedly succeeded")
+	}
+}
+
 func TestKnownItemAndContentExtensionsRemainEditable(t *testing.T) {
 	wire := []byte(`{
   "type":"message","id":"msg_1","role":"assistant","status":"completed",

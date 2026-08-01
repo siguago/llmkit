@@ -268,9 +268,14 @@ func TestAccumulatorTerminalClonePreservesNestedNullableConfig(t *testing.T) {
   "type":"response.completed","sequence_number":1,
   "response":{
     "id":"resp_nullable","object":"response","created_at":1,"status":"completed",
-    "model":"gpt-test","output":[],"parallel_tool_calls":false,"store":false,
+    "model":"gpt-test","output":[
+      {"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":null,"content":[]},
+      {"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":null,"status":"completed"}
+    ],"parallel_tool_calls":false,"store":false,
     "reasoning":{"effort":null,"summary":null,"generate_summary":null},
-    "text":{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null}
+    "text":{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null},
+    "prompt":{"id":"pmpt_1","version":null,"variables":null},
+    "tools":[{"type":"function","name":"lookup","description":null,"parameters":{},"strict":false}]
   }
 }`)
 	var accumulator Accumulator
@@ -282,8 +287,11 @@ func TestAccumulatorTerminalClonePreservesNestedNullableConfig(t *testing.T) {
 		t.Fatalf("Marshal terminal clone: %v", err)
 	}
 	var nested struct {
-		Reasoning json.RawMessage `json:"reasoning"`
-		Text      json.RawMessage `json:"text"`
+		Reasoning json.RawMessage   `json:"reasoning"`
+		Text      json.RawMessage   `json:"text"`
+		Prompt    json.RawMessage   `json:"prompt"`
+		Output    []json.RawMessage `json:"output"`
+		Tools     []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(encoded, &nested); err != nil {
 		t.Fatalf("Unmarshal terminal clone: %v", err)
@@ -296,6 +304,39 @@ func TestAccumulatorTerminalClonePreservesNestedNullableConfig(t *testing.T) {
 		[]byte(`{"format":{"type":"json_schema","name":"answer","schema":{},"strict":null},"verbosity":null}`),
 		nested.Text,
 	)
+	assertSemanticJSONEqual(t,
+		[]byte(`{"id":"pmpt_1","version":null,"variables":null}`),
+		nested.Prompt,
+	)
+	if len(nested.Output) != 2 || len(nested.Tools) != 1 {
+		t.Fatalf("nested output/tools = %d/%d", len(nested.Output), len(nested.Tools))
+	}
+	assertSemanticJSONEqual(t,
+		[]byte(`{"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":null,"content":[]}`),
+		nested.Output[0],
+	)
+	assertSemanticJSONEqual(t,
+		[]byte(`{"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":null,"status":"completed"}`),
+		nested.Output[1],
+	)
+	assertSemanticJSONEqual(t,
+		[]byte(`{"type":"function","name":"lookup","description":null,"parameters":{},"strict":false}`),
+		nested.Tools[0],
+	)
+
+	continuation, err := json.Marshal(NewItemInput(accumulator.FinalResponse().Output...))
+	if err != nil {
+		t.Fatalf("Marshal continuation input: %v", err)
+	}
+	var continued []json.RawMessage
+	if err := json.Unmarshal(continuation, &continued); err != nil {
+		t.Fatalf("Unmarshal continuation input: %v", err)
+	}
+	if len(continued) != 2 {
+		t.Fatalf("continued items = %d", len(continued))
+	}
+	assertSemanticJSONEqual(t, nested.Output[0], continued[0])
+	assertSemanticJSONEqual(t, nested.Output[1], continued[1])
 }
 
 func TestAccumulatorPreservesFailedAndIncompleteSnapshots(t *testing.T) {

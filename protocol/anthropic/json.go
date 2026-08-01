@@ -46,6 +46,10 @@ func cloneExtras(extra ExtraFields) ExtraFields {
 }
 
 func setRawObjectField(raw json.RawMessage, key string, value json.RawMessage) (json.RawMessage, error) {
+	return setRawObjectFields(raw, map[string]json.RawMessage{key: value})
+}
+
+func setRawObjectFields(raw json.RawMessage, fields map[string]json.RawMessage) (json.RawMessage, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return nil, err
@@ -53,7 +57,12 @@ func setRawObjectField(raw json.RawMessage, key string, value json.RawMessage) (
 	if object == nil {
 		return nil, fmt.Errorf("expected JSON object")
 	}
-	object[key] = cloneRaw(value)
+	for key, value := range fields {
+		if !json.Valid(value) {
+			return nil, fmt.Errorf("field %q contains invalid JSON", key)
+		}
+		object[key] = cloneRaw(value)
+	}
 	return json.Marshal(object)
 }
 
@@ -88,6 +97,10 @@ func marshalWithExtra(known any, extra ExtraFields, reserved ...string) ([]byte,
 }
 
 func unmarshalWithExtra(data []byte, target any, reserved ...string) (ExtraFields, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("anthropic: expected JSON object")
+	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, err

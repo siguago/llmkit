@@ -229,6 +229,25 @@ func TestTokenCountRequestAndResponseRoundTrip(t *testing.T) {
 	assertJSONEqual(t, responseJSON, encoded)
 }
 
+func TestObjectDecodersRejectJSONNull(t *testing.T) {
+	tests := []struct {
+		name   string
+		target any
+	}{
+		{name: "message request", target: new(MessageRequest)},
+		{name: "message response", target: new(MessageResponse)},
+		{name: "token count request", target: new(TokenCountRequest)},
+		{name: "token count response", target: new(TokenCountResponse)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte("null"), test.target); err == nil {
+				t.Fatal("Unmarshal(null) unexpectedly succeeded")
+			}
+		})
+	}
+}
+
 func TestRequestOptionsAreCopiedAndNotJSON(t *testing.T) {
 	betas := []string{"feature-a", "feature-b"}
 	options := ApplyRequestOptions(WithVersion("2026-01-01"), WithBetas(betas...))

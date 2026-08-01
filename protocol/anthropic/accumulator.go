@@ -150,6 +150,19 @@ func (accumulator *Accumulator) addContentBlockStart(event *ContentBlockStartEve
 	if err != nil {
 		return fmt.Errorf("anthropic: clone content block %d: %w", event.Index, err)
 	}
+	// A streamed server-side fallback keeps the originally requested model in
+	// message_start. The fallback boundary identifies the model that actually
+	// produces the following output, and the final hop must win.
+	if block.Type == "fallback" && block.Raw != nil {
+		var fallback struct {
+			To struct {
+				Model string `json:"model"`
+			} `json:"to"`
+		}
+		if json.Unmarshal(block.Raw, &fallback) == nil && fallback.To.Model != "" {
+			accumulator.message.Model = fallback.To.Model
+		}
+	}
 	accumulator.blocks[event.Index] = block
 	accumulator.startedBlocks[event.Index] = true
 	return nil
@@ -218,16 +231,22 @@ func (accumulator *Accumulator) addContentBlockDelta(event *ContentBlockDeltaEve
 	default:
 		if event.Delta.Unknown != nil {
 			if block.Raw != nil && block.Type == "compaction" && event.Delta.Type == "compaction_delta" {
-				var delta struct {
-					Content json.RawMessage `json:"content"`
-				}
+				var delta map[string]json.RawMessage
 				if err := json.Unmarshal(event.Delta.Unknown, &delta); err != nil {
 					return fmt.Errorf("anthropic: decode compaction delta for block %d: %w", event.Index, err)
 				}
-				if delta.Content == nil || !json.Valid(delta.Content) {
+				content, hasContent := delta["content"]
+				if !hasContent || !json.Valid(content) {
 					return fmt.Errorf("anthropic: compaction delta for block %d has invalid content", event.Index)
 				}
-				updated, err := setRawObjectField(block.Raw, "content", delta.Content)
+				updates := map[string]json.RawMessage{"content": content}
+				if encryptedContent, exists := delta["encrypted_content"]; exists {
+					if !json.Valid(encryptedContent) {
+						return fmt.Errorf("anthropic: compaction delta for block %d has invalid encrypted_content", event.Index)
+					}
+					updates["encrypted_content"] = encryptedContent
+				}
+				updated, err := setRawObjectFields(block.Raw, updates)
 				if err != nil {
 					return fmt.Errorf("anthropic: update compaction block %d: %w", event.Index, err)
 				}
