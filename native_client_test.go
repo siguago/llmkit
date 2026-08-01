@@ -248,6 +248,17 @@ func TestWaitResponseValidationAndImmediateTerminal(t *testing.T) {
 	if err != nil || got != terminal {
 		t.Fatalf("terminal wait = (%p, %v), want original %p", got, err, terminal)
 	}
+
+	unsupportedClient := newTestClient(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("terminal wait reached the network")
+	})
+	if unsupportedClient.SupportsResponseRetrieval() {
+		t.Fatal("test client unexpectedly supports Responses retrieval")
+	}
+	got, err = unsupportedClient.WaitResponse(context.Background(), terminal, nil)
+	if err != nil || got != terminal {
+		t.Fatalf("terminal wait without retrieval = (%p, %v), want original %p", got, err, terminal)
+	}
 }
 
 func testResponseCreateRequest() *responsesapi.CreateRequest {

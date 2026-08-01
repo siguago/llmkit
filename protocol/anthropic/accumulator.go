@@ -24,16 +24,17 @@ var (
 type Accumulator struct {
 	mu sync.Mutex
 
-	message       *MessageResponse
-	requestID     string
-	blocks        map[int]ContentBlock
-	startedBlocks map[int]bool
-	stoppedBlocks map[int]bool
-	partialJSON   map[int][]byte
-	unknownEvents []json.RawMessage
-	terminal      bool
-	messageStop   bool
-	streamError   *APIError
+	message          *MessageResponse
+	requestID        string
+	blocks           map[int]ContentBlock
+	startedBlocks    map[int]bool
+	stoppedBlocks    map[int]bool
+	partialJSON      map[int][]byte
+	unknownEvents    []json.RawMessage
+	terminal         bool
+	seenMessageDelta bool
+	messageStop      bool
+	streamError      *APIError
 }
 
 func NewAccumulator() *Accumulator {
@@ -114,20 +115,14 @@ func (accumulator *Accumulator) addMessageStart(event *MessageStartEvent) error 
 	if accumulator.message != nil {
 		return fmt.Errorf("%w: duplicate message_start", ErrStreamState)
 	}
+	if len(event.Message.Content) != 0 {
+		return fmt.Errorf("%w: message_start content must be empty", ErrStreamState)
+	}
 	message, err := cloneMessageResponse(&event.Message)
 	if err != nil {
 		return fmt.Errorf("anthropic: clone message_start: %w", err)
 	}
 	message.RequestID = accumulator.requestID
-	for index, block := range message.Content {
-		cloned, err := cloneContentBlock(block)
-		if err != nil {
-			return fmt.Errorf("anthropic: clone initial content block %d: %w", index, err)
-		}
-		accumulator.blocks[index] = cloned
-		accumulator.startedBlocks[index] = true
-		accumulator.stoppedBlocks[index] = true
-	}
 	message.Content = nil
 	accumulator.message = message
 	return nil
@@ -139,6 +134,9 @@ func (accumulator *Accumulator) addContentBlockStart(event *ContentBlockStartEve
 	}
 	if accumulator.message == nil {
 		return fmt.Errorf("%w: content_block_start before message_start", ErrStreamState)
+	}
+	if accumulator.seenMessageDelta {
+		return fmt.Errorf("%w: content_block_start after message_delta", ErrStreamState)
 	}
 	if event.Index < 0 {
 		return fmt.Errorf("%w: negative content block index %d", ErrStreamState, event.Index)
@@ -171,6 +169,9 @@ func (accumulator *Accumulator) addContentBlockStart(event *ContentBlockStartEve
 func (accumulator *Accumulator) addContentBlockDelta(event *ContentBlockDeltaEvent) error {
 	if event == nil {
 		return missingEventPayload(EventTypeContentBlockDelta)
+	}
+	if accumulator.seenMessageDelta {
+		return fmt.Errorf("%w: content_block_delta after message_delta", ErrStreamState)
 	}
 	block, ok := accumulator.blocks[event.Index]
 	if !ok || !accumulator.startedBlocks[event.Index] {
@@ -263,6 +264,9 @@ func (accumulator *Accumulator) addContentBlockStop(event *ContentBlockStopEvent
 	if event == nil {
 		return missingEventPayload(EventTypeContentBlockStop)
 	}
+	if accumulator.seenMessageDelta {
+		return fmt.Errorf("%w: content_block_stop after message_delta", ErrStreamState)
+	}
 	block, ok := accumulator.blocks[event.Index]
 	if !ok || !accumulator.startedBlocks[event.Index] {
 		return fmt.Errorf("%w: stop for unstarted content block %d", ErrStreamState, event.Index)
@@ -302,6 +306,11 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 	}
 	if accumulator.message == nil {
 		return fmt.Errorf("%w: message_delta before message_start", ErrStreamState)
+	}
+	for index := range accumulator.startedBlocks {
+		if !accumulator.stoppedBlocks[index] {
+			return fmt.Errorf("%w: message_delta before content block %d stopped", ErrStreamState, index)
+		}
 	}
 	accumulator.message.StopReason = cloneStopReason(event.Delta.StopReason)
 	accumulator.message.StopSequence = cloneString(event.Delta.StopSequence)
@@ -371,6 +380,7 @@ func (accumulator *Accumulator) addMessageDelta(event *MessageDeltaEvent) error 
 			}
 		}
 	}
+	accumulator.seenMessageDelta = true
 	return nil
 }
 
@@ -390,6 +400,9 @@ func (accumulator *Accumulator) addMessageStop(event *MessageStopEvent) error {
 		if !accumulator.startedBlocks[index] {
 			return fmt.Errorf("%w: missing content block index %d", ErrStreamState, index)
 		}
+	}
+	if !accumulator.seenMessageDelta {
+		return fmt.Errorf("%w: message_stop before message_delta", ErrStreamState)
 	}
 	accumulator.messageStop = true
 	accumulator.terminal = true

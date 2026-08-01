@@ -418,6 +418,35 @@ func TestNativeResponsesHTTPError_PreservesEnvelopeMetadataAndRetryAfter(t *test
 	}
 }
 
+func TestNativeResponsesHTTPError_ClassifiesNonJSONBodyFromStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/html")
+		w.Header().Set("x-request-id", "req_gateway_413")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = io.WriteString(w, "request too large")
+	}))
+	defer server.Close()
+
+	_, err := NewWithBaseURL(server.URL).CreateResponse(
+		context.Background(), "key", newResponsesCreateRequest(),
+	)
+	if err == nil {
+		t.Fatal("expected API error")
+	}
+	var providerErr *provider.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("errors.As(*ProviderError) failed: %T %v", err, err)
+	}
+	if providerErr.StatusCode != http.StatusRequestEntityTooLarge ||
+		providerErr.RequestID != "req_gateway_413" ||
+		!strings.Contains(providerErr.Message, "request too large") {
+		t.Fatalf("ProviderError = %+v", providerErr)
+	}
+	if got := provider.ErrorCategoryOf(err); got != provider.ErrorCategoryInvalidRequest {
+		t.Fatalf("ErrorCategoryOf = %q, want %q", got, provider.ErrorCategoryInvalidRequest)
+	}
+}
+
 func TestNativeResponsesAPIErrorPreservesHTTPMetadataWhenBodyReadFails(t *testing.T) {
 	bodyErr := io.ErrUnexpectedEOF
 	payload := []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}`)

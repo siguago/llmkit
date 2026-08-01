@@ -352,6 +352,7 @@ func TestAccumulatorCompactionDeltaPreservesExplicitNullMetadata(t *testing.T) {
 	applyFixture(t, accumulator, `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":"before","encrypted_content":"before"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":null,"encrypted_content":null}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
 	applyFixture(t, accumulator, `{"type":"message_stop"}`)
 
 	message, err := accumulator.Result()
@@ -381,6 +382,7 @@ func TestAccumulatorFallbackRelabelsModelUsingFinalHop(t *testing.T) {
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":2}`)
 	applyFixture(t, accumulator, `{"type":"content_block_start","index":3,"content_block":{"type":"text","text":"from final model"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":3}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}`)
 	applyFixture(t, accumulator, `{"type":"message_stop"}`)
 
 	message, err := accumulator.Result()
@@ -429,6 +431,7 @@ func TestAccumulatorAppliesInputJSONDeltaToUnknownServerToolBlock(t *testing.T) 
 	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"claude shannon\"}"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":0}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
 	applyFixture(t, accumulator, `{"type":"message_stop"}`)
 
 	message, err := accumulator.Result()
@@ -480,10 +483,73 @@ func TestAccumulatorRejectsGappedBlockIndexes(t *testing.T) {
 	applyFixture(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"x"}}`)
 	applyFixture(t, accumulator, `{"type":"content_block_stop","index":1}`)
+	applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`)
 	event, _ := ParseEvent([]byte(`{"type":"message_stop"}`))
 	if err := accumulator.Add(event); !errors.Is(err, ErrStreamState) {
 		t.Fatalf("Add error = %v, want ErrStreamState", err)
 	}
+}
+
+func TestAccumulatorEnforcesMessageStreamPhases(t *testing.T) {
+	const (
+		emptyStart   = `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`
+		finalDelta   = `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`
+		messageStop  = `{"type":"message_stop"}`
+		textBlock    = `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+		textBlockEnd = `{"type":"content_block_stop","index":0}`
+	)
+
+	t.Run("message_start content must be empty", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		err := applyFixtureError(t, accumulator, `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"already complete"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`)
+		if !errors.Is(err, ErrStreamState) {
+			t.Fatalf("Add error = %v, want ErrStreamState", err)
+		}
+	})
+
+	t.Run("message_stop requires message_delta", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		err := applyFixtureError(t, accumulator, messageStop)
+		if !errors.Is(err, ErrStreamState) {
+			t.Fatalf("Add error = %v, want ErrStreamState", err)
+		}
+	})
+
+	t.Run("message_delta waits for content blocks", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, textBlock)
+		err := applyFixtureError(t, accumulator, finalDelta)
+		if !errors.Is(err, ErrStreamState) {
+			t.Fatalf("Add error = %v, want ErrStreamState", err)
+		}
+	})
+
+	t.Run("content cannot restart after message_delta", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, finalDelta)
+		err := applyFixtureError(t, accumulator, textBlock)
+		if !errors.Is(err, ErrStreamState) {
+			t.Fatalf("Add error = %v, want ErrStreamState", err)
+		}
+	})
+
+	t.Run("multiple message_delta events are valid", func(t *testing.T) {
+		accumulator := NewAccumulator()
+		applyFixture(t, accumulator, emptyStart)
+		applyFixture(t, accumulator, textBlock)
+		applyFixture(t, accumulator, textBlockEnd)
+		applyFixture(t, accumulator, finalDelta)
+		applyFixture(t, accumulator, `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":2}}`)
+		applyFixture(t, accumulator, messageStop)
+		message, err := accumulator.Result()
+		if err != nil || message.StopReason == nil || *message.StopReason != StopReasonMaxTokens ||
+			message.Usage.OutputTokens != 2 {
+			t.Fatalf("Result = %#v, %v", message, err)
+		}
+	})
 }
 
 func applyFixture(t *testing.T, accumulator *Accumulator, fixture string) {
@@ -495,6 +561,15 @@ func applyFixture(t *testing.T, accumulator *Accumulator, fixture string) {
 	if err := accumulator.Add(event); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+}
+
+func applyFixtureError(t *testing.T, accumulator *Accumulator, fixture string) error {
+	t.Helper()
+	event, err := ParseEvent([]byte(fixture))
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	return accumulator.Add(event)
 }
 
 type scriptedStream struct {

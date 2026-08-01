@@ -185,11 +185,11 @@ func (c *Client) WaitResponse(ctx context.Context, response *responsesapi.Respon
 	if response.ID == "" {
 		return nil, fmt.Errorf("llmkit: Response.ID is required")
 	}
-	if !c.SupportsResponseRetrieval() {
-		return nil, unsupportedf(c.name, "OpenAI Responses retrieval")
-	}
 	if isTerminalResponseStatus(response.Status) {
 		return response, nil
+	}
+	if !c.SupportsResponseRetrieval() {
+		return nil, unsupportedf(c.name, "OpenAI Responses retrieval")
 	}
 
 	interval := time.Second

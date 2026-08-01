@@ -282,7 +282,9 @@ func decodeResponsesAPIError(resp *http.Response, payload []byte) error {
 		Error responsesapi.Error `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return providerErr
+		return provider.WithErrorMetadata(
+			providerErr, "", responsesErrorCategory(resp.StatusCode, ""),
+		)
 	}
 	code := envelope.Error.Code
 	if code == "" {
