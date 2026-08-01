@@ -9,12 +9,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The whitespace check compares the whole PR with its base, not just
           # the final commit or the post-tidy working tree.
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
           # No go.sum: this module has zero third-party dependencies.
@@ -127,7 +127,7 @@ jobs:
       # failing input can be added to the seed corpus rather than lost.
       - name: Upload fuzz failures
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers
           path: |
@@ -155,6 +155,14 @@ jobs:
   # Deliberately just build + test: this job answers "does the declared floor
   # still hold", not "is everything green". The thorough checks — race, fuzz,
   # integration vet — belong on the primary toolchain above.
+  #
+  # This only became a real gate with setup-go v6, which sets GOTOOLCHAIN=local.
+  # Before that the default GOTOOLCHAIN=auto meant raising go.mod to, say, 1.25
+  # would make Go silently download 1.25 and build with it — the job stayed
+  # green while the floor it exists to defend had already moved. Now the same
+  # edit fails here with "go.mod requires go >= 1.25 (running go 1.22.x;
+  # GOTOOLCHAIN=local)", which is the whole point. Do not pin setup-go back
+  # below v6 without replacing this guarantee.
   min-go-version:
     runs-on: ubuntu-latest
     env:
@@ -162,8 +170,8 @@ jobs:
       # build the module, not that Go 1.22 can download a newer compiler.
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.22'
           cache: false
