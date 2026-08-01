@@ -9,13 +9,13 @@
 //	if err != nil {
 //		return err
 //	}
-//	text, err := client.Say(ctx, "deepseek-chat", "Explain CAP theorem in one paragraph.")
+//	text, err := client.Say(ctx, "deepseek-v4-flash", "Explain CAP theorem in one paragraph.")
 //
 // The unified Chat surface is OpenAI-compatible, so anything you already know
 // about chat completions applies:
 //
 //	resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-//		Model:    "deepseek-chat",
+//		Model:    "deepseek-v4-flash",
 //		Messages: []llmkit.Message{llmkit.User("Hello")},
 //	})
 //

@@ -130,6 +130,33 @@ func (c *Client) Models(ctx context.Context) ([]RemoteModel, error) {
 	return models, translateUnsupported(err)
 }
 
+// ModelsWithTaskTypes lists models and, when the adapter can classify its
+// mixed catalog reliably, returns task names keyed by RemoteModel.ModelID.
+//
+// Adapters that only implement ModelLister remain fully supported: this method
+// returns the ordinary model list with a nil task map. A missing map key means
+// unknown, not chat.
+func (c *Client) ModelsWithTaskTypes(ctx context.Context) ([]RemoteModel, map[string][]string, error) {
+	lister, ok := c.provider.(provider.ModelTaskLister)
+	if !ok {
+		models, err := c.Models(ctx)
+		return models, nil, err
+	}
+
+	ctx, cancel := c.prepare(ctx)
+	defer cancel()
+
+	type result struct {
+		models    []RemoteModel
+		taskTypes map[string][]string
+	}
+	got, err := doValue(ctx, c.cfg.retry, func() (result, error) {
+		models, taskTypes, err := lister.ListModelsWithTaskTypes(ctx, c.cfg.apiKey)
+		return result{models: models, taskTypes: taskTypes}, err
+	})
+	return got.models, got.taskTypes, translateUnsupported(err)
+}
+
 // SupportsChat reports whether Chat / ChatStream / Say / StreamText work on this
 // provider.
 //
@@ -146,6 +173,13 @@ func (c *Client) SupportsChat() bool {
 // SupportsModels reports whether Models is available on this provider.
 func (c *Client) SupportsModels() bool {
 	_, ok := c.provider.(provider.ModelLister)
+	return ok
+}
+
+// SupportsModelTaskTypes reports whether ModelsWithTaskTypes can return
+// adapter-provided per-model classifications instead of a nil fallback map.
+func (c *Client) SupportsModelTaskTypes() bool {
+	_, ok := c.provider.(provider.ModelTaskLister)
 	return ok
 }
 

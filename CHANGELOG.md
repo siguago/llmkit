@@ -27,6 +27,48 @@
 - 增加共享 SSE framing、两套原生 union/event/accumulator、transport、资源路径、能力探测、重试与终态语义的离线测试和 fuzz 入口。
 - CI 在声明的 Go 1.22 下使用 `GOTOOLCHAIN=local`，防止静默下载更新工具链掩盖最低版本回归；零依赖检查同时验证 module graph、`go mod tidy` 后的差异和不存在 `go.sum`。
 
+### 修复
+
+- Anthropic 流累计在服务端 fallback 后会按最后一次跳转更新最终模型；compaction delta 同时保留续轮所需的 `encrypted_content`。对象型 DTO 不再把顶层 `null` 当作成功的零值响应。
+- Responses 已建模 DTO 会保留「字段缺失、显式 `null`、空值」的线格式差异，覆盖 assistant `phase`、reasoning 加密内容、prompt、图片/文件输入与函数工具等；citation 的必填空字符串和零索引也不会在重编码或流终态克隆时丢失。type-omitted easy assistant message 新增正式 `Phase` 字段，便于多轮续接时原样回传。
+
+## v0.4.0 — 2026-08-01
+
+一项新能力：逐模型任务发现，让混合目录里的对话 / 向量 / 图片 / 视频模型第一次能被区分开。**没有破坏性变更，`RemoteModel` 一个字节都没动 —— 升级不需要改任何代码。**
+
+### 从 v0.3.1 升级
+
+**没有必须做的迁移。** 下表第一行不是本次升级造成的，但它会实实在在地咬人，所以放在这里。
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| 硬编码 `deepseek-chat` / `deepseek-reasoner` | **和升级无关地失败** —— DeepSeek 官方已于 2026-07-24 停用这两个 ID，留在 v0.3.1 也一样调不通 | 换成 `deepseek-v4-flash` / `deepseek-v4-pro` |
+| 遍历 `Models()` / `ListModels()` | 不受影响 —— 上游请求、过滤结果、顺序、空目录的 nil 语义都没变 | — |
+| 用 `RemoteModel` 当 map key、比较、或不带字段名构造 | 不受影响 —— 仍是原来的三个字段 | — |
+| 想按任务筛选模型 | 可选采用新增的 `ModelsWithTaskTypes()` | 缺 map key 表示**未知**，不能当成 chat |
+
+Gemini、Vercel、OpenRouter 的混合媒体目录扩展**只发生在新方法里**：`Models()` 看到的东西和 v0.3.1 完全一致，升级不会让既有调用方突然多出一批不能用的模型。
+
+### 新增
+
+**新增可选的逐模型任务发现接口，且保持 `provider.RemoteModel` 完全不变。** `provider.ModelTaskLister` 在原 `ModelLister` 上增加 `ListModelsWithTaskTypes`，以独立的 `map[model_id][]task_type` 返回可靠分类；未知模型不写入 map，不能被默认为 chat。根包同步导出 `ModelTaskLister`、`Client.ModelsWithTaskTypes` 与 `Client.SupportsModelTaskTypes`。旧 adapter 自动回退为普通模型列表加 nil map。
+
+任务名与网关 binding 对齐：`chat`、`embedding`、`image.generate`、`image.edit`、`video.generate`，并在根包与 `provider` 包通过 `RemoteModelTask*` 常量公开。Anthropic、DeepSeek、Gemini、Vercel、OpenRouter 实现任务发现：Anthropic 的 `/v1/models` 至今只出对话模型，因此按 `claude-` 前缀标成 chat，非 `claude-` 前缀的条目保持未知；DeepSeek 的目录同样没有能力字段，但混着退役别名和非对话型号，只能走白名单，只对当前 V4 Chat 模型分类，退役别名和未来 ID 保持未知。Gemini 只分类已经核验过请求/响应契约的文本、embedding、generateContent 图片和 Veo 型号，明确排除已停用型号与 TTS / Live / native-audio / Lyria / Imagen，并让未来代际保持未知；Vercel 按目录 `type` 区分 language / embedding / image；OpenRouter 使用 `architecture.output_modalities`，过滤 embeddings / rerank / speech / transcription / audio 等未实现端点，并只给能走现有 chat/completions 路由的 text+image 型号声明图片生成，纯 image 型号在专用 `/images` 路由实现前保持未知。通用 compat 目录缺少可靠类型元数据，继续只实现旧 `ModelLister`。
+
+这是纯 additive API 变更：`RemoteModel` 仍是原来的三个字段，JSON 形状、可比较性、map key 用法和不带字段名的 composite literal 均不受影响；旧 `ListModels` / `Client.Models` 的历史过滤结果、顺序以及空目录的 nil/非 nil 语义保持不变。Gemini 的 Veo、Vercel 的扩展图片目录和 OpenRouter 的 `output_modalities=all` 只由新 `ListModelsWithTaskTypes` / `Client.ModelsWithTaskTypes` 暴露，避免升级后悄悄改变既有调用方看到的目录。唯一的旧请求编码修复是 Gemini 分页：不透明 `pageToken` 现在通过 query encoder 转义，带 `+`、`/`、`=` 的合法 token 不再被破坏。
+
+`llmkit-probe` 新增「模型任务」探测，用真实目录跑一次分类并列出**未分类的模型**。分类靠的是硬编码白名单（Gemini、DeepSeek）或上游元数据字段（Vercel、OpenRouter），两者过时都不会报错、不会让离线测试变红 —— 厂商发新模型时，它只是安静地变成未知。未分类清单就是白名单该更新的信号；整个目录都未分类则判定为失败。
+
+DeepSeek 的运行示例、probe 和 integration 默认模型同步更新为当前 `deepseek-v4-flash`（推理示例使用 `deepseek-v4-pro`）。官方已于 2026-07-24 停用 `deepseek-chat` / `deepseek-reasoner`；旧 ID 只留在专门验证历史请求协议的离线测试中，远程目录即使返回它们也不会自动分类。
+
+### 已知问题
+
+- **Gemini 和 DeepSeek 的分类白名单会随厂商发新模型而过时。** 硬编码模型 ID 是这两家目录唯一可靠的判据（都没有逐模型能力字段），代价是新模型上线后会先显示为「未知」。**失效方向是安全的** —— 过时导致漏分类，不会导致误分类成 chat 然后在 `ChatCompletion` 里丢掉媒体输出。`llmkit-probe` 的「模型任务」探测就是用来发现这种漂移的：它列出未分类模型，整个目录都未分类则判失败。
+- **OpenRouter 的纯 `image` 输出型号不声明图片生成。** 本 adapter 的 `GenerateImage` 走 chat/completions + `modalities`，只有 `text+image` 型号能这么用；纯 image 型号需要 OpenRouter 专用的 `/images` 路由，尚未实现。这些型号在目录里可见但保持未分类 —— 不承诺一条会调错端点的路由。
+- **`ModelsWithTaskTypes` 在多数 provider 上返回 `nil` task map。** 通用 OpenAI 兼容的 `/v1/models` 只给 ID，没有能力字段，所以 compat 层继续只实现旧 `ModelLister`。目前有逐模型分类的是 anthropic、deepseek、gemini、openrouter、vercel 五家；其余照常返回模型列表，只是 map 为空。用 `SupportsModelTaskTypes()` 可以先探测。
+
+---
+
 ## v0.3.1 — 2026-08-01
 
 一个性能修复。**没有破坏性变更，也没有 API 变化 —— 升级不需要改任何代码。**

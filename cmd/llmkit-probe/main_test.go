@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"image/color"
 	"os"
 	"path/filepath"
@@ -9,7 +10,104 @@ import (
 	"testing"
 
 	"github.com/siguago/llmkit"
+	"github.com/siguago/llmkit/provider"
 )
+
+// fakeTaskLister stands in for an adapter whose catalog carries per-model task
+// metadata, so the probe can be exercised without a live vendor catalog.
+type fakeTaskLister struct {
+	provider.Provider
+	models []provider.RemoteModel
+	tasks  map[string][]string
+}
+
+func (f *fakeTaskLister) Name() string { return "fake" }
+
+func (f *fakeTaskLister) ListModels(context.Context, string) ([]provider.RemoteModel, error) {
+	return f.models, nil
+}
+
+func (f *fakeTaskLister) ListModelsWithTaskTypes(context.Context, string) ([]provider.RemoteModel, map[string][]string, error) {
+	return f.models, f.tasks, nil
+}
+
+func taskProbeClient(t *testing.T, p provider.Provider) *llmkit.Client {
+	t.Helper()
+	c, err := llmkit.Wrap(p, llmkit.WithAPIKey("k"))
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	return c
+}
+
+// The unclassified list is the reason this probe exists: an allowlist that has
+// gone stale produces no error and breaks no offline test, so the probe has to
+// name the models it could not classify.
+func TestProbeModelTaskTypes_NamesUnclassifiedModels(t *testing.T) {
+	c := taskProbeClient(t, &fakeTaskLister{
+		models: []provider.RemoteModel{
+			{ModelID: "known-chat"},
+			{ModelID: "known-image"},
+			{ModelID: "brand-new-model"},
+		},
+		tasks: map[string][]string{
+			"known-chat": {llmkit.RemoteModelTaskChat},
+			// The widest label, and the one a fixed-width pad used to clip.
+			"known-image": {llmkit.RemoteModelTaskImageGenerate, llmkit.RemoteModelTaskImageEdit},
+		},
+	})
+
+	res := probeModelTaskTypes(context.Background(), c)
+	if res.outcome != pass {
+		t.Fatalf("outcome = %v, want pass — a partially classified catalog is normal", res.outcome)
+	}
+	if !strings.Contains(res.detail, "2/3 已分类") || !strings.Contains(res.detail, "1 未知") {
+		t.Errorf("detail = %q, want the classified/unknown counts", res.detail)
+	}
+	if !strings.Contains(res.body, "brand-new-model") {
+		t.Errorf("body must name the unclassified model, got:\n%s", res.body)
+	}
+	// Truncating the task name would hide which route the model was bound to.
+	wantLabel := llmkit.RemoteModelTaskImageGenerate + " + " + llmkit.RemoteModelTaskImageEdit
+	if !strings.Contains(res.body, wantLabel) {
+		t.Errorf("body must show the full task label %q, got:\n%s", wantLabel, res.body)
+	}
+}
+
+// Nothing classified means the allowlist no longer matches anything the vendor
+// serves — the exact silent drift this probe is here to surface.
+func TestProbeModelTaskTypes_FailsWhenNothingClassified(t *testing.T) {
+	c := taskProbeClient(t, &fakeTaskLister{
+		models: []provider.RemoteModel{{ModelID: "a"}, {ModelID: "b"}},
+	})
+
+	res := probeModelTaskTypes(context.Background(), c)
+	if res.outcome != fail {
+		t.Fatalf("outcome = %v, want fail when the whole catalog is unclassified", res.outcome)
+	}
+	if !strings.Contains(res.detail, "全部未分类") {
+		t.Errorf("detail = %q, want it to say the catalog is entirely unclassified", res.detail)
+	}
+}
+
+// An adapter that only implements ModelLister is not broken, so the probe must
+// report not-applicable rather than a failure.
+func TestProbeModelTaskTypes_NotApplicableWithoutCapability(t *testing.T) {
+	c := taskProbeClient(t, &fakeLegacyLister{})
+
+	res := probeModelTaskTypes(context.Background(), c)
+	if res.outcome != notApplicable {
+		t.Fatalf("outcome = %v, want notApplicable for a plain ModelLister", res.outcome)
+	}
+}
+
+type fakeLegacyLister struct{ provider.Provider }
+
+func (f *fakeLegacyLister) Name() string { return "fake-legacy" }
+
+func (f *fakeLegacyLister) ListModels(context.Context, string) ([]provider.RemoteModel, error) {
+	return []provider.RemoteModel{{ModelID: "a"}}, nil
+}
 
 // `llmkit-probe deepseek -key sk-...` is the most natural invocation, and Go's
 // flag package stops parsing at the first positional argument — so this split

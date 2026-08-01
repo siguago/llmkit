@@ -1,9 +1,11 @@
 package deepseek
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -54,6 +56,43 @@ func TestBuildRequest_MapsOpenAIishFieldsToDeepSeek(t *testing.T) {
 	}
 	if got := msgs[1]["prefix"]; got != true {
 		t.Fatalf("assistant prefix missing: %#v", msgs[1])
+	}
+}
+
+func TestListModels_ClassifiesOnlyDocumentedChatIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"deepseek-v4-flash"},
+			{"id":"deepseek-v4-pro"},
+			{"id":"deepseek-chat"},
+			{"id":"deepseek-reasoner"},
+			{"id":"deepseek-coder"},
+			{"id":"deepseek-ocr"},
+			{"id":"future-model"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	models, taskTypes, err := New(srv.URL).ListModelsWithTaskTypes(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 7 {
+		t.Fatalf("models = %+v, want every catalog entry preserved", models)
+	}
+	for _, modelID := range []string{"deepseek-v4-flash", "deepseek-v4-pro"} {
+		if got := strings.Join(taskTypes[modelID], ","); got != provider.RemoteModelTaskChat {
+			t.Errorf("%s task_types = %q, want %q", modelID, got, provider.RemoteModelTaskChat)
+		}
+	}
+	for _, modelID := range []string{
+		"deepseek-chat", "deepseek-reasoner", "deepseek-coder",
+		"deepseek-ocr", "future-model",
+	} {
+		if _, ok := taskTypes[modelID]; ok {
+			t.Errorf("retired/unknown/non-chat model %s must remain unclassified", modelID)
+		}
 	}
 }
 

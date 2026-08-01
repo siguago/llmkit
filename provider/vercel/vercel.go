@@ -87,8 +87,8 @@ func normalizeBaseURL(raw string) string {
 }
 
 // vercelModelEntry mirrors the fields we care about from Vercel's /v1/models
-// response. Vercel returns much more (pricing, tags, modalities) — we leave
-// pricing to the seed pipeline and only extract what RemoteModel can carry.
+// response. Vercel returns much more (tags, modalities) — pricing is decoded
+// only to preserve the historical ListModels filter and is never exported.
 type vercelModelEntry struct {
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
@@ -97,21 +97,70 @@ type vercelModelEntry struct {
 	Pricing       *vercelPricing `json:"pricing"`
 }
 
-// vercelPricing extracts just enough pricing shape for ListModels to decide
-// dispatch suitability. Full pricing data lives in cmd/fetch-vercel-pricing.
+// vercelPricing is retained for the legacy ListModels filter. Historically it
+// exposed token-billed image models that Vercel can serve through chat while
+// hiding per-image-billed entries that the old gateway could not bill safely.
 type vercelPricing struct {
-	Input  string `json:"input"`  // per-token USD (string-encoded decimal)
-	Output string `json:"output"` // per-token USD
-	Image  string `json:"image"`  // per-image USD (set on per-image-billed image models)
+	Input  string `json:"input"`
+	Output string `json:"output"`
+	Image  string `json:"image"`
 }
 
 // ListModels overrides compat's default to pull Vercel's richer per-model
-// metadata. Filters to type=language so the chat /v1/models response doesn't
-// surface embedding / image / video models the chat route can't dispatch to.
+// metadata. Its optional task-listing extension classifies the mixed language,
+// embedding and image catalog without changing RemoteModel.
 // Vercel's endpoint is public, but we still send the Bearer header when there is
 // one — Vercel tolerates redundant auth and it keeps the request shape uniform
 // with other providers' ListModels paths.
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
+	entries, err := p.listRemoteModels(ctx, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]provider.RemoteModel, 0, len(entries))
+	for _, entry := range entries {
+		if vercelModelImportable(entry) {
+			models = append(models, entry.remoteModel())
+		}
+	}
+	return models, nil
+}
+
+// ListModelsWithTaskTypes returns Vercel's mixed catalog with classifications
+// derived from the upstream type field. Untyped legacy entries remain listed
+// but deliberately have no task-map entry.
+func (p *Provider) ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
+	entries, err := p.listRemoteModels(ctx, apiKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	models := make([]provider.RemoteModel, 0, len(entries))
+	taskTypes := make(map[string][]string)
+	for _, entry := range entries {
+		if !vercelRichModelImportable(entry) {
+			continue
+		}
+		models = append(models, entry.remoteModel())
+		if tasks := vercelModelTaskTypes(entry); len(tasks) > 0 {
+			taskTypes[entry.ID] = tasks
+		}
+	}
+	return models, taskTypes, nil
+}
+
+func (m vercelModelEntry) remoteModel() provider.RemoteModel {
+	display := m.Name
+	if display == "" {
+		display = m.ID
+	}
+	return provider.RemoteModel{
+		ModelID:       m.ID,
+		DisplayName:   display,
+		ContextWindow: m.ContextWindow,
+	}
+}
+
+func (p *Provider) listRemoteModels(ctx context.Context, apiKey string) ([]vercelModelEntry, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -138,53 +187,33 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-
-	models := make([]provider.RemoteModel, 0, len(result.Data))
-	for _, m := range result.Data {
-		// Surface models the gateway can actually dispatch:
-		//   - language → /v1/chat/completions
-		//   - embedding → /v1/embeddings
-		//   - image (token-billed only, e.g. openai/gpt-image-2) → /v1/chat/completions
-		//     with modalities:["image"]. compat already passes this through.
-		//
-		// Skipped:
-		//   - image (per-image-billed, e.g. bfl/flux-*): Vercel routes them via
-		//     chat/completions too but bills per-image; binding would need
-		//     billing_unit=per_image which requires the seed pipeline to set
-		//     endpoint_kind=images, and we have no /v1/images dispatch on
-		//     vercel yet (Vercel has no separate /v1/images endpoint —
-		//     everything funnels through chat/completions). Importing them
-		//     here would create chat bindings with zero token prices → free.
-		//   - video / reranking: no dispatch path at all.
-		//
-		// After import, the seed pipeline writes endpoint_kind/task_types so
-		// embedding bindings accept /v1/embeddings calls; token-billed image
-		// bindings stay as chat bindings (the default).
-		if !vercelModelImportable(m) {
-			continue
-		}
-		display := m.Name
-		if display == "" {
-			display = m.ID
-		}
-		models = append(models, provider.RemoteModel{
-			ModelID:       m.ID,
-			DisplayName:   display,
-			ContextWindow: m.ContextWindow,
-		})
-	}
-	return models, nil
+	return result.Data, nil
 }
 
-// vercelModelImportable returns true when this model has a working dispatch
-// path in the gateway. See ListModels comment for the full classification.
+// vercelModelTaskTypes follows Vercel's explicit catalog type. Empty means
+// unknown rather than chat, so old or future entries cannot be misclassified.
+func vercelModelTaskTypes(m vercelModelEntry) []string {
+	switch strings.ToLower(strings.TrimSpace(m.Type)) {
+	case "language":
+		return []string{provider.RemoteModelTaskChat}
+	case "embedding":
+		return []string{provider.RemoteModelTaskEmbedding}
+	case "image":
+		return []string{provider.RemoteModelTaskImageGenerate}
+	default:
+		return nil
+	}
+}
+
+// vercelModelImportable preserves the historical ListModels filter. In
+// particular, only token-billed image entries were exposed through the legacy
+// chat-oriented catalog; per-image entries remain exclusive to the rich task
+// catalog where callers can bind them to image.generate explicitly.
 func vercelModelImportable(m vercelModelEntry) bool {
 	switch m.Type {
 	case "", "language", "embedding":
 		return true
 	case "image":
-		// Token-billed image models (openai/gpt-image-*) run via chat/completions
-		// with modalities. Per-image-billed (pricing.image set) have no dispatch.
 		if m.Pricing == nil {
 			return false
 		}
@@ -193,3 +222,14 @@ func vercelModelImportable(m vercelModelEntry) bool {
 		return false
 	}
 }
+
+func vercelRichModelImportable(m vercelModelEntry) bool {
+	switch strings.ToLower(strings.TrimSpace(m.Type)) {
+	case "", "language", "embedding", "image":
+		return true
+	default:
+		return false
+	}
+}
+
+var _ provider.ModelTaskLister = (*Provider)(nil)

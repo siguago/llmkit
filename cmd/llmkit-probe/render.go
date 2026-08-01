@@ -245,7 +245,7 @@ var chatModels = map[string]string{
 	llmkit.Gemini:      "gemini-2.5-flash",
 	llmkit.XAI:         "grok-4.3",
 	llmkit.Mistral:     "mistral-large-latest", // vendor-maintained alias
-	llmkit.DeepSeek:    "deepseek-chat",
+	llmkit.DeepSeek:    "deepseek-v4-flash",
 	llmkit.Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	llmkit.Zhipu:       "glm-4.6",
 	llmkit.MiniMax:     "MiniMax-M2",

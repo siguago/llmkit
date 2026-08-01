@@ -21,7 +21,7 @@ var models = map[string]string{
 	llmkit.OpenAI:      "gpt-5",
 	llmkit.Anthropic:   "claude-sonnet-4-5-20250929",
 	llmkit.Gemini:      "gemini-2.5-flash",
-	llmkit.DeepSeek:    "deepseek-chat",
+	llmkit.DeepSeek:    "deepseek-v4-flash",
 	llmkit.Moonshot:    "kimi-k2-turbo-preview",
 	llmkit.Zhipu:       "glm-4.6",
 	llmkit.MiniMax:     "MiniMax-M2",

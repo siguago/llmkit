@@ -34,7 +34,7 @@ import (
 var runMedia = flag.Bool("media", false, "also run image/video tests (slower and more expensive)")
 
 // liveModels is the model used per provider. Override any of them with
-// LLMKIT_TEST_MODEL_<PROVIDER>, e.g. LLMKIT_TEST_MODEL_DEEPSEEK=deepseek-chat.
+// LLMKIT_TEST_MODEL_<PROVIDER>, e.g. LLMKIT_TEST_MODEL_DEEPSEEK=deepseek-v4-flash.
 //
 // Vendor catalogs churn: models get retired and IDs get renamed. A "model not
 // found" here means the entry went stale, not that the SDK broke — re-run with
@@ -46,7 +46,7 @@ var liveModels = map[string]string{
 	Gemini:      "gemini-2.5-flash",
 	XAI:         "grok-4.3",
 	Mistral:     "mistral-large-latest", // vendor-maintained alias
-	DeepSeek:    "deepseek-chat",
+	DeepSeek:    "deepseek-v4-flash",
 	Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	Zhipu:       "glm-4.6",
 	MiniMax:     "MiniMax-M2",

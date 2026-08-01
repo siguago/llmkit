@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -158,6 +159,7 @@ type probe struct {
 func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []probe {
 	return []probe{
 		{"模型列表", func(ctx context.Context) result { return probeModels(ctx, c) }},
+		{"模型任务", func(ctx context.Context) result { return probeModelTaskTypes(ctx, c) }},
 		{"OpenAI Responses", func(ctx context.Context) result { return probeResponses(ctx, c, model) }},
 		{"Anthropic Messages", func(ctx context.Context) result { return probeAnthropicMessages(ctx, c, model) }},
 		{"非流式对话", func(ctx context.Context) result { return probeChat(ctx, c, model) }},
@@ -246,6 +248,96 @@ func probeModels(ctx context.Context, c *llmkit.Client) result {
 		detail:  fmt.Sprintf("%d 个模型", len(models)),
 		body:    strings.Join(names, ", ") + " …",
 	}
+}
+
+// probeModelTaskTypes is the only check that runs the per-model classification
+// against a live catalog. The adapters that implement it classify by hardcoded
+// model-ID allowlists (gemini, deepseek) or by upstream metadata fields whose
+// vocabulary can grow (vercel, openrouter), and neither failure mode is visible
+// offline: when a vendor ships a new model, nothing errors and no unit test
+// breaks — the model just goes quietly unclassified. So the unclassified list
+// is the actual output worth reading here, not the pass mark.
+func probeModelTaskTypes(ctx context.Context, c *llmkit.Client) result {
+	if !c.SupportsModelTaskTypes() {
+		return result{outcome: notApplicable, detail: "该 provider 无逐模型任务分类"}
+	}
+	models, taskTypes, err := c.ModelsWithTaskTypes(ctx)
+	if err != nil {
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	if len(models) == 0 {
+		return result{outcome: fail, detail: "接口返回空列表"}
+	}
+
+	byTask := make(map[string][]string)
+	var unknown []string
+	for _, m := range models {
+		tasks := taskTypes[m.ModelID]
+		if len(tasks) == 0 {
+			unknown = append(unknown, m.ModelID)
+			continue
+		}
+		key := strings.Join(tasks, " + ")
+		byTask[key] = append(byTask[key], m.ModelID)
+	}
+
+	// Align on the widest label actually present. A fixed budget would feed
+	// padDisplay a value it truncates, and "image.generate + image.edit" is
+	// already 27 columns — silently clipping the task name would defeat the
+	// point of printing it.
+	labels := sortedKeys(byTask)
+	unknownLabel := fmt.Sprintf("未分类 (%d)", len(unknown))
+	width := 0
+	for _, label := range append(append([]string{}, labels...), unknownLabel) {
+		if w := displayWidth(label); w > width {
+			width = w
+		}
+	}
+
+	var body strings.Builder
+	for _, key := range labels {
+		fmt.Fprintf(&body, "%s  %s\n", padDisplay(key, width), previewModelIDs(byTask[key]))
+	}
+	if len(unknown) > 0 {
+		fmt.Fprintf(&body, "%s  %s\n",
+			padDisplay(unknownLabel, width), previewModelIDs(unknown))
+		body.WriteString("\n未分类不是错误 —— adapter 宁可留空也不猜。但如果这里出现了本该识别的当前模型，\n就是分类白名单该更新的信号。\n")
+	}
+
+	// Every model unclassified means the allowlist no longer matches anything
+	// the vendor is serving, which is exactly the silent drift this probe exists
+	// to catch. A partially-unclassified catalog is normal and stays a pass.
+	if len(unknown) == len(models) {
+		return result{
+			outcome: fail,
+			detail:  fmt.Sprintf("%d 个模型全部未分类", len(models)),
+			body:    body.String(),
+		}
+	}
+	return result{
+		outcome: pass,
+		detail:  fmt.Sprintf("%d/%d 已分类 · %d 未知", len(models)-len(unknown), len(models), len(unknown)),
+		body:    body.String(),
+	}
+}
+
+// previewModelIDs keeps the -v body scannable on catalogs with hundreds of
+// entries, while still naming enough models to recognize a family.
+func previewModelIDs(ids []string) string {
+	const max = 6
+	if len(ids) <= max {
+		return strings.Join(ids, ", ")
+	}
+	return strings.Join(ids[:max], ", ") + fmt.Sprintf(", …（另 %d 个）", len(ids)-max)
+}
+
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func probeChat(ctx context.Context, c *llmkit.Client, model string) result {

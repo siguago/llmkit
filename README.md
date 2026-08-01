@@ -9,7 +9,7 @@
 
 ```go
 client, _ := llmkit.New(llmkit.DeepSeek)          // key 取自 DEEPSEEK_API_KEY
-answer, _ := client.Say(ctx, "deepseek-chat", "用一句话解释 CAP 定理。")
+answer, _ := client.Say(ctx, "deepseek-v4-flash", "用一句话解释 CAP 定理。")
 ```
 
 统一 Chat 接口里，换一家厂商只改一个常量，请求结构、响应结构、错误处理、流式读法全都不变。原生协议面不会按模型名自动启用，也不与 Chat DTO 混用。
@@ -70,31 +70,42 @@ go get github.com/siguago/llmkit
 
 能力按**端点**而不是按功能划分，因为厂商的支持就是按端点参差的：聚合类服务能生成图像却没有编辑端点，五家能建视频任务但只有一家能取消。
 
-| 厂商 | Chat / 流式 | 模型列表 | Embeddings | Rerank | 图像生成 | 图像编辑 | 视频生成 | 视频取消 |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| openai | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | — |
-| anthropic | ✅ | ✅ | — | — | — | — | — | — |
-| gemini | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
-| xai | ✅ | ✅ | — | — | — | — | — | — |
-| mistral | ✅ | ✅ | ✅ | — | — | — | — | — |
-| deepseek | ✅ | ✅ | — | — | — | — | — | — |
-| moonshot | ✅ | ✅ | — | — | — | — | — | — |
-| zhipu | ✅ | ✅ | ✅ | — | — | — | — | — |
-| minimax | ✅ | ✅ | ✅ | — | — | — | — | — |
-| siliconflow | ✅ | ✅ | ✅ | ✅ | — | — | — | — |
-| dashscope | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
-| volcengine | ✅ | ✅ | — | — | — | — | ✅ | ✅ |
-| groq | ✅ | ✅ | — | — | — | — | — | — |
-| together | ✅ | ✅ | ✅ | — | — | — | — | — |
-| fireworks | ✅ | ✅ | ✅ | — | — | — | — | — |
-| cerebras | ✅ | ✅ | — | — | — | — | — | — |
-| ollama | ✅ | ✅ | ✅ | — | — | — | — | — |
-| vllm | ✅ | ✅ | ✅ | — | — | — | — | — |
-| openrouter | ✅ | ✅ | — | — | ✅ | — | ✅ | — |
-| easyrouter | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
-| vercel | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
+| 厂商 | Chat / 流式 | 模型列表 | 模型任务 | Embeddings | Rerank | 图像生成 | 图像编辑 | 视频生成 | 视频取消 |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| openai | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | — |
+| anthropic | ✅ | ✅ | ✅ | — | — | — | — | — | — |
+| gemini | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
+| xai | ✅ | ✅ | — | — | — | — | — | — | — |
+| mistral | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| deepseek | ✅ | ✅ | ✅ | — | — | — | — | — | — |
+| moonshot | ✅ | ✅ | — | — | — | — | — | — | — |
+| zhipu | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| minimax | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| siliconflow | ✅ | ✅ | — | ✅ | ✅ | — | — | — | — |
+| dashscope | ✅ | ✅ | — | ✅ | — | — | — | ✅ | — |
+| volcengine | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ |
+| groq | ✅ | ✅ | — | — | — | — | — | — | — |
+| together | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| fireworks | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| cerebras | ✅ | ✅ | — | — | — | — | — | — | — |
+| ollama | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| vllm | ✅ | ✅ | — | ✅ | — | — | — | — | — |
+| openrouter | ✅ | ✅ | ✅ | — | — | ✅ | — | ✅ | — |
+| easyrouter | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | ✅ | — |
+| vercel | ✅ | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
 
-对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsEmbeddings` / `SupportsRerank` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
+对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsModelTaskTypes` / `SupportsEmbeddings` / `SupportsRerank` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
+
+模型列表可能混合对话、向量、图片和视频模型。对能可靠分类的目录，用 `ModelsWithTaskTypes` 一次请求同时取得列表和逐模型任务；缺失的 map key 表示“未知”，不能默认成 chat：
+
+```go
+models, tasks, err := client.ModelsWithTaskTypes(ctx)
+for _, model := range models {
+    fmt.Println(model.ModelID, tasks[model.ModelID])
+}
+```
+
+`Models` 仍保留原来的上游请求和过滤结果；混合媒体目录的扩展只发生在 `ModelsWithTaskTypes`。不实现 `ModelTaskLister` 的 adapter 会由 `ModelsWithTaskTypes` 返回普通列表和 `nil` task map。Anthropic 与 DeepSeek 的目录都没有逐模型能力字段，只能按 ID 判断，但两家的目录形状不同：Anthropic 至今只出对话模型，按 `claude-` 前缀分类即可，非 `claude-` 条目保持未知；DeepSeek 的目录里混着退役别名和非对话型号，因此走白名单，只认当前官方 Chat ID，退役和未来 ID 保持未知。OpenRouter 中显式属于 SDK 未实现端点的目录项会被过滤；纯 `image` 输出型号虽然保留在目录中，但在专用 `/images` 路由实现前不会声明图片生成，只有可走现有 chat/completions 的 `text+image` 型号才会声明。Gemini 的 `generateContent` 也用于图片、TTS、Live/native-audio 和音乐，不能单凭方法名或 `gemini-*` 前缀推断为 chat；只有逐个核验过的当前 model code 会分类，其他条目保持未知。
 
 ### 原生协议能力矩阵
 
@@ -206,12 +217,12 @@ for _, r := range resp.Results {
 client, err := llmkit.New(llmkit.DeepSeek, llmkit.WithAPIKey(key))
 
 // 一行版
-answer, err := client.Say(ctx, "deepseek-chat", "你好")
+answer, err := client.Say(ctx, "deepseek-v4-flash", "你好")
 
 // 完整版
 temp := 0.3
 resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-    Model: "deepseek-chat",
+    Model: "deepseek-v4-flash",
     Messages: []llmkit.Message{
         llmkit.System("你是一个简洁的技术助手。"),
         llmkit.User("Go 的 channel 和 mutex 该怎么选？"),
@@ -221,11 +232,13 @@ resp, err := client.Chat(ctx, &llmkit.ChatRequest{
 text := llmkit.ResponseText(resp)
 ```
 
+> DeepSeek 当前公开 API 模型是 `deepseek-v4-flash` / `deepseek-v4-pro`；旧 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 停用（[官方变更记录](https://api-docs.deepseek.com/updates/)）。
+
 ### 流式
 
 ```go
 // 回调版：流会自动 drain + close
-text, usage, err := client.StreamText(ctx, "deepseek-chat", "数到五", func(delta string) {
+text, usage, err := client.StreamText(ctx, "deepseek-v4-flash", "数到五", func(delta string) {
     fmt.Print(delta)
 })
 
@@ -601,7 +614,7 @@ func New(baseURL string) *compat.Provider {
 
 需要**格式转换的**：实现 `provider.Provider` 三个方法 + 自己的 `types.go` / `stream.go`。参考 [anthropic](provider/anthropic/)。
 
-可选能力按需实现 `ModelLister` / `Embedder` / `ImageProvider` / `VideoProvider`，Client 会自动探测。
+可选能力按需实现 `ModelLister` / `ModelTaskLister` / `Embedder` / `Reranker` / `ImageGenerator` / `ImageEditor` / `VideoCreator` / `VideoCanceller`，Client 会自动探测。图片和视频必须按端点实现最小接口；不要为了生成能力而实现同时要求编辑或取消的组合接口。
 
 原生协议也按 endpoint 分接口：例如 relay 只接了 Responses JSON create，就只实现 `provider.ResponsesCreator`，不要顺手实现 stream / retrieve，更不要把这些方法加到所有 adapter 都嵌入的 compat 基类。否则 Go 的 method promotion 会让每家 provider 的 `Supports*` 都错误返回 true。Anthropic Messages 的 create / stream / token count 同理分别 opt in。
 
@@ -664,9 +677,10 @@ DEEPSEEK_API_KEY=sk-... go run ./cmd/llmkit-probe deepseek
 ```
 
 ```
-llmkit probe · deepseek · deepseek-chat
+llmkit probe · deepseek · deepseek-v4-flash
 ──────────────────────────────────────────────────────────────────────────────
-  PASS  模型列表             64 个模型                                    412ms
+  PASS  模型列表              2 个模型                                    412ms
+  PASS  模型任务             2/2 已分类 · 0 未知                          301ms
   PASS  非流式对话           38 字 · 96 tokens                             1.2s
   PASS  流式对话             47 chunks · 首字 340ms                        2.1s
   PASS  多轮上下文           正确记住 42                                   1.8s
@@ -694,7 +708,7 @@ go run ./cmd/llmkit-probe deepseek
 go run ./cmd/llmkit-probe                          # 所有配了 key 的厂商，末尾出汇总表
 go run ./cmd/llmkit-probe -list                    # 支持的厂商与对应环境变量
 go run ./cmd/llmkit-probe deepseek -v              # 打印模型的完整回复
-go run ./cmd/llmkit-probe deepseek -model deepseek-reasoner
+go run ./cmd/llmkit-probe deepseek -model deepseek-v4-pro
 go run ./cmd/llmkit-probe openai -media            # 额外测图像生成（更贵）
 go run ./cmd/llmkit-probe deepseek -base-url https://my-relay.example/v1
 ```

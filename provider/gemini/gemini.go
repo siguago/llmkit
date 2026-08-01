@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -132,23 +133,158 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	return NewStreamReader(ctx, resp.Body, model), nil
 }
 
-// dispatchableModel reports whether this SDK has a route for the model, based
-// on the methods Gemini says it supports.
-//
-// Chat models advertise generateContent; embedding models advertise
-// embedContent / batchEmbedContents and never generateContent. Filtering on
-// generateContent alone — which is what this did before embeddings existed —
-// made every embedding model invisible to Models(), so the one documented way
-// to find a working embedding model ("Call ModelService.ListModels", as the
-// 404 for a retired model tells you) was closed off by the SDK itself.
-//
-// Both kinds land in the same list because RemoteModel carries no type field.
-// That mirrors the vercel adapter, which likewise returns language and
-// embedding models together: an undiscoverable model is the worse failure.
+// remoteModelTaskTypes maps Gemini's per-model methods and stable model-name
+// signals to public task names. generateContent is not, by itself, proof of a
+// chat model: Gemini image, TTS, Live/native-audio and music models advertise
+// the same method. Keep the classification deliberately conservative so a
+// caller never sends a media-only model through ChatCompletion (whose response
+// shape intentionally only preserves text/tool output).
+func remoteModelTaskTypes(modelID string, methods []string) []string {
+	var generateContent, embedding, predictLongRunning bool
+	for _, method := range methods {
+		switch strings.ToLower(strings.TrimSpace(method)) {
+		case "generatecontent":
+			generateContent = true
+		case "embedcontent", "batchembedcontents":
+			embedding = true
+		case "predictlongrunning":
+			predictLongRunning = true
+		}
+	}
+
+	image := generateContent && geminiImageModel(modelID)
+	chat := generateContent && geminiTextModel(modelID)
+	video := predictLongRunning && geminiVeoModel(modelID)
+
+	tasks := make([]string, 0, 5)
+	if chat {
+		tasks = append(tasks, provider.RemoteModelTaskChat)
+	}
+	if embedding {
+		tasks = append(tasks, provider.RemoteModelTaskEmbedding)
+	}
+	if image {
+		tasks = append(tasks, provider.RemoteModelTaskImageGenerate, provider.RemoteModelTaskImageEdit)
+	}
+	if video {
+		tasks = append(tasks, provider.RemoteModelTaskVideoGenerate)
+	}
+	return tasks
+}
+
+// geminiImageModel recognizes only generateContent-based image model IDs whose
+// response contract has been reviewed against this adapter. Name fragments are
+// insufficient: a future Gemini family containing "image" must remain unknown
+// until its endpoint and response shape are verified. Imagen is excluded
+// because it uses a predict endpoint that this adapter does not implement.
+func geminiImageModel(modelID string) bool {
+	id := strings.ToLower(bareModel(strings.TrimSpace(modelID)))
+	switch id {
+	case "gemini-2.5-flash-image",
+		"gemini-3-pro-image",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-flash-lite-image":
+		return true
+	default:
+		return false
+	}
+}
+
+func geminiModelNameParts(modelID string) []string {
+	modelID = strings.ToLower(bareModel(strings.TrimSpace(modelID)))
+	return strings.FieldsFunc(modelID, func(r rune) bool {
+		switch r {
+		case '-', '_', '/', '.', ':':
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// geminiExplicitUnsupportedMediaModel identifies catalog families that share
+// generateContent with text models but require a response surface this adapter
+// does not expose (audio, realtime/music), or a different endpoint (Imagen).
+func geminiExplicitUnsupportedMediaModel(modelID string) bool {
+	for _, part := range geminiModelNameParts(modelID) {
+		switch part {
+		case "tts", "audio", "speech", "live", "realtime", "lyria", "music", "voice", "sound", "video", "omni", "imagen":
+			return true
+		}
+	}
+	return false
+}
+
+// geminiTextModel is a conservative allowlist of Google's text-output model
+// families. New/future generateContent families remain visible as unknown in
+// ListModelsWithTaskTypes, but are not guessed to be chat.
+func geminiTextModel(modelID string) bool {
+	if geminiImageModel(modelID) || geminiExplicitUnsupportedMediaModel(modelID) {
+		return false
+	}
+	id := strings.ToLower(bareModel(strings.TrimSpace(modelID)))
+	switch id {
+	case "gemini-2.5-pro",
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		"gemini-3-flash-preview",
+		"gemini-3.1-pro-preview",
+		"gemini-3.1-pro-preview-customtools",
+		"gemini-3.1-flash-lite",
+		"gemini-3.5-flash",
+		"gemini-3.5-flash-lite",
+		"gemini-3.6-flash",
+		"gemini-flash-latest",
+		"gemini-pro-latest",
+		"gemma-3-1b-it",
+		"gemma-3-4b-it",
+		"gemma-3-12b-it",
+		"gemma-3-27b-it",
+		"gemma-3n-e2b-it",
+		"gemma-3n-e4b-it",
+		"gemma-4-26b-a4b-it",
+		"gemma-4-31b-it":
+		return true
+	default:
+		return false
+	}
+}
+
+func geminiVeoModel(modelID string) bool {
+	id := strings.ToLower(bareModel(strings.TrimSpace(modelID)))
+	switch id {
+	case "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.1-lite-generate-preview":
+		return true
+	default:
+		return false
+	}
+}
+
+// dispatchableModel preserves the historical ListModels filter exactly. That
+// method predates task metadata and intentionally remains behavior-compatible;
+// the richer mixed catalog is exposed only by ListModelsWithTaskTypes.
 func dispatchableModel(methods []string) bool {
-	for _, m := range methods {
-		switch m {
+	for _, method := range methods {
+		switch method {
 		case "generateContent", "embedContent", "batchEmbedContents":
+			return true
+		}
+	}
+	return false
+}
+
+func geminiRichCatalogModel(modelID string, methods []string) bool {
+	if geminiExplicitUnsupportedMediaModel(modelID) {
+		return false
+	}
+	if len(remoteModelTaskTypes(modelID, methods)) > 0 {
+		return true
+	}
+	// A future generateContent/predictLongRunning family is useful catalog
+	// information, but its missing task-map key must force manual classification.
+	for _, method := range methods {
+		switch strings.ToLower(strings.TrimSpace(method)) {
+		case "generatecontent", "predictlongrunning":
 			return true
 		}
 	}
@@ -157,19 +293,73 @@ func dispatchableModel(methods []string) bool {
 
 // ListModels fetches available models from the Gemini API.
 func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.RemoteModel, error) {
+	entries, err := p.listRemoteModels(ctx, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	var models []provider.RemoteModel
+	for _, entry := range entries {
+		if !dispatchableModel(entry.SupportedGenerationMethods) {
+			continue
+		}
+		models = append(models, entry.remoteModel())
+	}
+	return models, nil
+}
+
+// ListModelsWithTaskTypes fetches the Gemini catalog and returns per-model
+// classifications without changing the legacy RemoteModel value type.
+func (p *Provider) ListModelsWithTaskTypes(ctx context.Context, apiKey string) ([]provider.RemoteModel, map[string][]string, error) {
+	entries, err := p.listRemoteModels(ctx, apiKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	models := make([]provider.RemoteModel, 0, len(entries))
+	taskTypes := make(map[string][]string)
+	for _, entry := range entries {
+		modelID := bareModel(entry.Name)
+		if !geminiRichCatalogModel(modelID, entry.SupportedGenerationMethods) {
+			continue
+		}
+		models = append(models, entry.remoteModel())
+		if tasks := remoteModelTaskTypes(modelID, entry.SupportedGenerationMethods); len(tasks) > 0 {
+			taskTypes[modelID] = tasks
+		}
+	}
+	return models, taskTypes, nil
+}
+
+type geminiCatalogModel struct {
+	Name                       string   `json:"name"`
+	DisplayName                string   `json:"displayName"`
+	InputTokenLimit            int      `json:"inputTokenLimit"`
+	SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+}
+
+func (m geminiCatalogModel) remoteModel() provider.RemoteModel {
+	return provider.RemoteModel{
+		ModelID:       bareModel(m.Name),
+		DisplayName:   m.DisplayName,
+		ContextWindow: m.InputTokenLimit,
+	}
+}
+
+func (p *Provider) listRemoteModels(ctx context.Context, apiKey string) ([]geminiCatalogModel, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var allModels []provider.RemoteModel
+	var allModels []geminiCatalogModel
 	pageToken := ""
 
 	for {
-		url := fmt.Sprintf("%s?pageSize=1000", p.modelsURL)
+		query := url.Values{"pageSize": {"1000"}}
 		if pageToken != "" {
-			url += "&pageToken=" + pageToken
+			query.Set("pageToken", pageToken)
 		}
+		endpoint := p.modelsURL + "?" + query.Encode()
 
-		httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -187,33 +377,15 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 		}
 
 		var result struct {
-			Models []struct {
-				Name                       string   `json:"name"`
-				DisplayName                string   `json:"displayName"`
-				InputTokenLimit            int      `json:"inputTokenLimit"`
-				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-			} `json:"models"`
-			NextPageToken string `json:"nextPageToken"`
+			Models        []geminiCatalogModel `json:"models"`
+			NextPageToken string               `json:"nextPageToken"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			resp.Body.Close()
 			return nil, err
 		}
 		resp.Body.Close()
-
-		for _, m := range result.Models {
-			if !dispatchableModel(m.SupportedGenerationMethods) {
-				continue
-			}
-
-			modelID := bareModel(m.Name)
-
-			allModels = append(allModels, provider.RemoteModel{
-				ModelID:       modelID,
-				DisplayName:   m.DisplayName,
-				ContextWindow: m.InputTokenLimit,
-			})
-		}
+		allModels = append(allModels, result.Models...)
 
 		if result.NextPageToken == "" {
 			break
@@ -223,6 +395,8 @@ func (p *Provider) ListModels(ctx context.Context, apiKey string) ([]provider.Re
 
 	return allModels, nil
 }
+
+var _ provider.ModelTaskLister = (*Provider)(nil)
 
 func buildRequest(ctx context.Context, req *provider.ChatCompletionRequest) (*request, error) {
 	r := &request{}
