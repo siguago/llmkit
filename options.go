@@ -94,13 +94,20 @@ func WithBaseURL(url string) Option {
 	return func(c *clientConfig) { c.baseURL = url }
 }
 
-// WithTimeout bounds each individual request, including all retries of it.
-// Zero (the default) leaves the provider's own generous ceiling in place:
-// 300s for regular calls, 900s for streams, which suits long image and
-// reasoning generations.
+// WithTimeout bounds each ordinary non-streaming provider operation, including
+// all retries of it. Zero (the default) leaves the provider's regular-request
+// ceiling in place, typically 300s. WaitResponse and WaitVideo own separate
+// whole-wait budgets; this option still bounds each poll request they make.
 //
-// The deadline applies per Client call. A Chat that retries twice shares one
-// budget across all three attempts.
+// Streaming methods do not apply this option because the returned stream
+// outlives the method call. OpenAI Responses and every Anthropic streaming
+// entry point impose no SDK fallback timeout on an active stream, so a context
+// deadline or cancellation is their only lifetime bound. Some other adapters
+// retain a 900-second client ceiling for compatibility; callers should not
+// rely on it.
+//
+// The deadline applies per provider operation. A Chat that retries twice
+// shares one budget across all three attempts.
 func WithTimeout(d time.Duration) Option {
 	return func(c *clientConfig) { c.timeout = d }
 }
@@ -169,10 +176,12 @@ func WithHeaders(h map[string]string) Option {
 // transport installed for observability must not be able to silently undo the
 // privacy guarantee.
 //
-// Note that http.Client.Timeout has no equivalent here. Per-call deadlines are
-// WithTimeout's job, which applies one budget across a call and all its retries;
-// a transport-level timeout would cut each attempt separately and interact badly
-// with the retry policy.
+// Note that http.Client.Timeout has no equivalent here. For non-streaming
+// calls, WithTimeout applies one budget across the call and all its retries; a
+// transport-level timeout would cut each attempt separately and interact badly
+// with the retry policy. Streaming lifetime rules are documented on
+// WithTimeout; a custom RoundTripper may independently impose dial, header, or
+// read limits.
 func WithTransport(rt http.RoundTripper) Option {
 	return func(c *clientConfig) { c.transport = rt }
 }
@@ -228,7 +237,9 @@ const (
 	TolerateMalformedChunks = provider.StreamTolerateMalformed
 )
 
-// DefaultMaxFrameBytes is the default ceiling on a single SSE frame.
+// DefaultMaxFrameBytes is the general default ceiling on a single SSE frame.
+// An adapter may use a larger zero-config limit when its documented wire format
+// embeds larger payloads; OpenAI Responses image events are one such case.
 const DefaultMaxFrameBytes = provider.DefaultMaxFrameBytes
 
 // WithStreamTolerance sets what streams do with frames they cannot parse.
@@ -244,11 +255,17 @@ func WithStreamTolerance(t StreamTolerance) Option {
 
 // WithMaxStreamFrameBytes raises or lowers the ceiling on a single SSE frame.
 //
-// The default is DefaultMaxFrameBytes (1 MiB), which covers ordinary deltas with
-// room for the one legitimately large case: a tool call whose arguments arrive
-// in a single frame. Raise it if you drive models that emit very large tool
-// arguments or inline image data; a frame over the limit fails the stream with
-// an error naming this option. Zero restores the default.
+// The general default is DefaultMaxFrameBytes (1 MiB), which covers ordinary
+// deltas with room for a tool call whose arguments arrive in one frame. OpenAI
+// Responses uses DefaultResponsesMaxFrameBytes (32 MiB) because documented
+// image-generation events carry base64 image data in one frame. Raise or lower
+// the limit explicitly for any stream; a frame over it fails with an error
+// naming this option. A non-positive value restores the adapter's default.
+//
+// The decoder grows buffers on demand, but this limit bounds frame content, not
+// total process memory: framing and JSON decoding may temporarily retain
+// multiple near-limit copies. Large limits multiply across concurrent streams,
+// especially when reading from an untrusted relay.
 func WithMaxStreamFrameBytes(n int) Option {
 	return func(c *clientConfig) { c.streamPolicy.MaxFrameBytes = n }
 }

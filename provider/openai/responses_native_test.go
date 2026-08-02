@@ -509,6 +509,87 @@ func responsesStreamCompletedJSON(sequence int64, id string) string {
 	return fmt.Sprintf(`{"type":"response.completed","sequence_number":%d,"response":{"id":%q,"object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"model":"gpt-test","output":[],"parallel_tool_calls":true,"store":true}}`, sequence, id)
 }
 
+func TestNativeResponsesStream_ClientHasNoAbsoluteTimeout(t *testing.T) {
+	client := NewWithBaseURL("https://example.invalid/v1")
+	if got := client.streamClient.Timeout; got != 0 {
+		t.Fatalf("Responses stream client timeout = %v, want 0 (request context owns the deadline)", got)
+	}
+	if got := client.client.Timeout; got != 300*time.Second {
+		t.Fatalf("non-streaming client timeout = %v, want 300s", got)
+	}
+}
+
+func TestNativeResponsesStream_ImageGenerationFrameLimit(t *testing.T) {
+	partialImage := strings.Repeat("A", provider.DefaultMaxFrameBytes+4)
+	payload := fmt.Sprintf(
+		`{"type":"response.image_generation_call.partial_image","sequence_number":0,"item_id":"ig_1","output_index":0,"partial_image_index":0,"partial_image_b64":%q}`,
+		partialImage,
+	)
+
+	for _, test := range []struct {
+		name      string
+		ctx       context.Context
+		maxBytes  int
+		wantLarge bool
+	}{
+		{
+			name:      "Responses default accepts image event",
+			ctx:       context.Background(),
+			maxBytes:  DefaultResponsesMaxFrameBytes,
+			wantLarge: true,
+		},
+		{
+			name: "explicit smaller ceiling still wins",
+			ctx: provider.WithStreamPolicy(context.Background(), provider.StreamPolicy{
+				MaxFrameBytes: provider.DefaultMaxFrameBytes,
+			}),
+			maxBytes: provider.DefaultMaxFrameBytes,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeResponsesSSE(w, []responsesSSEFrame{{
+					name: "response.image_generation_call.partial_image",
+					data: payload,
+				}})
+			}))
+			defer server.Close()
+
+			stream, err := NewWithBaseURL(server.URL).CreateResponseStream(
+				test.ctx, "key", newResponsesCreateRequest(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			concrete, ok := stream.(*responsesStream)
+			if !ok {
+				t.Fatalf("stream type = %T, want *responsesStream", stream)
+			}
+			if concrete.maxBytes != test.maxBytes {
+				t.Fatalf("stream frame limit = %d, want %d", concrete.maxBytes, test.maxBytes)
+			}
+
+			event, err := stream.Recv()
+			if !test.wantLarge {
+				if !errors.Is(err, sse.ErrEventTooLarge) {
+					t.Fatalf("Recv error = %v, want ErrEventTooLarge", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Recv large image event: %v", err)
+			}
+			if event.Type != responsesapi.EventType("response.image_generation_call.partial_image") {
+				t.Fatalf("event type = %q", event.Type)
+			}
+			if got := len(event.RawJSON()); got <= provider.DefaultMaxFrameBytes {
+				t.Fatalf("raw image event size = %d, want > %d", got, provider.DefaultMaxFrameBytes)
+			}
+		})
+	}
+}
+
 func TestNativeResponsesStream_EventsUnknownRawAccumulatorAndWire(t *testing.T) {
 	captured := make(chan responsesCapturedRequest, 1)
 	frames := []responsesSSEFrame{

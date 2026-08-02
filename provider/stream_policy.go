@@ -29,18 +29,20 @@ const (
 	StreamTolerateMalformed
 )
 
-// DefaultMaxFrameBytes bounds a single SSE frame. Frames are normally a few
-// hundred bytes; the ceiling exists so a vendor sending an unterminated line
-// cannot make the reader buffer without limit. It has to leave room for the one
-// legitimately large case — a tool call whose arguments arrive in one frame —
-// which is why it is a megabyte and not a kilobyte.
+// DefaultMaxFrameBytes is the general bound on a single SSE frame. Frames are
+// normally a few hundred bytes; the ceiling exists so a vendor sending an
+// unterminated line cannot make the reader buffer without limit. It leaves room
+// for a tool call whose arguments arrive in one frame, which is why it is a
+// megabyte and not a kilobyte. Adapters whose documented wire format embeds
+// larger payloads may select a larger default when MaxFrameBytes is non-positive.
 const DefaultMaxFrameBytes = 1 << 20
 
-// StreamPolicy tunes stream frame handling. The zero value is the default
-// policy: strict, with DefaultMaxFrameBytes.
+// StreamPolicy tunes stream frame handling. The zero value is strict and uses
+// the adapter's default frame limit, normally DefaultMaxFrameBytes.
 type StreamPolicy struct {
 	Tolerance StreamTolerance
-	// MaxFrameBytes caps one SSE frame. Zero means DefaultMaxFrameBytes.
+	// MaxFrameBytes caps one SSE frame. A non-positive value means the adapter's
+	// default.
 	MaxFrameBytes int
 }
 

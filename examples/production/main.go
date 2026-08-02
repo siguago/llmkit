@@ -42,10 +42,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// One context per unit of work. Cancelling it aborts the call and any
-	// backoff wait still pending, so a shutting-down service doesn't sit out a
-	// 20s retry sleep for a request nobody is waiting for.
-	ctx, cancel := context.WithCancel(context.Background())
+	// One finite context per unit of work. Its deadline aborts calls, streams and
+	// any backoff still pending, so a shutting-down or abandoned request cannot
+	// wait forever. Derive this from your server/request context in real code.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	answer, err := client.Say(ctx, model, "用一句话解释 CAP 定理。")
@@ -84,11 +84,12 @@ func newClient(name string, logger *slog.Logger, m *metrics, overrides ...llmkit
 		// name is this example's own — the SDK reads no base-URL env var.
 		llmkit.WithBaseURL(os.Getenv("LLM_BASE_URL")),
 
-		// One deadline for the whole call, retries included — not per attempt.
-		// Leave it off and you inherit the provider ceiling (300s, 900s for
-		// streams), generous on purpose but rarely what a request-scoped service
-		// wants. Size it above your slowest realistic generation: a reasoning
-		// model can think for a minute before the first byte.
+		// One deadline for the whole non-streaming call, retries included — not
+		// per attempt. Leave it off and you inherit the provider's regular-call
+		// ceiling (typically 300s). Streaming calls instead inherit the deadline
+		// on their context. Size either budget above your slowest realistic
+		// generation: a reasoning model can think for a minute before the first
+		// byte.
 		llmkit.WithTimeout(90 * time.Second),
 
 		// Ordinary calls: 429, 5xx, network timeouts. More attempts and more
@@ -137,9 +138,13 @@ func newClient(name string, logger *slog.Logger, m *metrics, overrides ...llmkit
 		// tool call. Failing lets you retry or fall back.
 		llmkit.WithStreamTolerance(llmkit.StrictStream),
 
-		// Raise the per-frame ceiling (default 1 MiB) if your models emit very
-		// large tool arguments or inline image data in a single frame.
-		llmkit.WithMaxStreamFrameBytes(4 << 20),
+		// Leave the per-frame ceiling unset to keep each adapter's
+		// protocol-aware default:
+		// generally 1 MiB, or 32 MiB for documented OpenAI Responses inline-image
+		// events. Add WithMaxStreamFrameBytes only when your workload needs an
+		// explicit override; any value supplied there also replaces the larger
+		// Responses default. Large limits multiply memory use across concurrent
+		// streams, so do not raise this merely as a generic production setting.
 	}
 
 	return llmkit.New(name, append(opts, overrides...)...)
@@ -175,7 +180,7 @@ func newTransport(m *metrics) http.RoundTripper {
 			ExpectContinueTimeout: 1 * time.Second,
 			// Deliberately no ResponseHeaderTimeout: a reasoning model can take
 			// minutes to produce its first byte, and cutting that off here would
-			// fight the per-call budget WithTimeout owns.
+			// fight the call context or WithTimeout budget.
 		},
 	}
 }
@@ -294,7 +299,7 @@ func action(err error) string {
 	case llmkit.IsUnsupportedCapability(err):
 		return "provider lacks this capability; probe with Supports* first"
 	case errors.Is(err, context.DeadlineExceeded):
-		return "raise WithTimeout or shorten the prompt"
+		return "raise the call timeout/deadline or shorten the prompt"
 	case errors.Is(err, context.Canceled):
 		return "caller went away; nothing to do"
 	default:

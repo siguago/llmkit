@@ -21,13 +21,9 @@ import (
 	"github.com/siguago/llmkit/internal/ipprivacy"
 )
 
-// Default timeouts. Streaming gets a much larger ceiling because a long
-// generation legitimately holds the connection open; the non-streaming ceiling
-// still has to accommodate image models that routinely take 30-90s.
-const (
-	DefaultTimeout       = 300 * time.Second
-	DefaultStreamTimeout = 900 * time.Second
-)
+// DefaultTimeout is the regular-request ceiling. It still has to accommodate
+// image models that routinely take 30-90s.
+const DefaultTimeout = 300 * time.Second
 
 // NewTransport returns a tuned *http.Transport for talking to model vendors.
 //
@@ -87,12 +83,4 @@ func NewClient(timeout time.Duration) *http.Client {
 		timeout = DefaultTimeout
 	}
 	return &http.Client{Timeout: timeout, Transport: NewOutbound()}
-}
-
-// NewClientPair returns the (non-streaming, streaming) client pair every
-// provider needs. Both share transport settings but differ in overall timeout.
-func NewClientPair() (client, streamClient *http.Client) {
-	shared := NewOutbound()
-	return &http.Client{Timeout: DefaultTimeout, Transport: shared},
-		&http.Client{Timeout: DefaultStreamTimeout, Transport: shared}
 }

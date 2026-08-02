@@ -16,6 +16,11 @@ import (
 	"github.com/siguago/llmkit/provider"
 )
 
+// DefaultResponsesMaxFrameBytes is the zero-config ceiling on one OpenAI
+// Responses SSE frame. Image-generation events carry base64 image data in a
+// single frame, so Responses needs a larger default than ordinary token streams.
+const DefaultResponsesMaxFrameBytes = 32 << 20
+
 // CreateResponseStream calls POST /v1/responses with stream=true. The caller's
 // request is copied so selecting the streaming wire form never mutates it.
 func (p *Provider) CreateResponseStream(ctx context.Context, apiKey string, req *responsesapi.CreateRequest) (responsesapi.Stream, error) {
@@ -59,7 +64,7 @@ func newResponsesStream(ctx context.Context, resp *http.Response) *responsesStre
 	policy := provider.StreamPolicyFrom(ctx)
 	maxBytes := policy.MaxFrameBytes
 	if maxBytes <= 0 {
-		maxBytes = provider.DefaultMaxFrameBytes
+		maxBytes = DefaultResponsesMaxFrameBytes
 	}
 	requestID := provider.RequestIDFromHeader(resp.Header)
 	accumulator := new(responsesapi.Accumulator)

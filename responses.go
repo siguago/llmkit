@@ -7,7 +7,13 @@ import (
 
 	responsesapi "github.com/siguago/llmkit/protocol/responses"
 	"github.com/siguago/llmkit/provider"
+	openaiprovider "github.com/siguago/llmkit/provider/openai"
 )
+
+// DefaultResponsesMaxFrameBytes is the zero-config ceiling on one OpenAI
+// Responses SSE frame. It is larger than DefaultMaxFrameBytes because
+// image-generation events carry base64 image data in a single frame.
+const DefaultResponsesMaxFrameBytes = openaiprovider.DefaultResponsesMaxFrameBytes
 
 // CreateResponse creates an OpenAI Responses API response without translating
 // it through Chat Completions. The operation uses the replay-safe subset of the
@@ -32,7 +38,8 @@ func (c *Client) CreateResponse(ctx context.Context, req *responsesapi.CreateReq
 
 // CreateResponseStream starts a native Responses SSE stream. Always Close the
 // returned stream. Retries cover only creation of the stream; Recv failures are
-// never replayed after events may have been delivered.
+// never replayed after events may have been delivered. WithTimeout does not
+// bound streams; put the desired lifetime on ctx.
 func (c *Client) CreateResponseStream(ctx context.Context, req *responsesapi.CreateRequest) (responsesapi.Stream, error) {
 	if req == nil {
 		return nil, fmt.Errorf("llmkit: nil Responses request")

@@ -12,6 +12,16 @@ import (
 	"github.com/siguago/llmkit/provider"
 )
 
+func TestNewWithBaseURL_StreamingHasNoAbsoluteTimeout(t *testing.T) {
+	provider := NewWithBaseURL("https://api.anthropic.test/v1")
+	if provider.client.Timeout != 300*time.Second {
+		t.Fatalf("non-stream client timeout = %v, want 5m", provider.client.Timeout)
+	}
+	if provider.streamClient.Timeout != 0 {
+		t.Fatalf("stream client timeout = %v, want no absolute timeout", provider.streamClient.Timeout)
+	}
+}
+
 func TestBuildUsage_IncludesCacheTokens(t *testing.T) {
 	// Anthropic's input_tokens excludes cached portions; PromptTokens must
 	// re-add cache reads/creation so total_tokens reconciles for clients.

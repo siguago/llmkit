@@ -165,19 +165,6 @@ func TestWithExtraHeaders_EmptyMapIsNoop(t *testing.T) {
 	}
 }
 
-func TestNewClientPair(t *testing.T) {
-	c, s := NewClientPair()
-	if c.Timeout != DefaultTimeout {
-		t.Errorf("client timeout = %v, want %v", c.Timeout, DefaultTimeout)
-	}
-	if s.Timeout != DefaultStreamTimeout {
-		t.Errorf("stream timeout = %v, want %v", s.Timeout, DefaultStreamTimeout)
-	}
-	if s.Timeout <= c.Timeout {
-		t.Error("stream client should tolerate longer requests than the regular one")
-	}
-}
-
 func TestNewClient_ZeroUsesDefault(t *testing.T) {
 	if got := NewClient(0); got.Timeout != DefaultTimeout {
 		t.Errorf("NewClient(0).Timeout = %v, want %v", got.Timeout, DefaultTimeout)
