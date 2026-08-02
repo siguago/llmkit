@@ -744,15 +744,15 @@ HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 go test ./...
 
 ### Fuzz
 
-解析器直接吃厂商发来的原始字节，是 SDK 最大的不可信输入面。SSE 帧解析、错误响应解析、多模态内容转换都有 fuzz 目标，CI 每次 PR 都跑一轮短的：
+解析器直接吃厂商发来的原始字节，是 SDK 最大的不可信输入面。SSE 帧解析、错误响应解析、多模态内容转换都有 fuzz 目标。CI 每次 PR 对全部目标各跑 100,000 次，另有每日和手动触发的深度任务各跑 500,000 次：
 
 ```bash
-go test ./provider/compat/ -run '^$' -fuzz FuzzStreamReader_Strict -fuzztime=30s
-go test ./provider/ -run '^$' -fuzz FuzzParseDataURI -fuzztime=30s
-go test ./internal/sse/ -run '^$' -fuzz FuzzDecoderChunking -fuzztime=30s
-go test ./protocol/responses/ -run '^$' -fuzz FuzzEventJSON -fuzztime=30s
-go test ./protocol/anthropic/ -run '^$' -fuzz FuzzEventRoundTrip -fuzztime=30s
+bash .github/scripts/run-fuzz.sh 100000x \
+  ./provider/compat/ ./provider/ ./internal/sse/ \
+  ./protocol/responses/ ./protocol/anthropic/
 ```
+
+这里暂时使用固定次数，是为了绕开 `-fuzztime=<时长>` 到期时偶发误报 `context deadline exceeded` 的[官方问题](https://go.dev/issue/75804)。修复目前只在 Go 的 master 上，截至 `go1.27rc2` 尚未进入任何发布分支，预计随 Go 1.28 发布——**升级到 1.27 不要切回按时长运行**。任何 fuzz 非零退出仍会让门禁失败，CI 只把本次新生成的 crasher 作为 artifact 上传。
 
 它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、任意网络分片不能改变 SSE 帧、未知原生 union/event 必须 Raw 保真、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
 
