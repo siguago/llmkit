@@ -1,0 +1,60 @@
+name: Deep fuzz
+
+on:
+  schedule:
+    # 02:17 Asia/Shanghai. Fixed-count fuzzing avoids Go issue 75804 until the
+    # toolchain can move to a release carrying the fix — not 1.27, whose rc2 was
+    # cut without it; expect Go 1.28.
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deep-fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: provider-compat
+            package: ./provider/compat/
+          - name: provider
+            package: ./provider/
+          - name: sse
+            package: ./internal/sse/
+          - name: responses
+            package: ./protocol/responses/
+          - name: anthropic
+            package: ./protocol/anthropic/
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache: false
+
+      # 21 targets x 500,000 executions gives this scheduled run a slightly
+      # larger aggregate search budget than the former duration-based PR pass.
+      - name: Fuzz parsers deeply
+        id: fuzz
+        run: bash .github/scripts/run-fuzz.sh 500000x "${{ matrix.package }}"
+
+      - name: Collect new fuzz failures
+        if: ${{ failure() && steps.fuzz.outcome == 'failure' }}
+        run: bash .github/scripts/collect-fuzz-crashers.sh "$RUNNER_TEMP/fuzz-crashers"
+
+      - name: Upload fuzz failures
+        if: ${{ failure() && steps.fuzz.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuzz-crashers/
+          if-no-files-found: ignore

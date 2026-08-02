@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -71,71 +72,36 @@ jobs:
           go vet -tags=integration ./...
           go test -tags=integration ./... -run '^$'
 
-      # `go test` only runs the seed corpus. A short real fuzz run on every PR
-      # is what actually exercises the parsers against bytes nobody thought to
-      # write down — these targets take raw vendor input, so that is the class
-      # of bug they exist to catch.
+      # `go test` only runs the seed corpus. Exercise every fuzz target on each
+      # PR with a fixed execution budget so this remains a strict, non-flaky
+      # gate. Go can spuriously fail when a duration-based -fuzztime expires
+      # (go.dev/issue/75804). The fix is on master but is in no released branch
+      # as of go1.27rc2, so it lands in Go 1.28 — do not restore duration-based
+      # runs when this job moves to 1.27. The scheduled deep-fuzz workflow
+      # carries the larger search budget in the meantime.
       - name: Fuzz parsers
+        id: fuzz
         run: |
-          set -e
-          for target in \
-            FuzzStreamReader_Strict \
-            FuzzStreamReader_Tolerant \
-            FuzzStreamReader_ToleranceSkipsParseErrors \
-            FuzzStreamReader_FrameCeiling \
-            FuzzDetectStreamError \
-            FuzzExtractRetryAfter
-          do
-            echo "== $target"
-            go test ./provider/compat/ -run '^$' -fuzz "^${target}$" -fuzztime=20s
-          done
-          for target in \
-            FuzzParseDataURI \
-            FuzzContentToString \
-            FuzzContentToParts \
-            FuzzDecodeToolCalls \
-            FuzzExtractUsageFields \
-            FuzzNormalizeUsage \
-            FuzzRequestIDFromHeader \
-            FuzzTruncateForLog
-          do
-            echo "== $target"
-            go test ./provider/ -run '^$' -fuzz "^${target}$" -fuzztime=20s
-          done
+          bash .github/scripts/run-fuzz.sh 100000x \
+            ./provider/compat/ \
+            ./provider/ \
+            ./internal/sse/ \
+            ./protocol/responses/ \
+            ./protocol/anthropic/
 
-          # Native protocols have several tagged unions and share a byte-level
-          # SSE decoder. Discover their package-local fuzzers so a newly added
-          # union/event cannot silently miss the CI fuzz pass. Keep this slice
-          # shorter than the mature provider targets to bound total CI time.
-          fuzz_package() {
-            package=$1
-            targets=$(go test "$package" -list '^Fuzz' | awk '/^Fuzz[[:alnum:]_]+$/')
-            if [ -z "$targets" ]; then
-              echo "no fuzz targets found in $package"
-              exit 1
-            fi
-            while IFS= read -r target; do
-              echo "== $package $target"
-              go test "$package" -run '^$' -fuzz "^${target}$" -fuzztime=10s
-            done <<< "$targets"
-          }
-          fuzz_package ./internal/sse/
-          fuzz_package ./protocol/responses/
-          fuzz_package ./protocol/anthropic/
+      # Go writes a newly discovered failure under testdata/fuzz. Stage only
+      # untracked files: tracked regression seeds already exist in the tree and
+      # must not make an unrelated failure look like a newly found crasher.
+      - name: Collect new fuzz failures
+        if: ${{ failure() && steps.fuzz.outcome == 'failure' }}
+        run: bash .github/scripts/collect-fuzz-crashers.sh "$RUNNER_TEMP/fuzz-crashers"
 
-      # A crasher found above is written here. Surface it as an artifact so the
-      # failing input can be added to the seed corpus rather than lost.
       - name: Upload fuzz failures
-        if: failure()
+        if: ${{ failure() && steps.fuzz.outcome == 'failure' }}
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crashers
-          path: |
-            provider/testdata/fuzz/**
-            provider/compat/testdata/fuzz/**
-            internal/sse/testdata/fuzz/**
-            protocol/responses/testdata/fuzz/**
-            protocol/anthropic/testdata/fuzz/**
+          name: fuzz-crashers-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuzz-crashers/
           if-no-files-found: ignore
 
       - name: Smoke-test llmkit-probe
