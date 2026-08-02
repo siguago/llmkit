@@ -37,6 +37,7 @@
 - Responses 已建模 DTO 会保留「字段缺失、显式 `null`、空值」的线格式差异，覆盖 assistant `phase`、reasoning 加密内容、prompt、图片/文件输入与函数工具等；citation 的必填空字符串和零索引也不会在重编码或流终态克隆时丢失。type-omitted easy assistant message 新增正式 `Phase` 字段，便于多轮续接时原样回传。
 - OpenAI Responses 及 Anthropic 的所有流式入口（包括统一 `Client.ChatStream`）不再被 `http.Client.Timeout` 在 900 秒整体截断；这些路径没有活跃流的 SDK 兜底超时，由调用 context 控制生命周期。其他保留既有 900 秒上限的 adapter 未改变。
 - Responses 的默认单帧上限提高到公开常量 `DefaultResponsesMaxFrameBytes`（32 MiB），可容纳文档规定的 base64 图片事件；显式 `WithMaxStreamFrameBytes` 仍优先。该上限按实际帧惰性增长，但解帧与 JSON 解析可能同时持有多份数据，高并发连接不应无依据地继续调大。
+- Responses `Accumulator.Add` 失败后现在完整回滚 ID 回填、content part 追加/替换与 pending part flush，不再让被拒绝的事件污染后续有效事件的状态。
 
 ## v0.4.0 — 2026-08-01
 
