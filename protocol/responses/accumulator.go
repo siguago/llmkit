@@ -123,23 +123,25 @@ func (a *Accumulator) apply(event *Event, undo *rollback) error {
 			if err != nil {
 				return err
 			}
-			if err := setContentPart(message, event.ContentPart.ContentIndex, part); err != nil {
+			if err := setContentPart(message, event.ContentPart.ContentIndex, part, undo); err != nil {
 				return err
 			}
-			return a.flushPendingContentParts(event.ContentPart.OutputIndex)
+			return a.flushPendingContentParts(event.ContentPart.OutputIndex, undo)
 		case ContentTypeReasoningText:
-			target, err := a.ensureReasoningPart(event.ContentPart.OutputIndex, event.ContentPart.ContentIndex, event.ContentPart.ItemID, false, undo)
+			_, err := a.ensureReasoningPart(event.ContentPart.OutputIndex, event.ContentPart.ContentIndex, event.ContentPart.ItemID, false, undo)
 			if err != nil {
 				return err
 			}
-			*target = part
-			return a.flushPendingContentParts(event.ContentPart.OutputIndex)
+			reasoning := a.response.Output[event.ContentPart.OutputIndex].Reasoning
+			replaceContentPartTracked(&reasoning.Content, event.ContentPart.ContentIndex, part, undo)
+			return a.flushPendingContentParts(event.ContentPart.OutputIndex, undo)
 		case ContentTypeSummaryText:
-			target, err := a.ensureReasoningPart(event.ContentPart.OutputIndex, event.ContentPart.ContentIndex, event.ContentPart.ItemID, true, undo)
+			_, err := a.ensureReasoningPart(event.ContentPart.OutputIndex, event.ContentPart.ContentIndex, event.ContentPart.ItemID, true, undo)
 			if err != nil {
 				return err
 			}
-			*target = part
+			reasoning := a.response.Output[event.ContentPart.OutputIndex].Reasoning
+			replaceContentPartTracked(&reasoning.Summary, event.ContentPart.ContentIndex, part, undo)
 			return nil
 		default:
 			// A future part still occupies its content index. Keep it aside until
@@ -356,14 +358,14 @@ func (a *Accumulator) replaceResponse(source *Response) error {
 	return nil
 }
 
-// rollback collects undo steps for the structural growth performed while
-// handling one event.
+// rollback collects undo steps for mutations performed while handling one
+// event.
 //
-// Every mutation it guards appends to the tail of a slice or sets a nil field,
-// so undoing is a reslice or an assignment — O(1), with no copying. That is
-// what makes "a rejected event changes nothing" affordable here: snapshotting
-// instead would mean deep-copying the response per event, and cloneItem goes
-// through JSON, so the cost would scale with event count times response size.
+// Every guarded mutation has an O(1) inverse: assignment, restoring a saved
+// slice header after an append, or restoring a map entry. That makes "a rejected
+// event changes nothing" affordable here. Snapshotting instead would deep-copy
+// the response per event, and cloneItem goes through JSON, so the cost would
+// scale with event count times response size.
 //
 // Leaving the growth in place is not a cosmetic problem. A placeholder appended
 // for an event that is then rejected changes len(Output), so a later *valid*
@@ -411,15 +413,16 @@ func (a *Accumulator) setOutputItem(index int, item Item, undo *rollback) error 
 		return fmt.Errorf("responses: output_index %d skips current length %d", index, len(response.Output))
 	}
 	if index == len(response.Output) {
+		previous := response.Output
 		response.Output = append(response.Output, item)
-		undo.add(func() { response.Output = response.Output[:index] })
+		undo.add(func() { response.Output = previous })
 	} else {
 		previous := response.Output[index]
 		response.Output[index] = item
 		undo.add(func() { response.Output[index] = previous })
 	}
 	// flush can still reject this event, so the writes above must be undoable.
-	return a.flushPendingContentParts(index)
+	return a.flushPendingContentParts(index, undo)
 }
 
 func (a *Accumulator) ensureMessage(index int, itemID string, undo *rollback) (*Message, error) {
@@ -441,15 +444,20 @@ func (a *Accumulator) ensureMessage(index int, itemID string, undo *rollback) (*
 		return nil, err
 	}
 	if item.Message.ID == "" {
+		message := item.Message
+		previousID := message.ID
 		item.Message.ID = itemID
+		undo.add(func() { message.ID = previousID })
 	}
 	if item.Message.Content.Parts == nil {
 		if item.Message.Content.Text != nil || len(item.Message.Content.Raw) > 0 {
 			return nil, fmt.Errorf("responses: output[%d] message content is not a part array", index)
 		}
-		item.Message.Content.Parts = []ContentPart{}
+		message := item.Message
+		message.Content.Parts = []ContentPart{}
+		undo.add(func() { message.Content.Parts = nil })
 	}
-	if err := a.flushPendingContentParts(index); err != nil {
+	if err := a.flushPendingContentParts(index, undo); err != nil {
 		return nil, err
 	}
 	return item.Message, nil
@@ -467,26 +475,28 @@ func (a *Accumulator) ensureMessagePart(outputIndex, contentIndex int, itemID, c
 		return nil, fmt.Errorf("responses: content_index %d skips current length %d", contentIndex, len(message.Content.Parts))
 	}
 	if contentIndex == len(message.Content.Parts) {
+		previous := message.Content.Parts
 		message.Content.Parts = append(message.Content.Parts, ContentPart{})
-		undo.add(func() { message.Content.Parts = message.Content.Parts[:contentIndex] })
+		undo.add(func() { message.Content.Parts = previous })
 	}
-	part := &message.Content.Parts[contentIndex]
+	parts := &message.Content.Parts
+	part := &(*parts)[contentIndex]
 	if isPlaceholderPart(*part) {
-		previous := *part
+		var replacement ContentPart
 		switch contentType {
 		case ContentTypeOutputText:
-			*part = NewOutputTextPart("")
+			replacement = NewOutputTextPart("")
 		case ContentTypeRefusal:
-			*part = NewRefusalPart("")
+			replacement = NewRefusalPart("")
 		default:
 			return nil, fmt.Errorf("responses: unsupported message content type %q", contentType)
 		}
-		undo.add(func() { *part = previous })
+		part = replaceContentPartTracked(parts, contentIndex, replacement, undo)
 	}
 	if part.Type != contentType {
 		return nil, fmt.Errorf("responses: output[%d].content[%d] is %q, want %q", outputIndex, contentIndex, part.Type, contentType)
 	}
-	if err := a.flushPendingContentParts(outputIndex); err != nil {
+	if err := a.flushPendingContentParts(outputIndex, undo); err != nil {
 		return nil, err
 	}
 	return &message.Content.Parts[contentIndex], nil
@@ -511,7 +521,10 @@ func (a *Accumulator) ensureFunctionCall(index int, itemID string, undo *rollbac
 		return nil, err
 	}
 	if item.FunctionCall.ID == "" {
+		call := item.FunctionCall
+		previousID := call.ID
 		item.FunctionCall.ID = itemID
+		undo.add(func() { call.ID = previousID })
 	}
 	return item.FunctionCall, nil
 }
@@ -532,10 +545,13 @@ func (a *Accumulator) ensureReasoningPart(outputIndex, partIndex int, itemID str
 		return nil, err
 	}
 	if item.Reasoning.ID == "" {
+		reasoning := item.Reasoning
+		previousID := reasoning.ID
 		item.Reasoning.ID = itemID
+		undo.add(func() { reasoning.ID = previousID })
 	}
 	if !summary {
-		if err := a.flushPendingContentParts(outputIndex); err != nil {
+		if err := a.flushPendingContentParts(outputIndex, undo); err != nil {
 			return nil, err
 		}
 	}
@@ -552,22 +568,25 @@ func (a *Accumulator) ensureReasoningPart(outputIndex, partIndex int, itemID str
 		return nil, fmt.Errorf("responses: reasoning part index %d skips current length %d", partIndex, len(*parts))
 	}
 	if partIndex == len(*parts) {
+		previous := *parts
 		*parts = append(*parts, ContentPart{})
-		undo.add(func() { *parts = (*parts)[:partIndex] })
+		undo.add(func() { *parts = previous })
 	}
 	part := &(*parts)[partIndex]
 	if isPlaceholderPart(*part) {
+		var replacement ContentPart
 		if summary {
-			*part = NewSummaryTextPart("")
+			replacement = NewSummaryTextPart("")
 		} else {
-			*part = NewReasoningTextPart("")
+			replacement = NewReasoningTextPart("")
 		}
+		part = replaceContentPartTracked(parts, partIndex, replacement, undo)
 	}
 	if part.Type != contentType {
 		return nil, fmt.Errorf("responses: reasoning part %d is %q, want %q", partIndex, part.Type, contentType)
 	}
 	if !summary {
-		if err := a.flushPendingContentParts(outputIndex); err != nil {
+		if err := a.flushPendingContentParts(outputIndex, undo); err != nil {
 			return nil, err
 		}
 		return &item.Reasoning.Content[partIndex], nil
@@ -596,10 +615,10 @@ func (a *Accumulator) stashContentPart(outputIndex, contentIndex int, itemID str
 		}
 		delete(a.pendingContentParts, key)
 	})
-	return a.flushPendingContentParts(outputIndex)
+	return a.flushPendingContentParts(outputIndex, undo)
 }
 
-func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
+func (a *Accumulator) flushPendingContentParts(outputIndex int, undo *rollback) error {
 	if len(a.pendingContentParts) == 0 || a.response == nil ||
 		outputIndex < 0 || outputIndex >= len(a.response.Output) {
 		return nil
@@ -617,7 +636,9 @@ func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
 			if item.Message.Content.Text != nil || len(item.Message.Content.Raw) > 0 {
 				return nil
 			}
-			item.Message.Content.Parts = []ContentPart{}
+			message := item.Message
+			message.Content.Parts = []ContentPart{}
+			undo.add(func() { message.Content.Parts = nil })
 		}
 		parts = &item.Message.Content.Parts
 	case item.Reasoning != nil:
@@ -659,8 +680,13 @@ func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
 		}
 		existing := &(*parts)[key.contentIndex]
 		if isPlaceholderPart(*existing) || existing.Type == pending.part.Type {
+			previous := *existing
 			*existing = pending.part
+			index := key.contentIndex
+			undo.add(func() { (*parts)[index] = previous })
 			delete(a.pendingContentParts, key)
+			deletedKey, deletedPart := key, pending
+			undo.add(func() { a.pendingContentParts[deletedKey] = deletedPart })
 		}
 	}
 
@@ -670,8 +696,12 @@ func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
 		if !exists {
 			break
 		}
+		previous := *parts
 		*parts = append(*parts, pending.part)
+		undo.add(func() { *parts = previous })
 		delete(a.pendingContentParts, key)
+		deletedKey, deletedPart := key, pending
+		undo.add(func() { a.pendingContentParts[deletedKey] = deletedPart })
 	}
 	return nil
 }
@@ -701,13 +731,14 @@ func (a *Accumulator) ensureOutputSlot(index int, undo *rollback) (*Item, error)
 		return nil, fmt.Errorf("responses: output_index %d skips current length %d", index, len(response.Output))
 	}
 	if index == len(response.Output) {
+		previous := response.Output
 		response.Output = append(response.Output, Item{})
-		undo.add(func() { response.Output = response.Output[:index] })
+		undo.add(func() { response.Output = previous })
 	}
 	return &response.Output[index], nil
 }
 
-func setContentPart(message *Message, index int, part ContentPart) error {
+func setContentPart(message *Message, index int, part ContentPart, undo *rollback) error {
 	if index < 0 {
 		return fmt.Errorf("responses: negative content_index %d", index)
 	}
@@ -715,11 +746,25 @@ func setContentPart(message *Message, index int, part ContentPart) error {
 		return fmt.Errorf("responses: content_index %d skips current length %d", index, len(message.Content.Parts))
 	}
 	if index == len(message.Content.Parts) {
+		previous := message.Content.Parts
 		message.Content.Parts = append(message.Content.Parts, part)
+		undo.add(func() { message.Content.Parts = previous })
 		return nil
 	}
+	previous := message.Content.Parts[index]
 	message.Content.Parts[index] = part
+	undo.add(func() { message.Content.Parts[index] = previous })
 	return nil
+}
+
+// replaceContentPartTracked locates the part through its owning slice both
+// when applying and undoing the replacement. Capturing &slice[index] in the
+// undo closure would become stale if a later append reallocates the slice.
+func replaceContentPartTracked(parts *[]ContentPart, index int, part ContentPart, undo *rollback) *ContentPart {
+	previous := (*parts)[index]
+	(*parts)[index] = part
+	undo.add(func() { (*parts)[index] = previous })
+	return &(*parts)[index]
 }
 
 func matchItemID(existing, incoming string, index int) error {
