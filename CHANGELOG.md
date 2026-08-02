@@ -2,11 +2,26 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## Unreleased
+## v0.5.0 — 2026-08-02
 
-新增两套**显式原生协议面**，不改变现有 `Chat` / `ChatStream` 的 DTO、路由或默认 wire 行为。没有按模型名自动切换，也没有把所有 provider 一次性声明成支持。
+新增两套**显式原生协议面**，不改变现有 `Chat` / `ChatStream` 的 DTO、路由或默认 wire 行为。没有按模型名自动切换，也没有把所有 provider 一次性声明成支持。**没有公开 API 的删除或签名变更；唯一需要动手的是给流式调用的 context 加 deadline，见下表。**
 
 > 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
+
+### 从 v0.4.0 升级
+
+**只有一处需要动手：给流式调用的 context 加上 deadline。** 其余全是加法。
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| Anthropic 上的 `ChatStream`，且 context 没有 deadline | **行为变化** —— v0.4.0 有 900 秒 `http.Client.Timeout` 兜底，现在没有了。对端建连后不再发数据时，`Recv` 会永久阻塞，而不是 900 秒后报错 | `ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)` |
+| compat / Gemini / OpenRouter / DeepSeek 上的 `ChatStream` | 不受影响 —— 仍保留 900 秒兼容上限 | —（但别依赖它，见「已知问题」） |
+| `WithTimeout(...)` | 不受影响 —— 它在 v0.4.0 就已经只作用于非流式调用，这次只是把文档写准 | — |
+| 显式设过 `WithMaxStreamFrameBytes(n)`（n 为正） | 不受影响 —— 显式正值仍然优先，对 Responses 也一样 | — |
+| 没设过帧上限，且要用新的 OpenAI Responses 流 | 该路径默认上限是 32 MiB 而非 1 MiB | 需要更严就显式设；见「已知问题」的内存说明 |
+| 遍历 `Models()`、用 `RemoteModel`、任何 v0.4.0 的统一 Chat / 媒体调用 | 不受影响 | — |
+
+从「900 秒后报错」变成「不报错也不返回」，比报错更难排查 —— 这是本次升级唯一会咬人的地方，所以单独列在最前面。
 
 ### 新增
 
@@ -38,6 +53,17 @@
 - OpenAI Responses 及 Anthropic 的所有流式入口（包括统一 `Client.ChatStream`）不再被 `http.Client.Timeout` 在 900 秒整体截断；这些路径没有活跃流的 SDK 兜底超时，由调用 context 控制生命周期。其他保留既有 900 秒上限的 adapter 未改变。
 - Responses 的默认单帧上限提高到公开常量 `DefaultResponsesMaxFrameBytes`（32 MiB），可容纳文档规定的 base64 图片事件；显式 `WithMaxStreamFrameBytes` 仍优先。该上限按实际帧惰性增长，但解帧与 JSON 解析可能同时持有多份数据，高并发连接不应无依据地继续调大。
 - Responses `Accumulator.Add` 失败后现在完整回滚 ID 回填、content part 追加/替换与 pending part flush，不再让被拒绝的事件污染后续有效事件的状态。
+- CI 的 fuzz 门禁改用固定执行次数，绕开 Go 的 [#75804](https://go.dev/issue/75804)（`-fuzztime=<时长>` 到期时偶发误报 `context deadline exceeded`）。目标发现改为 `go test -list`，新增 fuzz 目标不会再静默漏出 CI；crasher artifact 只收集本次新产生的未跟踪文件，已提交的回归种子不再被当成新发现。深度搜索移交每日 `deep-fuzz` 定时工作流。
+
+### 已知问题
+
+- **OpenAI Responses 与 Anthropic 的流没有 SDK 兜底超时。** 这是设计选择：background、deep-research 和长推理会合法地长时间持有连接，任何固定上限都会砍断正常的流。代价是对端建连后静默时，无 deadline 的 context 会让 `Recv` 永久阻塞 —— 默认 transport 的 `IdleConnTimeout` 只回收连接池里的空闲连接，不会终止活跃流。**请求级 context 是唯一约束**，生产代码应当总是带 deadline。
+- **compat、Gemini、OpenRouter、DeepSeek 仍保留 900 秒流上限，与上一条不一致。** 保留是为了避免一次改动同时改掉所有 provider 的挂起行为，不是承诺。后续版本可能统一去掉，调用方不应依赖这个数字。
+- **Responses 的 32 MiB 默认帧上限会随并发放大。** 解码器按实际帧惰性增长，不为每条流预留整块内存；但它限制的是单帧内容而非进程总内存，行缓冲、`data` 累积和随后的 JSON 解码可能同时持有多份接近上限的数据。面向不可信中转站或高并发场景，应显式用 `WithMaxStreamFrameBytes` 收紧。
+- **两套原生 transport 只保证各自的官方直连端点。** AWS Bedrock、Google Vertex AI 与兼容 relay 的鉴权、路径和 wire shape 均未验证。Anthropic 原生响应现在按官方 schema 严格校验，精简了 `id` / `type` / `role` / `model` / `content` / `usage` 的中转站会得到 `ErrInvalidWire`（见「兼容性提示」）。
+- **PR 档 fuzz 预算按目标降到 100000 次执行，深度搜索移交每日定时任务。** 这是为绕开上述 Go #75804 付出的代价；修复截至 `go1.27rc2` 未进入任何发布分支，预计随 Go 1.28 到来。在此之前不要把 CI 切回按时长运行。
+
+---
 
 ## v0.4.0 — 2026-08-01
 
