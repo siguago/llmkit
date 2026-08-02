@@ -22,6 +22,10 @@
 - HTTP 错误仍返回 Go error；Responses 的 `completed` / `failed` / `incomplete` 是成功解码出的资源状态，调用方检查 `Status`、`Error` 与 `IncompleteDetails`。终态事件前断流返回错误，不把部分输出伪装成完整结果。
 - 原生 DTO 不承诺与统一 Chat DTO 无损互转。OpenAI Responses 首发 transport 只接官方 OpenAI，Anthropic Messages 首发 transport 只接官方 Anthropic；AWS Bedrock、Google Vertex AI 与兼容 relay 需要分别验证鉴权、路径和能力后 opt in。
 
+### 兼容性提示
+
+- Anthropic `MessageResponse` 现在按官方 Messages schema 严格校验必填字段、`type=message`、`role=assistant` 与 `usage.input_tokens` / `usage.output_tokens`。同步 200 响应和流式 `message_start` 中缺失、置 `null` 或改写这些字段的中转站与私有部署，升级后会收到 `ErrInvalidWire`，不再得到补零后的伪成功结果；合法零计数与未知扩展字段仍兼容。非官方端点请在启用原生 Messages 能力前验证实际 wire shape。
+
 ### 测试与发布门禁
 
 - 增加共享 SSE framing、两套原生 union/event/accumulator、transport、资源路径、能力探测、重试与终态语义的离线测试和 fuzz 入口。

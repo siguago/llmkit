@@ -118,6 +118,8 @@ for _, model := range models {
 
 Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsResponseStreaming`、`SupportsResponseRetrieval`、`SupportsResponseCancellation`、`SupportsResponseDeletion`、`SupportsResponseInputItems`、`SupportsResponseTokenCount`。Anthropic 对应 `SupportsAnthropicMessages`、`SupportsAnthropicMessageStreaming`、`SupportsAnthropicTokenCount`。这能让只实现部分路由的 relay 如实声明能力；当前首发 transport 仍只保证两家官方直连端点。
 
+Anthropic 原生响应按官方 schema 严格校验稳定身份字段、`type=message`、`role=assistant` 和必填 usage 计数器。某些中转站或私有部署会精简这些字段；这种载荷会返回 `anthropicapi.ErrInvalidWire`，不会被补成看似成功的零值消息。非官方端点应先验证同步响应和流式 `message_start` 的实际 wire shape，再声明原生 Messages 能力。
+
 > 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
 
 > 前面的统一 Chat / 媒体能力表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。

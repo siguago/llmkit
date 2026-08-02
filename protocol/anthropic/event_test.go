@@ -592,12 +592,11 @@ func TestAccumulatorEnforcesMessageStreamPhases(t *testing.T) {
 		{name: "content cannot be null", content: `,"content":null`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			accumulator := NewAccumulator()
 			fixture := `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}` +
 				test.content + `}}`
-			err := applyFixtureError(t, accumulator, fixture)
-			if !errors.Is(err, ErrStreamState) {
-				t.Fatalf("Add error = %v, want ErrStreamState", err)
+			_, err := ParseEvent([]byte(fixture))
+			if !errors.Is(err, ErrInvalidWire) {
+				t.Fatalf("ParseEvent error = %v, want ErrInvalidWire", err)
 			}
 		})
 	}

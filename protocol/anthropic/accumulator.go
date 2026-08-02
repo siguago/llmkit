@@ -118,13 +118,6 @@ func (accumulator *Accumulator) addMessageStart(event *MessageStartEvent) error 
 	if event.Message.Content == nil || len(event.Message.Content) != 0 {
 		return fmt.Errorf("%w: message_start content must be empty", ErrStreamState)
 	}
-	// These four are stable in the Messages API and carry the message's
-	// identity. Absent or null they decode to the zero value, and the stream
-	// then completes normally into a message whose ID, model and role are all
-	// empty — a result that looks successful and cannot be acted on.
-	if err := requireMessageIdentity(&event.Message); err != nil {
-		return err
-	}
 	message, err := cloneMessageResponse(&event.Message)
 	if err != nil {
 		return fmt.Errorf("anthropic: clone message_start: %w", err)
@@ -132,32 +125,6 @@ func (accumulator *Accumulator) addMessageStart(event *MessageStartEvent) error 
 	message.RequestID = accumulator.requestID
 	message.Content = nil
 	accumulator.message = message
-	return nil
-}
-
-// requireMessageIdentity rejects a message_start missing the fields every
-// Messages response carries.
-//
-// Usage is deliberately not required: message_start legitimately reports a
-// partial count that later message_delta events revise, so a low or zero
-// output_tokens is not evidence of a malformed stream the way a missing ID is.
-func requireMessageIdentity(message *MessageResponse) error {
-	if message == nil {
-		return fmt.Errorf("%w: message_start has no message", ErrInvalidWire)
-	}
-	for _, field := range []struct {
-		name  string
-		value string
-	}{
-		{"id", message.ID},
-		{"model", message.Model},
-		{"role", string(message.Role)},
-	} {
-		if field.value == "" {
-			return fmt.Errorf("%w: message_start message is missing required field %q",
-				ErrInvalidWire, field.name)
-		}
-	}
 	return nil
 }
 
