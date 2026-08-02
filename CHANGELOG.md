@@ -2,6 +2,36 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## Unreleased
+
+新增两套**显式原生协议面**，不改变现有 `Chat` / `ChatStream` 的 DTO、路由或默认 wire 行为。没有按模型名自动切换，也没有把所有 provider 一次性声明成支持。
+
+> 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
+
+### 新增
+
+- OpenAI 官方直连 adapter 新增 Responses create、stream、retrieve、delete、cancel、input-items、input-token-count，以及根包的 `WaitResponse` 后台任务轮询 helper。请求/响应、异构 item/content、核心 stream event 与 forward-compatible Raw 类型位于 `protocol/responses`。
+- Anthropic 官方直连 adapter 新增原生 Messages create、stream 与服务端 token count。请求/响应、content block、tool use/result、thinking、usage、核心 stream event、请求级 `anthropic-version` / `anthropic-beta` 选项与 Raw 类型位于 `protocol/anthropic`；默认稳定版本为 `2023-06-01`。
+- provider 能力按 endpoint 拆成细粒度可选接口，根包新增对应 `Supports*` 探测。只实现 JSON create、没有 SSE 或资源生命周期的 relay 可以只声明真实存在的那一部分。
+- 新增 `examples/responses` 与 `examples/anthropic-native`；两者用 `-mode=sync|stream|tokens` 一次只执行一种操作，避免示例本身无意触发两次生成。
+
+### 行为边界
+
+- 原生 create 使用常规重试配置的 replay-safe-only 子集。能生成内容并计费的请求没有 SDK 级幂等键；5xx、读超时或中途断链等「上游可能已经受理」的失败不会自动重放。流返回后发生的 `Recv` 错误也不会从头重放。
+- SDK 不擅自覆盖 OpenAI Responses 的 `store` 默认值。示例在无需持久状态时显式使用 `store:false`；需要 retrieve、input-items 或 previous-response 状态链路时，由调用方明确决定保留策略并负责删除。
+- HTTP 错误仍返回 Go error；Responses 的 `completed` / `failed` / `incomplete` 是成功解码出的资源状态，调用方检查 `Status`、`Error` 与 `IncompleteDetails`。终态事件前断流返回错误，不把部分输出伪装成完整结果。
+- 原生 DTO 不承诺与统一 Chat DTO 无损互转。OpenAI Responses 首发 transport 只接官方 OpenAI，Anthropic Messages 首发 transport 只接官方 Anthropic；AWS Bedrock、Google Vertex AI 与兼容 relay 需要分别验证鉴权、路径和能力后 opt in。
+
+### 测试与发布门禁
+
+- 增加共享 SSE framing、两套原生 union/event/accumulator、transport、资源路径、能力探测、重试与终态语义的离线测试和 fuzz 入口。
+- CI 在声明的 Go 1.22 下使用 `GOTOOLCHAIN=local`，防止静默下载更新工具链掩盖最低版本回归；零依赖检查同时验证 module graph、`go mod tidy` 后的差异和不存在 `go.sum`。
+
+### 修复
+
+- Anthropic 流累计在服务端 fallback 后会按最后一次跳转更新最终模型；compaction delta 同时保留续轮所需的 `encrypted_content`。对象型 DTO 不再把顶层 `null` 当作成功的零值响应。
+- Responses 已建模 DTO 会保留「字段缺失、显式 `null`、空值」的线格式差异，覆盖 assistant `phase`、reasoning 加密内容、prompt、图片/文件输入与函数工具等；citation 的必填空字符串和零索引也不会在重编码或流终态克隆时丢失。type-omitted easy assistant message 新增正式 `Phase` 字段，便于多轮续接时原样回传。
+
 ## v0.4.0 — 2026-08-01
 
 一项新能力：逐模型任务发现，让混合目录里的对话 / 向量 / 图片 / 视频模型第一次能被区分开。**没有破坏性变更，`RemoteModel` 一个字节都没动 —— 升级不需要改任何代码。**

@@ -1,0 +1,10 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": "hello",
+      "role": "user"
+    }
+  ],
+  "model": "claude-test"
+}

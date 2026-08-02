@@ -393,6 +393,20 @@ func TestIsSafeToReplay_OrthogonalToIsRetryable(t *testing.T) {
 	}
 }
 
+func TestIsSafeToReplay_ExplicitUnsafeMarkerWinsOverRateLimitCategory(t *testing.T) {
+	err := provider.MarkUnsafeToReplay(provider.WithErrorMetadata(
+		apiErr(http.StatusTooManyRequests),
+		"rate_limit_error",
+		provider.ErrorCategoryRateLimit,
+	))
+	if !IsRateLimited(err) || !IsRetryable(err) {
+		t.Fatalf("marker must preserve rate-limit classification: retryable=%t rateLimited=%t", IsRetryable(err), IsRateLimited(err))
+	}
+	if IsSafeToReplay(err) {
+		t.Fatal("explicit replay-unsafe marker must override the rate-limit category")
+	}
+}
+
 func TestReplaySafeOnly_NarrowsButKeepsShape(t *testing.T) {
 	base := DefaultRetry()
 	narrowed := base.replaySafeOnly()

@@ -20,11 +20,13 @@ const (
 	//
 	// Attaching it carries a second, stronger claim than the other categories:
 	// that the upstream refused the work *before* starting it, so nothing
-	// billable happened. IsSafeToReplay trusts that claim and will replay
-	// image and video creation on it, where a duplicate attempt costs real
-	// money. An HTTP 429 earns the claim by itself; a vendor that answers 200
-	// and reports the limit in the body does not, so only use this category
-	// there when the vendor documents that such a response is never charged.
+	// billable happened. IsSafeToReplay trusts that claim for billable creation
+	// calls, where a duplicate attempt costs real money, unless the same error is
+	// explicitly marked with
+	// MarkUnsafeToReplay. An HTTP 429 earns the claim by itself; a vendor that
+	// answers 200 and reports the limit in the body does not, so only use this
+	// category there when the vendor documents that such a response is never
+	// charged.
 	// When in doubt leave the error uncategorized: the HTTP status then decides,
 	// and a 200 is neither retryable nor replay-safe.
 	ErrorCategoryRateLimit ErrorCategory = "rate_limit"
@@ -58,6 +60,36 @@ func (e *errorWithMetadata) Unwrap() error                { return e.err }
 func (e *errorWithMetadata) ProviderCode() string         { return e.code }
 func (e *errorWithMetadata) ErrorCategory() ErrorCategory { return e.category }
 
+// replayUnsafe identifies an error that must not be used as proof that an
+// operation is safe to repeat. Callers annotate through MarkUnsafeToReplay and
+// inspect through IsMarkedUnsafeToReplay instead of implementing this marker.
+type replayUnsafe interface {
+	error
+	replayUnsafe()
+}
+
+type replayUnsafeError struct{ err error }
+
+func (e *replayUnsafeError) Error() string { return e.err.Error() }
+func (e *replayUnsafeError) Unwrap() error { return e.err }
+func (e *replayUnsafeError) replayUnsafe() {}
+
+// MarkUnsafeToReplay annotates err without hiding its concrete cause or any
+// provider metadata. Repeated annotation is idempotent.
+func MarkUnsafeToReplay(err error) error {
+	if err == nil || IsMarkedUnsafeToReplay(err) {
+		return err
+	}
+	return &replayUnsafeError{err: err}
+}
+
+// IsMarkedUnsafeToReplay reports whether an adapter has explicitly ruled out
+// treating err as evidence that no billable work started.
+func IsMarkedUnsafeToReplay(err error) bool {
+	var marker replayUnsafe
+	return errors.As(err, &marker)
+}
+
 // valid reports whether c is one of the defined categories. ErrorCategory is a
 // string type, so a typo is a compile-time no-op and would otherwise become a
 // silent behavior change — see WithErrorMetadata.
@@ -74,10 +106,11 @@ func (c ErrorCategory) valid() bool {
 // category while preserving errors.Is/errors.As access to the original error.
 // A nil error stays nil; empty metadata returns err unchanged.
 //
-// The category overrides HTTP status for every classification helper, which is
+// The category overrides HTTP status for classification helpers, which is
 // the point on a vendor that answers 200 — and the risk everywhere else. Read
 // ErrorCategoryRateLimit before attaching it: it additionally asserts that
-// nothing billable happened, and replay of paid endpoints depends on that.
+// nothing billable happened, and replay of paid endpoints depends on that,
+// unless MarkUnsafeToReplay is also present.
 // Passing "" for the category is always safe and leaves the status in charge.
 //
 // An unrecognized category is dropped rather than honored. Because the helpers

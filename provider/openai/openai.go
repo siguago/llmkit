@@ -17,11 +17,14 @@ const defaultBaseURL = "https://api.openai.com/v1"
 
 type Provider struct {
 	*compat.Provider
-	baseURL       string
-	modelsURL     string
-	imagesGenURL  string
-	imagesEditURL string
-	client        *http.Client
+	baseURL                string
+	modelsURL              string
+	responsesURL           string
+	responseInputTokensURL string
+	imagesGenURL           string
+	imagesEditURL          string
+	client                 *http.Client
+	streamClient           *http.Client
 }
 
 // isReasoningModel reports whether the given model ID is an OpenAI reasoning
@@ -96,22 +99,29 @@ func NewWithBaseURL(baseURL string) *Provider {
 		baseURL = defaultBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+	outboundTransport := httpx.NewOutbound()
 	return &Provider{
 		Provider: compat.New(compat.Config{
 			ProviderName: "openai",
 			BaseURL:      baseURL,
 		}),
-		baseURL:       baseURL,
-		modelsURL:     baseURL + "/models",
-		imagesGenURL:  baseURL + "/images/generations",
-		imagesEditURL: baseURL + "/images/edits",
+		baseURL:                baseURL,
+		modelsURL:              baseURL + "/models",
+		responsesURL:           baseURL + "/responses",
+		responseInputTokensURL: baseURL + "/responses/input_tokens",
+		imagesGenURL:           baseURL + "/images/generations",
+		imagesEditURL:          baseURL + "/images/edits",
 		// 300s 与其它长任务 provider 对齐：共享给 ListModels（短任务，自带 30s
 		// context 内层兜底）和 images.go 的图像路径。dall-e-3 / gpt-image-2
 		// 单次请求经常 30-90s，30s 上限会让上游正常长任务被网关
 		// context.DeadlineExceeded 染成 502，掩盖真实状态。
 		client: &http.Client{
 			Timeout:   300 * time.Second,
-			Transport: httpx.NewOutbound(),
+			Transport: outboundTransport,
+		},
+		streamClient: &http.Client{
+			Timeout:   900 * time.Second,
+			Transport: outboundTransport,
 		},
 	}
 }

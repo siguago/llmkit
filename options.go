@@ -37,6 +37,13 @@ func (c clientConfig) mediaRetryPolicy() RetryConfig {
 	if c.mediaRetry != nil {
 		return *c.mediaRetry
 	}
+	return c.creationRetryPolicy()
+}
+
+// creationRetryPolicy narrows the general retry policy for billable creates
+// that have no idempotency key. A failure after the request may have reached
+// the model is surfaced instead of risking duplicate generation and billing.
+func (c clientConfig) creationRetryPolicy() RetryConfig {
 	return c.retry.replaySafeOnly()
 }
 

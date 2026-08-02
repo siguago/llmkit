@@ -1,27 +1,30 @@
 package anthropic
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/siguago/llmkit/internal/httpx"
 	"github.com/siguago/llmkit/internal/logging"
+	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
 	"github.com/siguago/llmkit/provider"
 )
 
 const defaultBaseURL = "https://api.anthropic.com/v1"
 
 type Provider struct {
-	baseURL      string
-	messagesURL  string
-	modelsURL    string
-	client       *http.Client // non-streaming requests (with timeout)
-	streamClient *http.Client // streaming requests (no global timeout)
+	baseURL       string
+	messagesURL   string
+	tokenCountURL string
+	modelsURL     string
+	client        *http.Client // non-streaming requests (with timeout)
+	streamClient  *http.Client // streaming requests (no global timeout)
 }
 
 // New constructs an Anthropic provider pointed at the official API.
@@ -38,17 +41,57 @@ func NewWithBaseURL(baseURL string) *Provider {
 	baseURL = strings.TrimRight(baseURL, "/")
 	outboundTransport := httpx.NewOutbound()
 	return &Provider{
-		baseURL:     baseURL,
-		messagesURL: baseURL + "/messages",
-		modelsURL:   baseURL + "/models",
+		baseURL:       baseURL,
+		messagesURL:   baseURL + "/messages",
+		tokenCountURL: baseURL + "/messages/count_tokens",
+		modelsURL:     baseURL + "/models",
 		client: &http.Client{
-			Timeout:   300 * time.Second,
-			Transport: outboundTransport,
+			Timeout:       300 * time.Second,
+			Transport:     outboundTransport,
+			CheckRedirect: checkAnthropicRedirect,
 		},
 		streamClient: &http.Client{
-			Timeout:   900 * time.Second, // generous safety-net; WriteTimeout (600s) handles normal cutoff
-			Transport: outboundTransport,
+			Timeout:       900 * time.Second, // generous safety-net; WriteTimeout (600s) handles normal cutoff
+			Transport:     outboundTransport,
+			CheckRedirect: checkAnthropicRedirect,
 		},
+	}
+}
+
+// checkAnthropicRedirect permits the ordinary same-origin redirect behavior,
+// but never forwards Anthropic's x-api-key to another origin. Defining a
+// callback replaces net/http's default ten-hop limit, so preserve that limit
+// explicitly as well.
+func checkAnthropicRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !sameHTTPOrigin(via[0].URL, req.URL) {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectiveHTTPPort(left) == effectiveHTTPPort(right)
+}
+
+func effectiveHTTPPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
 	}
 }
 
@@ -68,25 +111,15 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.messagesURL, bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, err
-	}
-	setHeaders(httpReq, apiKey)
+	var requestOptions []anthropicapi.RequestOption
 	if betas := requiredBetas(model, req); betas != "" {
-		httpReq.Header.Set("anthropic-beta", betas)
+		requestOptions = append(requestOptions, anthropicapi.WithBetas(betas))
 	}
-
-	resp, err := p.client.Do(httpReq)
+	resp, err := p.doLegacyChatRequest(ctx, apiKey, p.messagesURL, jsonBody, false, requestOptions...)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, "anthropic", respBody)
-	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -122,24 +155,13 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.messagesURL, bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, err
-	}
-	setHeaders(httpReq, apiKey)
+	var requestOptions []anthropicapi.RequestOption
 	if betas := requiredBetas(model, req); betas != "" {
-		httpReq.Header.Set("anthropic-beta", betas)
+		requestOptions = append(requestOptions, anthropicapi.WithBetas(betas))
 	}
-
-	resp, err := p.streamClient.Do(httpReq)
+	resp, err := p.doLegacyChatRequest(ctx, apiKey, p.messagesURL, jsonBody, true, requestOptions...)
 	if err != nil {
 		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, "anthropic", respBody)
 	}
 
 	return NewStreamReader(ctx, resp.Body, jsonSchemaToolName), nil
@@ -247,12 +269,6 @@ func anthropicModelTaskTypes(modelID string) []string {
 }
 
 var _ provider.ModelTaskLister = (*Provider)(nil)
-
-func setHeaders(req *http.Request, apiKey string) {
-	provider.SetKeyHeader(req.Header, "x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("content-type", "application/json")
-}
 
 // validateRequest enforces Anthropic-specific request shape constraints that
 // the upstream wouldn't catch before consuming a billable connection. We map

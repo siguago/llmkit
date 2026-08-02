@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The whitespace check compares the whole PR with its base, not just
+          # the final commit or the post-tidy working tree.
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
@@ -25,13 +29,34 @@ jobs:
             exit 1
           fi
 
-      - name: Verify zero dependencies
+      - name: Check patch whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          # The selling point is a standard-library-only SDK. Fail loudly if a
-          # third-party require ever sneaks into go.mod.
-          if grep -qE '^\s*(require|\t)[^ ]+\.[^ ]+/' go.mod; then
-            echo "go.mod gained a third-party dependency:"
-            cat go.mod
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$PR_BASE_SHA...HEAD"
+          else
+            git show --check --format= HEAD
+          fi
+
+      - name: Verify zero dependencies
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          # Check the resolved graph, not the spelling of go.mod: grouped,
+          # indirect and tool dependencies must all fail this invariant.
+          module_count=$(go list -m all | wc -l | tr -d ' ')
+          if [ "$module_count" -ne 1 ]; then
+            echo "module graph gained a dependency:"
+            go list -m all
+            exit 1
+          fi
+          go mod tidy
+          git diff --exit-code -- go.mod
+          if [ -f go.sum ]; then
+            echo "go mod tidy created go.sum; the module is no longer dependency-free:"
+            cat go.sum
             exit 1
           fi
 
@@ -42,7 +67,9 @@ jobs:
       # The integration tests carry a build tag, so the run above never compiles
       # them — nothing else would catch a break in that file.
       - name: Vet integration tests
-        run: go vet -tags=integration ./...
+        run: |
+          go vet -tags=integration ./...
+          go test -tags=integration ./... -run '^$'
 
       # `go test` only runs the seed corpus. A short real fuzz run on every PR
       # is what actually exercises the parsers against bytes nobody thought to
@@ -76,6 +103,26 @@ jobs:
             go test ./provider/ -run '^$' -fuzz "^${target}$" -fuzztime=20s
           done
 
+          # Native protocols have several tagged unions and share a byte-level
+          # SSE decoder. Discover their package-local fuzzers so a newly added
+          # union/event cannot silently miss the CI fuzz pass. Keep this slice
+          # shorter than the mature provider targets to bound total CI time.
+          fuzz_package() {
+            package=$1
+            targets=$(go test "$package" -list '^Fuzz' | awk '/^Fuzz[[:alnum:]_]+$/')
+            if [ -z "$targets" ]; then
+              echo "no fuzz targets found in $package"
+              exit 1
+            fi
+            while IFS= read -r target; do
+              echo "== $package $target"
+              go test "$package" -run '^$' -fuzz "^${target}$" -fuzztime=10s
+            done <<< "$targets"
+          }
+          fuzz_package ./internal/sse/
+          fuzz_package ./protocol/responses/
+          fuzz_package ./protocol/anthropic/
+
       # A crasher found above is written here. Surface it as an artifact so the
       # failing input can be added to the seed corpus rather than lost.
       - name: Upload fuzz failures
@@ -86,6 +133,9 @@ jobs:
           path: |
             provider/testdata/fuzz/**
             provider/compat/testdata/fuzz/**
+            internal/sse/testdata/fuzz/**
+            protocol/responses/testdata/fuzz/**
+            protocol/anthropic/testdata/fuzz/**
           if-no-files-found: ignore
 
       - name: Smoke-test llmkit-probe
@@ -115,6 +165,10 @@ jobs:
   # below v6 without replacing this guarantee.
   min-go-version:
     runs-on: ubuntu-latest
+    env:
+      # Refuse toolchain auto-upgrade: this job must prove Go 1.22 itself can
+      # build the module, not that Go 1.22 can download a newer compiler.
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -123,3 +177,7 @@ jobs:
           cache: false
       - run: go build ./...
       - run: go test ./... -count=1
+      # The integration tests carry a build tag, so neither step above compiles
+      # them. Without this the floor check stays green while tagged code quietly
+      # starts depending on an API newer than the declared minimum.
+      - run: go vet -tags=integration ./...

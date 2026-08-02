@@ -59,6 +59,29 @@ func TestWithErrorMetadataNoops(t *testing.T) {
 	}
 }
 
+func TestMarkUnsafeToReplayPreservesWrappedErrorAndMetadata(t *testing.T) {
+	base := &ProviderError{StatusCode: http.StatusTooManyRequests, Message: "slow down"}
+	classified := WithErrorMetadata(base, "rate_limit_error", ErrorCategoryRateLimit)
+	marked := MarkUnsafeToReplay(classified)
+
+	if !IsMarkedUnsafeToReplay(marked) {
+		t.Fatal("marked error was not recognized as replay-unsafe")
+	}
+	if ProviderCode(marked) != "rate_limit_error" || ErrorCategoryOf(marked) != ErrorCategoryRateLimit {
+		t.Fatalf("metadata was hidden: code=%q category=%q", ProviderCode(marked), ErrorCategoryOf(marked))
+	}
+	var got *ProviderError
+	if !errors.As(marked, &got) || got != base {
+		t.Fatalf("ProviderError was hidden: %#v", got)
+	}
+	if again := MarkUnsafeToReplay(marked); again != marked {
+		t.Fatal("repeated annotation should be idempotent")
+	}
+	if MarkUnsafeToReplay(nil) != nil {
+		t.Fatal("nil error should stay nil")
+	}
+}
+
 // Every defined category must survive WithErrorMetadata. A validator that
 // rejects a real category would silently disable classification for it — the
 // same failure the validator exists to prevent, in the other direction.
