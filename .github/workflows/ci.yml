@@ -177,3 +177,7 @@ jobs:
           cache: false
       - run: go build ./...
       - run: go test ./... -count=1
+      # The integration tests carry a build tag, so neither step above compiles
+      # them. Without this the floor check stays green while tagged code quietly
+      # starts depending on an API newer than the declared minimum.
+      - run: go vet -tags=integration ./...

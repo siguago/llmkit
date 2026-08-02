@@ -236,8 +236,18 @@ func (event *Event) UnmarshalJSON(data []byte) error {
 	if err := requireJSONObject(data, "event"); err != nil {
 		return err
 	}
-	typ, err := discriminator(data)
+	fields, err := rawObjectFields(data, "event")
 	if err != nil {
+		return err
+	}
+	typ, err := discriminatorFromFields(fields)
+	if err != nil {
+		return err
+	}
+	// sequence_number orders the stream. Absent or null it decodes to 0, which
+	// is indistinguishable from a real first event and makes gap detection
+	// impossible, so require it on every known event.
+	if err := requireFields(fields, "event", "sequence_number"); err != nil {
 		return err
 	}
 	var header struct {
@@ -253,10 +263,26 @@ func (event *Event) UnmarshalJSON(data []byte) error {
 	switch headerType {
 	case EventTypeResponseCreated, EventTypeResponseQueued, EventTypeResponseInProgress,
 		EventTypeResponseCompleted, EventTypeResponseFailed, EventTypeResponseIncomplete:
+		if err := requireFields(fields, string(headerType), "response"); err != nil {
+			return err
+		}
 		var wire struct {
 			Response *Response `json:"response"`
 		}
 		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		// A lifecycle event carries the response's identity and state. Without
+		// these, "response.completed" with an empty object decodes into a
+		// successful terminal response whose ID and status are both "".
+		responseFields, err := rawObjectFields(fields["response"], string(headerType)+".response")
+		if err != nil {
+			return err
+		}
+		if err := requireFields(responseFields, string(headerType)+".response", "id", "status"); err != nil {
+			return err
+		}
+		if err := checkLifecycleStatus(headerType, wire.Response); err != nil {
 			return err
 		}
 		event.Response = wire.Response
@@ -358,6 +384,11 @@ func (event *Event) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
+	// Only known event types reach here; the default branch above keeps unknown
+	// events as Raw, where a case-variant key is not a claim about this schema.
+	if err := rejectCaseVariantKeys(fields, reserved, "event"); err != nil {
+		return err
+	}
 	extra, err := decodeExtraFields(data, reserved)
 	if err != nil {
 		return err
@@ -534,6 +565,31 @@ func IsTerminalStatus(status string) bool {
 
 func (response *Response) IsTerminal() bool {
 	return response != nil && IsTerminalStatus(response.Status)
+}
+
+// checkLifecycleStatus rejects an event whose type and payload status disagree
+// about whether the response is finished.
+//
+// The two are read by different callers — Accumulator.Add terminates on the
+// event type, while Response.IsTerminal reads the status — so a "completed"
+// event carrying status "in_progress" leaves the accumulator terminal while its
+// own FinalResponse still reports otherwise. Neither field can be preferred
+// over the other, because the disagreement itself means the stream is not
+// describing a state this package can represent.
+func checkLifecycleStatus(eventType EventType, response *Response) error {
+	if response == nil {
+		return nil
+	}
+	terminalEvent := false
+	switch eventType {
+	case EventTypeResponseCompleted, EventTypeResponseFailed, EventTypeResponseIncomplete:
+		terminalEvent = true
+	}
+	if terminalEvent != IsTerminalStatus(response.Status) {
+		return fmt.Errorf("%w: event %q disagrees with response status %q about being terminal",
+			ErrInvalidWire, eventType, response.Status)
+	}
+	return nil
 }
 
 func (event *Event) IsTerminal() bool {

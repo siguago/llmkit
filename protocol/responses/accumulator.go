@@ -77,11 +77,14 @@ func (a *Accumulator) Add(event *Event) error {
 		if err != nil {
 			return fmt.Errorf("responses: clone output item: %w", err)
 		}
-		if event.Type == EventTypeResponseOutputItemDone {
-			a.clearPendingContentParts(event.OutputItem.OutputIndex)
-		}
+		// setOutputItem first: it can still reject the index, and dropping the
+		// pending parts before that would discard state the caller keeps after
+		// handling the error.
 		if err := a.setOutputItem(event.OutputItem.OutputIndex, item); err != nil {
 			return err
+		}
+		if event.Type == EventTypeResponseOutputItemDone {
+			a.clearPendingContentParts(event.OutputItem.OutputIndex)
 		}
 		return nil
 
@@ -382,8 +385,7 @@ func (a *Accumulator) ensureMessage(index int, itemID string) (*Message, error) 
 			ID: itemID, Role: "assistant", Status: StatusInProgress,
 			Content: NewPartContent(),
 		})
-	}
-	if err := matchItemID(item.Message.ID, itemID, index); err != nil {
+	} else if err := matchItemID(item.Message.ID, itemID, index); err != nil {
 		return nil, err
 	}
 	if item.Message.ID == "" {
@@ -445,8 +447,10 @@ func (a *Accumulator) ensureFunctionCall(index int, itemID string) (*FunctionCal
 			return nil, fmt.Errorf("responses: output[%d] is %q, not a function call", index, item.Type)
 		}
 		*item = NewFunctionCallItem(FunctionCall{ID: itemID, Status: StatusInProgress})
-	}
-	if err := matchItemID(item.FunctionCall.ID, itemID, index); err != nil {
+	} else if err := matchItemID(item.FunctionCall.ID, itemID, index); err != nil {
+		// Only a pre-existing call can disagree: the branch above seeds the ID
+		// from itemID. Checking after the assignment would mean a rejected
+		// event had already overwritten the output slot.
 		return nil, err
 	}
 	if item.FunctionCall.ID == "" {
@@ -465,8 +469,7 @@ func (a *Accumulator) ensureReasoningPart(outputIndex, partIndex int, itemID str
 			return nil, fmt.Errorf("responses: output[%d] is %q, not reasoning", outputIndex, item.Type)
 		}
 		*item = NewReasoningItem(Reasoning{ID: itemID, Status: StatusInProgress})
-	}
-	if err := matchItemID(item.Reasoning.ID, itemID, outputIndex); err != nil {
+	} else if err := matchItemID(item.Reasoning.ID, itemID, outputIndex); err != nil {
 		return nil, err
 	}
 	if item.Reasoning.ID == "" {
@@ -555,12 +558,35 @@ func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
 		return nil
 	}
 
+	// Validate every pending part these loops will touch before mutating
+	// anything. Both of them delete map entries and append to parts as they go,
+	// so a matchItemID failure partway through would leave a partially applied
+	// flush behind — and because Go randomizes map iteration order, which parts
+	// survived would differ from run to run. The first loop only replaces
+	// existing indexes, so len(*parts) is stable between the two passes.
 	for key, pending := range a.pendingContentParts {
 		if key.outputIndex != outputIndex || key.contentIndex >= len(*parts) {
 			continue
 		}
 		if err := matchItemID(itemID, pending.itemID, outputIndex); err != nil {
 			return err
+		}
+	}
+	for index := len(*parts); ; index++ {
+		pending, exists := a.pendingContentParts[pendingContentPartKey{
+			outputIndex: outputIndex, contentIndex: index,
+		}]
+		if !exists {
+			break
+		}
+		if err := matchItemID(itemID, pending.itemID, outputIndex); err != nil {
+			return err
+		}
+	}
+
+	for key, pending := range a.pendingContentParts {
+		if key.outputIndex != outputIndex || key.contentIndex >= len(*parts) {
+			continue
 		}
 		existing := &(*parts)[key.contentIndex]
 		if isPlaceholderPart(*existing) || existing.Type == pending.part.Type {
@@ -574,9 +600,6 @@ func (a *Accumulator) flushPendingContentParts(outputIndex int) error {
 		pending, exists := a.pendingContentParts[key]
 		if !exists {
 			break
-		}
-		if err := matchItemID(itemID, pending.itemID, outputIndex); err != nil {
-			return err
 		}
 		*parts = append(*parts, pending.part)
 		delete(a.pendingContentParts, key)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ExtraFields retains JSON members that this package does not model yet. Raw
@@ -20,6 +21,72 @@ var ErrExtraFieldConflict = errors.New("responses: extra field conflicts with kn
 // ErrInvalidUnion identifies a union with no selected variant or more than one
 // selected variant.
 var ErrInvalidUnion = errors.New("responses: invalid union value")
+
+// ErrInvalidWire identifies a payload that is not this protocol: a required
+// field is absent or null, or a key differs from a documented one only by case.
+var ErrInvalidWire = errors.New("responses: invalid wire payload")
+
+// rawObjectFields decodes one JSON object into its exact wire keys.
+//
+// Every strict check in this package starts here rather than from a struct,
+// because encoding/json matches struct tags case-insensitively: decoding
+// straight into a struct silently accepts "TYPE" or "Sequence_Number" as if the
+// vendor had sent the documented lowercase name, and accepts a missing or null
+// scalar as the zero value. A map lookup is exact, and it can tell "absent"
+// from "present and null" — which is the whole distinction these checks need.
+func rawObjectFields(data []byte, kind string) (map[string]json.RawMessage, error) {
+	if err := requireJSONObject(data, kind); err != nil {
+		return nil, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, err
+	}
+	return object, nil
+}
+
+// rejectCaseVariantKeys fails when a key matches a documented field except for
+// case. Accepting it would let "TYPE" or "Item_ID" silently populate a known
+// field; rejecting it is safer than the alternative, because such a payload did
+// not come from this protocol and its other fields cannot be trusted either.
+// Keys with no case-insensitive match are untouched: those are genuinely new
+// fields and belong in ExtraFields.
+func rejectCaseVariantKeys(object map[string]json.RawMessage, reserved map[string]struct{}, kind string) error {
+	for key := range object {
+		if _, exact := reserved[key]; exact {
+			continue
+		}
+		for name := range reserved {
+			if strings.EqualFold(key, name) {
+				return fmt.Errorf("%w: %s key %q differs from %q only by case",
+					ErrInvalidWire, kind, key, name)
+			}
+		}
+	}
+	return nil
+}
+
+// requireFields fails when a documented-required field is absent or null.
+//
+// Both cases decode to the same zero value through a struct, which is how an
+// empty object can otherwise arrive as a successful terminal response carrying
+// an empty ID and status.
+func requireFields(object map[string]json.RawMessage, kind string, names ...string) error {
+	for _, name := range names {
+		raw, exists := object[name]
+		if !exists {
+			return fmt.Errorf("%w: %s is missing required field %q", ErrInvalidWire, kind, name)
+		}
+		if isJSONNull(raw) {
+			return fmt.Errorf("%w: %s field %q must not be null", ErrInvalidWire, kind, name)
+		}
+	}
+	return nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
 
 // ExtraFieldConflictError names the conflicting request field.
 type ExtraFieldConflictError struct {
@@ -210,17 +277,22 @@ func checkUnknownDiscriminator(raw json.RawMessage, declared string) error {
 }
 
 func discriminator(data []byte) (string, error) {
-	var header struct {
-		Type json.RawMessage `json:"type"`
-	}
-	if err := json.Unmarshal(data, &header); err != nil {
+	// Exact key lookup, not a struct tag: encoding/json would also accept
+	// "TYPE" or "Type" here and hand back a discriminator the vendor never sent.
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
 		return "", err
 	}
-	if len(header.Type) == 0 || bytes.Equal(bytes.TrimSpace(header.Type), []byte("null")) {
+	return discriminatorFromFields(object)
+}
+
+func discriminatorFromFields(object map[string]json.RawMessage) (string, error) {
+	raw, exists := object["type"]
+	if !exists || len(raw) == 0 || isJSONNull(raw) {
 		return "", fmt.Errorf("%w: discriminator type is missing", ErrInvalidUnion)
 	}
 	var typ string
-	if err := json.Unmarshal(header.Type, &typ); err != nil {
+	if err := json.Unmarshal(raw, &typ); err != nil {
 		return "", fmt.Errorf("%w: discriminator type must be a string: %v", ErrInvalidUnion, err)
 	}
 	if typ == "" {

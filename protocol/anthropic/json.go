@@ -27,6 +27,69 @@ func (e *ExtraFieldConflictError) Error() string {
 
 func (e *ExtraFieldConflictError) Unwrap() error { return ErrExtraFieldConflict }
 
+// ErrInvalidWire identifies a payload that is not this protocol: a required
+// field is absent or null, or a value that must be a JSON object is not one.
+var ErrInvalidWire = errors.New("anthropic: invalid wire payload")
+
+// isJSONNull distinguishes an explicit null from an absent member. Both decode
+// to the same zero value through a struct, which is how a stream missing every
+// stable identity field can still produce a successful-looking message.
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// requireRawObject rejects a raw value that is not a JSON object.
+//
+// json.Valid alone is not enough: null, [1,2], "text" and 42 are all valid
+// JSON, and passing them through the Raw escape hatch would emit a wire payload
+// no Anthropic decoder — including this one — can read back as a block, delta
+// or event.
+func requireRawObject(raw json.RawMessage, name string) error {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return fmt.Errorf("anthropic: %s contains invalid JSON", name)
+	}
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("%w: %s must be a JSON object", ErrInvalidWire, name)
+	}
+	return nil
+}
+
+// requireFields fails when a documented-required member is absent or null.
+func requireFields(object map[string]json.RawMessage, kind string, names ...string) error {
+	for _, name := range names {
+		raw, exists := object[name]
+		if !exists {
+			return fmt.Errorf("%w: %s is missing required field %q", ErrInvalidWire, kind, name)
+		}
+		if isJSONNull(raw) {
+			return fmt.Errorf("%w: %s field %q must not be null", ErrInvalidWire, kind, name)
+		}
+	}
+	return nil
+}
+
+// requireWireFields validates required members straight from the wire bytes,
+// before they are decoded into a struct that cannot tell absent from zero.
+func requireWireFields(data []byte, kind string, names ...string) error {
+	object, err := rawObjectFields(data, kind)
+	if err != nil {
+		return err
+	}
+	return requireFields(object, kind, names...)
+}
+
+// rawObjectFields decodes one JSON object into its exact wire keys.
+func rawObjectFields(data []byte, kind string) (map[string]json.RawMessage, error) {
+	if err := requireRawObject(data, kind); err != nil {
+		return nil, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, err
+	}
+	return object, nil
+}
+
 func cloneRaw(raw json.RawMessage) json.RawMessage {
 	if raw == nil {
 		return nil

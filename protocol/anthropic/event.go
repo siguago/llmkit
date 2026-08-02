@@ -92,8 +92,8 @@ func (event Event) MarshalJSON() ([]byte, error) {
 	case event.Error != nil:
 		return marshalEventVariant(event.Type, EventTypeError, event.Error)
 	default:
-		if event.Unknown.Raw == nil || !json.Valid(event.Unknown.Raw) {
-			return nil, fmt.Errorf("anthropic: unknown event contains invalid JSON")
+		if err := requireRawObject(event.Unknown.Raw, "unknown event Raw"); err != nil {
+			return nil, err
 		}
 		return cloneRaw(event.Unknown.Raw), nil
 	}
@@ -190,6 +190,11 @@ func (event ContentBlockStartEvent) MarshalJSON() ([]byte, error) {
 }
 
 func (event *ContentBlockStartEvent) UnmarshalJSON(data []byte) error {
+	// index addresses the block. Absent or null it decodes to 0, silently
+	// aliasing whatever block 0 is.
+	if err := requireWireFields(data, "content_block_start", "index"); err != nil {
+		return err
+	}
 	type wire ContentBlockStartEvent
 	var decoded wire
 	extra, err := unmarshalWithExtra(data, &decoded, "type", "index", "content_block")
@@ -220,6 +225,9 @@ func (event ContentBlockDeltaEvent) MarshalJSON() ([]byte, error) {
 }
 
 func (event *ContentBlockDeltaEvent) UnmarshalJSON(data []byte) error {
+	if err := requireWireFields(data, "content_block_delta", "index", "delta"); err != nil {
+		return err
+	}
 	type wire ContentBlockDeltaEvent
 	var decoded wire
 	extra, err := unmarshalWithExtra(data, &decoded, "type", "index", "delta")
@@ -249,6 +257,9 @@ func (event ContentBlockStopEvent) MarshalJSON() ([]byte, error) {
 }
 
 func (event *ContentBlockStopEvent) UnmarshalJSON(data []byte) error {
+	if err := requireWireFields(data, "content_block_stop", "index"); err != nil {
+		return err
+	}
 	type wire ContentBlockStopEvent
 	var decoded wire
 	extra, err := unmarshalWithExtra(data, &decoded, "type", "index")
@@ -508,8 +519,8 @@ func (delta ContentDelta) MarshalJSON() ([]byte, error) {
 	case delta.Signature != nil:
 		return json.Marshal(delta.Signature)
 	default:
-		if !json.Valid(delta.Unknown) {
-			return nil, fmt.Errorf("anthropic: unknown content delta contains invalid JSON")
+		if err := requireRawObject(delta.Unknown, "ContentDelta.Unknown"); err != nil {
+			return nil, err
 		}
 		return cloneRaw(delta.Unknown), nil
 	}

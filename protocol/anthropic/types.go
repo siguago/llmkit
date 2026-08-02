@@ -111,6 +111,17 @@ var messageResponseFields = []string{
 	"stop_sequence", "stop_details", "usage",
 }
 
+// messageResponseFieldSet answers whether a name is already modeled as a
+// first-class MessageResponse field. Merging such a name into ExtraFields would
+// make the whole message unmarshalable through ExtraFieldConflictError.
+var messageResponseFieldSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(messageResponseFields))
+	for _, name := range messageResponseFields {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
 func (response MessageResponse) MarshalJSON() ([]byte, error) {
 	type wire MessageResponse
 	return marshalWithExtra(wire(response), response.ExtraFields, messageResponseFields...)

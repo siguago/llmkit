@@ -278,8 +278,8 @@ func (block ContentBlock) MarshalJSON() ([]byte, error) {
 		}
 		return json.Marshal(block.RedactedThinking)
 	default:
-		if !json.Valid(block.Raw) {
-			return nil, fmt.Errorf("anthropic: ContentBlock.Raw contains invalid JSON")
+		if err := requireRawObject(block.Raw, "ContentBlock.Raw"); err != nil {
+			return nil, err
 		}
 		return cloneRaw(block.Raw), nil
 	}
