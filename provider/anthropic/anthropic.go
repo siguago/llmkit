@@ -51,7 +51,6 @@ func NewWithBaseURL(baseURL string) *Provider {
 			CheckRedirect: checkAnthropicRedirect,
 		},
 		streamClient: &http.Client{
-			Timeout:       900 * time.Second, // generous safety-net; WriteTimeout (600s) handles normal cutoff
 			Transport:     outboundTransport,
 			CheckRedirect: checkAnthropicRedirect,
 		},

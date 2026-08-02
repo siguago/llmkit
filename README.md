@@ -393,7 +393,7 @@ if job.Status != llmkit.VideoStatusCompleted {
 client, err := llmkit.New(llmkit.OpenAI,
     llmkit.WithAPIKey(key),
     llmkit.WithBaseURL("https://my-relay.example.com/v1"),  // 中转站 / 私有部署
-    llmkit.WithTimeout(60*time.Second),                     // 单次调用上限（含重试）
+    llmkit.WithTimeout(60*time.Second),                     // 普通非流式操作上限（含重试）
     llmkit.WithRetry(llmkit.NoRetry()),                     // 关掉自动重试
     llmkit.WithHeader("HTTP-Referer", "https://myapp.com"), // 附加请求头
 )
@@ -417,7 +417,7 @@ client, err := llmkit.New(llmkit.OpenAI,
 )
 ```
 
-- **`WithTransport`** 只替换链路最底层。凭据头、调用方附加头照常先加上，客户端 IP 头照常先剥掉，然后才轮到你的 `RoundTrip` —— 埋点用的 transport 不该有能力悄悄绕掉隐私处理。超时仍归 `WithTimeout` 管（一次调用含全部重试共享一个预算），所以这里不接受 `*http.Client`。
+- **`WithTransport`** 只替换链路最底层。凭据头、调用方附加头照常先加上，客户端 IP 头照常先剥掉，然后才轮到你的 `RoundTrip` —— 埋点用的 transport 不该有能力悄悄绕掉隐私处理。普通非流式 provider 操作归 `WithTimeout` 管（一次操作含全部重试共享一个预算）；`WaitResponse` / `WaitVideo` 的整体轮询预算由各自 options 和调用 context 控制，`WithTimeout` 只约束其中每次查询。流式不受 `WithTimeout` 控制：OpenAI Responses 与 Anthropic 的所有流式入口（包括统一 `Client.ChatStream`）没有活跃流的 SDK 兜底超时，context deadline 或取消是唯一生命周期约束；compat、Gemini、OpenRouter、DeepSeek 目前仍保留 900 秒兼容上限，但调用方不应依赖它。默认 transport 的 `IdleConnTimeout` 只回收连接池中的空闲连接，不会终止活跃流。因此这里不接受 `*http.Client`。
 - **`WithLogger`** 默认丢弃一切。库往宿主程序的全局 logger 里写东西是越界的，所以不问就不说。开启后能看到的是：被跳过的畸形流帧、被丢弃的非法工具定义这类"绕过去了但你可能想知道"的事；真正影响结果的一律走 error 返回。
 - **`WithRequestID`** 每个**出站 HTTP 请求**调一次（重试的每一次尝试都是新 ID），用于和厂商日志对账。厂商自己生成的那个 ID 走另一条路：`APIError.RequestID`，报障时对方要的是它。
 
@@ -425,12 +425,14 @@ client, err := llmkit.New(llmkit.OpenAI,
 
 ```go
 llmkit.WithStreamTolerance(llmkit.TolerateMalformedChunks)  // 跳过坏帧并记日志
-llmkit.WithMaxStreamFrameBytes(4 << 20)                      // 抬高单帧上限（默认 1 MiB）
+llmkit.WithMaxStreamFrameBytes(llmkit.DefaultResponsesMaxFrameBytes) // 显式把此客户端的所有流统一为 32 MiB
 ```
 
 默认是**严格模式**：遇到解析不了的帧直接让流失败。跳过坏帧等于静默丢数据——调用方拿到一个看起来完整、实际少了一段内容或少了一次工具调用的回复，且无从察觉。报错至少可以重试或降级。
 
-单帧超限的错误会直接告诉你该调哪个选项，而不是甩一句 bufio 的 `token too long`。
+`WithMaxStreamFrameBytes` 不设置或传非正值时使用 adapter 默认值：一般为 `DefaultMaxFrameBytes`（1 MiB），OpenAI Responses 为 `DefaultResponsesMaxFrameBytes`（32 MiB），所以只使用 Responses 时无需显式配置。显式正值会作用于这个客户端的所有流。
+
+上限按实际帧惰性增长，不会为每条流预留整块内存；但它限制的是 SSE 帧内容，不是进程总内存。行缓冲、`data` 累积和后续 JSON 解码可能同时保留多份接近上限的数据，高并发或不可信中转站场景应谨慎调大。单帧超限的错误会直接指出 `WithMaxStreamFrameBytes`。
 
 ---
 

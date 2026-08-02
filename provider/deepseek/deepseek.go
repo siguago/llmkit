@@ -21,7 +21,7 @@ const (
 type Provider struct {
 	baseURL      string // host root, e.g. "https://api.deepseek.com" (no /v1 or /beta)
 	client       *http.Client
-	streamClient *http.Client
+	streamClient *http.Client // streaming requests (900s client-wide ceiling)
 }
 
 // New constructs a DeepSeek provider. Pass an empty baseURL to use the default

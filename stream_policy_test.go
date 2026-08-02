@@ -271,27 +271,31 @@ func TestStream_DefaultCeilingFitsLargeToolCall(t *testing.T) {
 	}
 }
 
-// Zero means "use the default", so a caller clearing the field doesn't
-// accidentally get a zero-byte ceiling that rejects everything.
-func TestStream_ZeroFrameCeilingMeansDefault(t *testing.T) {
-	c := newTestClient(t, sseHandler(sseBody(goodFrame1, "data: [DONE]")),
-		WithMaxStreamFrameBytes(0))
+// Non-positive values mean "use the default", so clearing or deriving an
+// unset value does not create a zero-byte ceiling that rejects everything.
+func TestStream_NonPositiveFrameCeilingMeansDefault(t *testing.T) {
+	for _, limit := range []int{0, -1} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			c := newTestClient(t, sseHandler(sseBody(goodFrame1, "data: [DONE]")),
+				WithMaxStreamFrameBytes(limit))
 
-	stream, err := c.ChatStream(context.Background(), &ChatRequest{
-		Model:    "test-model",
-		Messages: []Message{User("hi")},
-	})
-	if err != nil {
-		t.Fatalf("ChatStream: %v", err)
-	}
-	defer stream.Close()
+			stream, err := c.ChatStream(context.Background(), &ChatRequest{
+				Model:    "test-model",
+				Messages: []Message{User("hi")},
+			})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			defer stream.Close()
 
-	text, err := drain(t, stream)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("err = %v, want EOF", err)
-	}
-	if text != "he" {
-		t.Errorf("text = %q", text)
+			text, err := drain(t, stream)
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("err = %v, want EOF", err)
+			}
+			if text != "he" {
+				t.Errorf("text = %q", text)
+			}
+		})
 	}
 }
 

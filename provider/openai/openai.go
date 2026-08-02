@@ -119,8 +119,11 @@ func NewWithBaseURL(baseURL string) *Provider {
 			Timeout:   300 * time.Second,
 			Transport: outboundTransport,
 		},
+		// Responses streams, especially background and deep-research work, can
+		// legitimately outlive any fixed client timeout. The request context is
+		// the caller-controlled bound; the shared transport still supplies proxy,
+		// privacy, and connection-pooling behavior without a body-wide cutoff.
 		streamClient: &http.Client{
-			Timeout:   900 * time.Second,
 			Transport: outboundTransport,
 		},
 	}

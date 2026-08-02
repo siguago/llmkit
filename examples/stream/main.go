@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/siguago/llmkit"
 )
@@ -20,7 +21,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ctx := context.Background()
+	// A stream can remain active indefinitely on adapters without a fixed client
+	// ceiling. Give the whole example a finite budget and propagate it to both
+	// streaming styles.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
 	// Style 1: callback. The stream is drained and closed for you.
 	fmt.Println("--- StreamText ---")

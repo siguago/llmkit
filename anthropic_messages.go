@@ -29,7 +29,8 @@ func (c *Client) CreateAnthropicMessage(ctx context.Context, req *anthropicapi.M
 
 // CreateAnthropicMessageStream starts a native Messages SSE stream. Always
 // Close the returned stream. Recv returns Anthropic events, including unknown
-// future events with their raw JSON intact.
+// future events with their raw JSON intact. WithTimeout does not bound streams;
+// put the desired lifetime on ctx.
 func (c *Client) CreateAnthropicMessageStream(ctx context.Context, req *anthropicapi.MessageRequest, opts ...anthropicapi.RequestOption) (anthropicapi.Stream, error) {
 	if req == nil {
 		return nil, fmt.Errorf("llmkit: nil Anthropic Messages request")

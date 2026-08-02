@@ -40,7 +40,7 @@ type Provider struct {
 	passModalities   bool
 	passAudio        bool
 	client           *http.Client
-	streamClient     *http.Client
+	streamClient     *http.Client // streaming requests (900s client-wide ceiling)
 }
 
 // New creates a new OpenAI-compatible provider.

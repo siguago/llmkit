@@ -100,9 +100,10 @@ func (c *Client) ChatStream(ctx context.Context, req *ChatRequest) (Stream, erro
 		return nil, fmt.Errorf("llmkit: request.Model is required")
 	}
 	// The stream outlives this call, so the context must not be cancelled on
-	// return. WithTimeout is therefore not applied to streams — their ceiling is
-	// the provider's own stream timeout. Callers wanting a bound should pass a
-	// context with a deadline.
+	// return. WithTimeout is therefore not applied to streams. Their lifetime
+	// follows the caller's context; some adapters retain an additional fixed
+	// client ceiling, while Anthropic does not. Put any required deadline on ctx
+	// rather than relying on an adapter ceiling.
 	ctx = c.decorate(ctx)
 
 	stream, err := doValue(ctx, c.cfg.retry, func() (Stream, error) {
