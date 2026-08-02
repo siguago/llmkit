@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -13,6 +14,80 @@ func applyRaw(t *testing.T, accumulator *Accumulator, fixture string) error {
 		return err
 	}
 	return accumulator.Add(event)
+}
+
+func TestMessageResponseRequiresStableWireFields(t *testing.T) {
+	cases := map[string]string{
+		"missing id":            `{"type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"null id":               `{"id":null,"type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"empty id":              `{"id":"","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing type":          `{"id":"m","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"wrong type":            `{"id":"m","type":"future_message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing role":          `{"id":"m","type":"message","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"request role":          `{"id":"m","type":"message","role":"user","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing model":         `{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"empty model":           `{"id":"m","type":"message","role":"assistant","model":"","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing content":       `{"id":"m","type":"message","role":"assistant","model":"claude","usage":{"input_tokens":0,"output_tokens":0}}`,
+		"null content":          `{"id":"m","type":"message","role":"assistant","model":"claude","content":null,"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing usage":         `{"id":"m","type":"message","role":"assistant","model":"claude","content":[]}`,
+		"null usage":            `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":null}`,
+		"missing input tokens":  `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":{"output_tokens":0}}`,
+		"null input tokens":     `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":null,"output_tokens":0}}`,
+		"missing output tokens": `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0}}`,
+		"null output tokens":    `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":null}}`,
+	}
+	for name, fixture := range cases {
+		t.Run(name, func(t *testing.T) {
+			var response MessageResponse
+			if err := json.Unmarshal([]byte(fixture), &response); !errors.Is(err, ErrInvalidWire) {
+				t.Fatalf("Unmarshal error = %v, want ErrInvalidWire", err)
+			}
+		})
+	}
+}
+
+func TestMessageResponseAcceptsZeroUsageAndPreservesFutureFields(t *testing.T) {
+	const fixture = `{"id":"m","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0,"future_usage":true},"future_message":{"x":1}}`
+	var response MessageResponse
+	if err := json.Unmarshal([]byte(fixture), &response); err != nil {
+		t.Fatalf("Unmarshal zero usage: %v", err)
+	}
+	if response.Usage.InputTokens != 0 || response.Usage.OutputTokens != 0 {
+		t.Fatalf("usage = %+v, want legitimate zero counters", response.Usage)
+	}
+	if string(response.Usage.ExtraFields["future_usage"]) != "true" ||
+		string(response.ExtraFields["future_message"]) != `{"x":1}` {
+		t.Fatalf("future fields lost: response=%s usage=%s",
+			response.ExtraFields["future_message"], response.Usage.ExtraFields["future_usage"])
+	}
+}
+
+func TestMessageParamStillAcceptsBothRequestRoles(t *testing.T) {
+	for _, role := range []Role{RoleUser, RoleAssistant} {
+		var message MessageParam
+		fixture := []byte(`{"role":"` + string(role) + `","content":"hello"}`)
+		if err := json.Unmarshal(fixture, &message); err != nil {
+			t.Fatalf("Unmarshal request role %q: %v", role, err)
+		}
+		if message.Role != role {
+			t.Fatalf("request role = %q, want %q", message.Role, role)
+		}
+	}
+}
+
+func TestParseEventRejectsMalformedMessageStartResponse(t *testing.T) {
+	for name, fixture := range map[string]string{
+		"missing message type": `{"type":"message_start","message":{"id":"m","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}`,
+		"wrong message type":   `{"type":"message_start","message":{"id":"m","type":"future_message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}`,
+		"wrong response role":  `{"type":"message_start","message":{"id":"m","type":"message","role":"user","model":"claude","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}`,
+		"missing usage":        `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude","content":[]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseEvent([]byte(fixture)); !errors.Is(err, ErrInvalidWire) {
+				t.Fatalf("ParseEvent error = %v, want ErrInvalidWire", err)
+			}
+		})
+	}
 }
 
 // A message_start missing every stable identity field used to accumulate into a

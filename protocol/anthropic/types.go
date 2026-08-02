@@ -3,7 +3,10 @@
 // standard library.
 package anthropic
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Role is a Messages API conversational role.
 type Role string
@@ -128,11 +131,51 @@ func (response MessageResponse) MarshalJSON() ([]byte, error) {
 }
 
 func (response *MessageResponse) UnmarshalJSON(data []byte) error {
+	object, err := rawObjectFields(data, "message response")
+	if err != nil {
+		return err
+	}
+	if err := requireFields(
+		object,
+		"message response",
+		"id", "type", "role", "model", "content", "usage",
+	); err != nil {
+		return err
+	}
+	// Usage counters are required even when their legitimate value is zero.
+	// Validate presence on the raw object so absent/null is not silently
+	// collapsed into an int64 zero value by encoding/json.
+	if err := requireWireFields(
+		object["usage"],
+		"message response usage",
+		"input_tokens", "output_tokens",
+	); err != nil {
+		return err
+	}
+
 	type wire MessageResponse
 	var decoded wire
 	extra, err := unmarshalWithExtra(data, &decoded, messageResponseFields...)
 	if err != nil {
 		return err
+	}
+	if decoded.ID == "" {
+		return fmt.Errorf("%w: message response field %q must not be empty", ErrInvalidWire, "id")
+	}
+	if decoded.Type != "message" {
+		return fmt.Errorf(
+			"%w: message response field %q must be %q, got %q",
+			ErrInvalidWire, "type", "message", decoded.Type,
+		)
+	}
+	if decoded.Role != RoleAssistant {
+		return fmt.Errorf(
+			"%w: message response field %q must be %q, got %q",
+			ErrInvalidWire, "role", RoleAssistant, decoded.Role,
+		)
+	}
+	if decoded.Model == "" {
+		return fmt.Errorf("%w: message response field %q must not be empty", ErrInvalidWire, "model")
 	}
 	requestID := response.RequestID
 	*response = MessageResponse(decoded)

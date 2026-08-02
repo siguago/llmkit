@@ -171,6 +171,31 @@ func TestNativeMessagesSync_AllowsExplicitZeroMaxTokens(t *testing.T) {
 	}
 }
 
+func TestNativeMessagesSync_RejectsMalformedSuccessfulMessage(t *testing.T) {
+	for name, payload := range map[string]string{
+		"missing id":      `{"type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing content": `{"id":"msg","type":"message","role":"assistant","model":"claude-test","usage":{"input_tokens":0,"output_tokens":0}}`,
+		"missing usage":   `{"id":"msg","type":"message","role":"assistant","model":"claude-test","content":[]}`,
+		"wrong type":      `{"id":"msg","type":"future_message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"wrong role":      `{"id":"msg","type":"message","role":"user","model":"claude-test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				_, _ = io.WriteString(w, payload)
+			}))
+			defer server.Close()
+
+			_, err := NewWithBaseURL(server.URL).CreateAnthropicMessage(
+				context.Background(), "key", nativeMessageRequest(1),
+			)
+			if !errors.Is(err, protocol.ErrInvalidWire) {
+				t.Fatalf("CreateAnthropicMessage error = %v, want ErrInvalidWire", err)
+			}
+		})
+	}
+}
+
 func TestNativeMessagesTokenCount_PathBodyHeadersAndRequestID(t *testing.T) {
 	captured := make(chan nativeCapturedRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -555,6 +580,42 @@ func TestNativeMessagesStream_AccumulatesTextToolThinkingPingUnknownAndTerminal(
 	}
 	if request.Stream != nil {
 		t.Fatal("stream call mutated caller-owned request Stream")
+	}
+}
+
+func TestNativeMessagesStream_RejectsMalformedMessageStartResponse(t *testing.T) {
+	for name, message := range map[string]string{
+		"missing message type": `{"id":"msg_stream","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+		"wrong response role":  `{"id":"msg_stream","type":"message","role":"user","model":"claude-test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeNativeSSE(w, []nativeSSEFrame{{
+					typeName: "message_start",
+					json:     `{"type":"message_start","message":` + message + `}`,
+				}})
+			}))
+			defer server.Close()
+
+			stream, err := NewWithBaseURL(server.URL).CreateAnthropicMessageStream(
+				context.Background(), "key", nativeMessageRequest(8),
+			)
+			if err != nil {
+				t.Fatalf("CreateAnthropicMessageStream: %v", err)
+			}
+			defer stream.Close()
+
+			event, err := stream.Recv()
+			if event != nil || !errors.Is(err, protocol.ErrInvalidWire) {
+				t.Fatalf("first Recv = event=%#v err=%v, want nil/ErrInvalidWire", event, err)
+			}
+			if message := stream.FinalMessage(); message != nil {
+				t.Fatalf("malformed message_start produced FinalMessage: %#v", message)
+			}
+			if event, err := stream.Recv(); event != nil || !errors.Is(err, io.EOF) {
+				t.Fatalf("Recv after malformed frame = event=%#v err=%v, want nil/EOF", event, err)
+			}
+		})
 	}
 }
 
