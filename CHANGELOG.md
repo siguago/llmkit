@@ -2,9 +2,11 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
-## Unreleased
+## v0.6.0 — 2026-08-09
 
-### 兼容性与迁移
+Anthropic 的缓存写入 token 进入统一 usage，并按 5 分钟 / 1 小时两档 TTL 拆分——两档费率不同，只有汇总值无法精确计价。同时修掉三处 `cache_control` 的既有问题，其中一处会让上游把 1 小时缓存按 5 分钟处理。**唯一需要动手的是不带字段名的 `provider.Usage{...}`；其余全是加法。**
+
+### 从 v0.5.0 升级
 
 `provider.Usage` 新增缓存写入汇总字段 `CacheCreationTokens`，以及 TTL 拆分字段 `CacheCreationTokensDetails *CacheCreationTokensDetails`；明细中的 `Ephemeral5mTokens` 与 `Ephemeral1hTokens` 分别承载 Anthropic 的 `ephemeral_5m_input_tokens` 和 `ephemeral_1h_input_tokens`。按字段读写、带字段名的 composite literal 和允许响应增加字段的 JSON 调用方不需要修改；现有**不带字段名**的 `provider.Usage{...}` 会因公开 struct 增加字段而无法编译。
 
@@ -18,6 +20,14 @@
 
 - `Usage.CacheCreationTokens` 继续表示缓存写入 token 的汇总值：正值可确认发生了写入；零值只有在对应 provider 的 `CacheWriteUsageReporter.ReportsCacheWriteUsage()` 返回 `true` 时才能解释为没有写入。该汇总不能在 5 分钟与 1 小时 TTL 混用时精确定价；两种 TTL 费率不同，计费代码必须读取 `Usage.CacheCreationTokensDetails`。明细为 `nil` 表示上游没有提供完整、可核对的拆分，不应把它解释成两档都为零。
 - `CacheWriteUsageReporter.ReportsCacheWriteUsage()` 是 provider 实例**当前配置**的整体能力声明（包括所配 endpoint），只有成功的同步调用和完整消费且正常结束的流式调用都可靠返回汇总值时才能为 `true`。它不是逐请求状态，也不能用 `true` 表示“只有部分路径会报告”；未实现接口或返回 `false` 都表示调用方不能从汇总字段的零值推断没有缓存写入。
+
+### 修复
+
+三处都作用在 Anthropic 的 `cache_control` 上，都会打到线上请求，不需要调用方改代码。
+
+- **1 小时缓存被上游按 5 分钟处理。** 挂在 `Message.ProviderTurnBlocks` 和 `ExtraTools` 上的 `cache_control` 会照常发给上游，但 `extended-cache-ttl-2025-04-11` beta 头不发，于是调用方以为买了 1 小时、实际按 5 分钟计。反向的问题同时修掉：该判断原本扫描所有 content part，对已被序列化丢弃的 `cache_control` 也会发出无用的 beta 头。现在它按角色对齐请求构造的丢弃规则，并由一条不变量测试拿实际序列化字节反推期望，不再重复维护第二份规则。
+- **assistant 消息被拒。** `cache_control` 挂在无法承载它的 part（`input_audio`、只有 `file_id` 的 file）上时，会把整个 turn 从字符串形态推到 content block 形态，而只有非空 text 会被发射，结果是空的 content 数组，Anthropic 直接返回 400。缓存提示不再改变消息结构。
+- **system 消息被拒。** 空 text 带 `cache_control` 会被放行成一个空 text block，Anthropic 同样拒绝；空文本现在无条件丢弃。
 
 ## v0.5.0 — 2026-08-02
 
