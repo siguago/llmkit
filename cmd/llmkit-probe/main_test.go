@@ -507,3 +507,42 @@ func TestProviderDoesChat_NeedsNoCredential(t *testing.T) {
 		t.Error("providerDoesChat should not depend on a configured key")
 	}
 }
+
+func TestSumUsagePreservesCacheCreationAccounting(t *testing.T) {
+	got := sumUsage(
+		&llmkit.Usage{
+			PromptTokens:        10,
+			CompletionTokens:    2,
+			TotalTokens:         12,
+			CachedTokens:        3,
+			ReasoningTokens:     1,
+			CacheCreationTokens: 4,
+			CacheCreationTokensDetails: &llmkit.CacheCreationTokensDetails{
+				Ephemeral5mTokens: 3,
+				Ephemeral1hTokens: 1,
+			},
+		},
+		&llmkit.Usage{
+			PromptTokens:        20,
+			CompletionTokens:    5,
+			TotalTokens:         25,
+			CachedTokens:        7,
+			ReasoningTokens:     2,
+			CacheCreationTokens: 6,
+			CacheCreationTokensDetails: &llmkit.CacheCreationTokensDetails{
+				Ephemeral5mTokens: 2,
+				Ephemeral1hTokens: 4,
+			},
+		},
+	)
+
+	if got.PromptTokens != 30 || got.CompletionTokens != 7 || got.TotalTokens != 37 ||
+		got.CachedTokens != 10 || got.ReasoningTokens != 3 || got.CacheCreationTokens != 10 {
+		t.Fatalf("usage totals were not summed: %+v", got)
+	}
+	if got.CacheCreationTokensDetails == nil ||
+		got.CacheCreationTokensDetails.Ephemeral5mTokens != 5 ||
+		got.CacheCreationTokensDetails.Ephemeral1hTokens != 5 {
+		t.Fatalf("cache creation details were not summed: %+v", got.CacheCreationTokensDetails)
+	}
+}

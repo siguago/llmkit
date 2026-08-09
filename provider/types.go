@@ -373,15 +373,36 @@ type Choice struct {
 }
 
 type Usage struct {
-	PromptTokens            int                      `json:"prompt_tokens"`
-	CompletionTokens        int                      `json:"completion_tokens"`
-	TotalTokens             int                      `json:"total_tokens"`
-	CachedTokens            int                      `json:"cached_tokens,omitempty"`
-	ReasoningTokens         int                      `json:"reasoning_tokens,omitempty"`
-	PromptCacheHitTokens    int                      `json:"prompt_cache_hit_tokens,omitempty"`
-	PromptCacheMissTokens   int                      `json:"prompt_cache_miss_tokens,omitempty"`
-	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
-	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens"`
+	CachedTokens          int `json:"cached_tokens,omitempty"`
+	ReasoningTokens       int `json:"reasoning_tokens,omitempty"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	// CacheCreationTokens is the prompt portion written into the provider's
+	// cache this request (Anthropic's cache_creation_input_tokens). It is a
+	// separate billing dimension from both CachedTokens (cache reads, charged
+	// at a discount) and ordinary uncached input: Anthropic prices a cache
+	// write above base input — 1.25x at the 5m TTL, 2x at 1h.
+	//
+	// It is deliberately NOT folded into PromptCacheMissTokens. That field
+	// carries DeepSeek's prompt_cache_miss_tokens, which counts every input
+	// token that missed the cache and satisfies hit + miss == PromptTokens.
+	// A cache write is a miss that was also stored, so reusing the field would
+	// break that identity and bill writes at the base input rate. The three
+	// prompt-side counters here are disjoint:
+	//
+	//	PromptTokens == CachedTokens + CacheCreationTokens + uncached input
+	CacheCreationTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// CacheCreationTokensDetails preserves the provider-reported cache-write
+	// breakdown when one is available. A non-nil value means the split is known;
+	// callers that price cache writes must use it because the 5-minute and
+	// 1-hour tiers have different rates. When present, the two fields sum to
+	// CacheCreationTokens.
+	CacheCreationTokensDetails *CacheCreationTokensDetails `json:"cache_creation,omitempty"`
+	PromptTokensDetails        *PromptTokensDetails        `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails    *CompletionTokensDetails    `json:"completion_tokens_details,omitempty"`
 	// Cost is the upstream-reported request cost in USD, as the vendor
 	// calculated it. Currently only OpenRouter reports one — it routes across
 	// vendors and aggregates their actual charges. Everyone else leaves it zero.
@@ -403,6 +424,15 @@ type Usage struct {
 
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// CacheCreationTokensDetails is the TTL-specific cache-write accounting
+// reported by providers that expose it. The JSON names follow Anthropic's
+// native usage.cache_creation object so the information survives a unified
+// chat response without another vendor-specific translation layer.
+type CacheCreationTokensDetails struct {
+	Ephemeral5mTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
 type CompletionTokensDetails struct {
@@ -556,6 +586,16 @@ func NormalizeUsage(usage *Usage) {
 	}
 	if usage.ReasoningTokens == 0 && usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
 		usage.ReasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
+	}
+	if usage.CacheCreationTokensDetails != nil {
+		detailTotal := usage.CacheCreationTokensDetails.Ephemeral5mTokens +
+			usage.CacheCreationTokensDetails.Ephemeral1hTokens
+		if usage.CacheCreationTokens == 0 {
+			usage.CacheCreationTokens = detailTotal
+		} else if usage.CacheCreationTokens != detailTotal {
+			// A partial or inconsistent TTL split cannot safely drive billing.
+			usage.CacheCreationTokensDetails = nil
+		}
 	}
 	// < 1 rather than == 0: a vendor sending a negative count would otherwise
 	// pass straight through into per-request cost arithmetic.

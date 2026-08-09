@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,23 @@ type Provider struct {
 
 // New constructs an Anthropic provider pointed at the official API.
 func New() *Provider { return NewWithBaseURL("") }
+
+// isOfficialEndpoint reports whether this provider talks to Anthropic's own API
+// rather than a relay. Two independent behaviours key off it — usage-reporting
+// guarantees and TTL inference — so it is named for the fact itself. Deriving
+// either one from the other would couple them: relaxing the guarantee for a
+// trusted relay would silently start fabricating that relay's TTL breakdown.
+func (p *Provider) isOfficialEndpoint() bool {
+	return p != nil && p.baseURL == defaultBaseURL
+}
+
+// ReportsCacheWriteUsage implements provider.CacheWriteUsageReporter. The
+// official endpoint reports cache_creation_input_tokens on both buffered and
+// streaming responses. A custom relay may omit that field, so it cannot make
+// the same zero-means-no-write guarantee.
+func (p *Provider) ReportsCacheWriteUsage() bool {
+	return p.isOfficialEndpoint()
+}
 
 // NewWithBaseURL constructs an Anthropic provider against a custom API root
 // (relay/proxy deployments). Pass an empty string for the official endpoint.
@@ -163,7 +182,10 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 		return nil, err
 	}
 
-	return NewStreamReader(ctx, resp.Body, jsonSchemaToolName), nil
+	// Not ReportsCacheWriteUsage(): that answers whether the aggregate is
+	// trustworthy, while this answers whether an unlabelled cache write may be
+	// attributed to the 5m tier. Both happen to key off the official endpoint.
+	return newStreamReader(ctx, resp.Body, jsonSchemaToolName, p.isOfficialEndpoint()), nil
 }
 
 // ListModels fetches available models from the Anthropic API.
@@ -298,7 +320,146 @@ func validateRequest(req *provider.ChatCompletionRequest) error {
 			Message:    "anthropic requires max_completion_tokens > 0",
 		}
 	}
+	hasConversationMessage := false
+	for i, msg := range req.Messages {
+		var representable bool
+		switch msg.Role {
+		case "system":
+			continue
+		case "user":
+			hasConversationMessage = true
+			representable = userMessageHasRepresentableContent(msg)
+		case "assistant":
+			hasConversationMessage = true
+			if !assistantToolCallsAreRepresentable(msg.ToolCalls) {
+				return &provider.ProviderError{
+					StatusCode: http.StatusUnprocessableEntity,
+					Message:    "anthropic assistant message at index " + strconv.Itoa(i) + " has a malformed tool call",
+				}
+			}
+			representable = assistantMessageHasRepresentableContent(msg)
+		case "tool":
+			hasConversationMessage = true
+			if msg.ToolCallID == "" {
+				return &provider.ProviderError{
+					StatusCode: http.StatusUnprocessableEntity,
+					Message:    "anthropic tool message at index " + strconv.Itoa(i) + " requires tool_call_id",
+				}
+			}
+			continue
+		default:
+			return &provider.ProviderError{
+				StatusCode: http.StatusUnprocessableEntity,
+				Message:    "anthropic message at index " + strconv.Itoa(i) + " has unsupported role " + strconv.Quote(msg.Role),
+			}
+		}
+		if !representable {
+			return &provider.ProviderError{
+				StatusCode: http.StatusUnprocessableEntity,
+				Message:    "anthropic message at index " + strconv.Itoa(i) + " with role " + msg.Role + " has no representable content",
+			}
+		}
+	}
+	if !hasConversationMessage {
+		return &provider.ProviderError{
+			StatusCode: http.StatusUnprocessableEntity,
+			Message:    "anthropic requires at least one user, assistant, or tool message",
+		}
+	}
 	return nil
+}
+
+func assistantToolCallsAreRepresentable(calls []provider.ToolCall) bool {
+	for _, call := range calls {
+		if call.ID == "" || call.Function.Name == "" || call.Function.Arguments == "" {
+			return false
+		}
+		var input map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &input); err != nil || input == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// userMessageHasRepresentableContent mirrors buildUserMessage's conversion
+// rules. Unsupported media may be mixed with useful content and dropped, but
+// a whole turn that would collapse to an empty string/array is rejected before
+// opening a billable upstream connection.
+func userMessageHasRepresentableContent(msg provider.Message) bool {
+	for _, p := range provider.ContentToParts(msg.Content) {
+		switch p.Type {
+		case "text":
+			if p.Text != "" {
+				return true
+			}
+		case "image_url":
+			if usableImageURL(p.ImageURL) {
+				return true
+			}
+		case "file":
+			if convertFileToAnthropicDocument(p.File) != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// assistantMessageHasRepresentableContent mirrors buildAssistantMessage. An
+// assistant turn may legitimately consist only of thinking/provider/tool-use
+// blocks, so text is not the sole validity signal here.
+func assistantMessageHasRepresentableContent(msg provider.Message) bool {
+	if hasSignedThinking(msg) {
+		return true
+	}
+	for _, data := range msg.RedactedThinking {
+		if data != "" {
+			return true
+		}
+	}
+	if len(msg.ToolCalls) > 0 {
+		return true
+	}
+	for _, raw := range msg.ProviderTurnBlocks {
+		if _, ok := forwardableProviderBlock(raw); ok {
+			return true
+		}
+	}
+	for _, p := range provider.ContentToParts(msg.Content) {
+		if p.Type == "text" && p.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSignedThinking(msg provider.Message) bool {
+	return msg.ReasoningContent != nil && *msg.ReasoningContent != "" &&
+		msg.ReasoningContentSignature != nil && *msg.ReasoningContentSignature != ""
+}
+
+func usableImageURL(image *provider.ImageURL) bool {
+	if image == nil || image.URL == "" {
+		return false
+	}
+	if !strings.HasPrefix(image.URL, "data:") {
+		return true
+	}
+	mediaType, data, ok := provider.ParseDataURI(image.URL)
+	return ok && mediaType != "" && data != ""
+}
+
+// forwardableProviderBlock mirrors buildAssistantMessage's raw-block path.
+// An empty object (or one without a type) is not a valid Anthropic content
+// block and must not make an otherwise empty assistant turn look usable.
+func forwardableProviderBlock(raw any) (map[string]any, bool) {
+	block, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	blockType, _ := block["type"].(string)
+	return block, blockType != ""
 }
 
 // requiredBetas inspects the unified request and returns the
@@ -321,7 +482,7 @@ func requiredBetas(model string, req *provider.ChatCompletionRequest) string {
 	var betas []string
 
 	thinkingEnabled := req.Thinking != nil && req.Thinking.Type == "enabled" && req.Thinking.BudgetTokens > 0
-	if thinkingEnabled && len(req.Tools) > 0 {
+	if thinkingEnabled && requestUsesTools(req) {
 		betas = append(betas, "interleaved-thinking-2025-05-14")
 	}
 
@@ -337,6 +498,13 @@ func requiredBetas(model string, req *provider.ChatCompletionRequest) string {
 		return ""
 	}
 	return strings.Join(betas, ",")
+}
+
+func requestUsesTools(req *provider.ChatCompletionRequest) bool {
+	if len(req.Tools) > 0 || len(normalizeExtraTools(req.ExtraTools)) > 0 {
+		return true
+	}
+	return req.ResponseFormat != nil && req.ResponseFormat.Type == "json_schema" && req.ResponseFormat.JSONSchema != nil
 }
 
 // is1MContextModel reports whether the given Anthropic model ID supports the
@@ -362,17 +530,90 @@ func is1MContextModel(model string) bool {
 // requests a ttl other than the default 5 minutes.
 func hasExtendedCacheTTL(req *provider.ChatCompletionRequest) bool {
 	check := func(cc any) bool {
-		m, ok := cc.(map[string]any)
-		if !ok {
+		if cc == nil {
 			return false
 		}
-		ttl, _ := m["ttl"].(string)
-		return ttl != "" && ttl != "5m"
+		encoded, err := json.Marshal(cc)
+		if err != nil {
+			return false
+		}
+		var decoded struct {
+			TTL string `json:"ttl"`
+		}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return false
+		}
+		return decoded.TTL != "" && decoded.TTL != "5m"
+	}
+	checkRawEnvelope := func(raw any) bool {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return false
+		}
+		var decoded struct {
+			CacheControl json.RawMessage `json:"cache_control"`
+		}
+		if err := json.Unmarshal(encoded, &decoded); err != nil || len(decoded.CacheControl) == 0 {
+			return false
+		}
+		return check(decoded.CacheControl)
 	}
 	for _, msg := range req.Messages {
-		for _, p := range provider.ContentToParts(msg.Content) {
-			if check(p.CacheControl) {
-				return true
+		parts := provider.ContentToParts(msg.Content)
+		switch msg.Role {
+		case "system":
+			for _, p := range parts {
+				if p.Type == "text" && p.Text != "" && check(p.CacheControl) {
+					return true
+				}
+			}
+		case "tool":
+			for _, p := range parts {
+				switch p.Type {
+				case "text":
+					if p.Text != "" && check(p.CacheControl) {
+						return true
+					}
+				case "image_url":
+					if usableImageURL(p.ImageURL) && check(p.CacheControl) {
+						return true
+					}
+				}
+			}
+		case "assistant":
+			for _, p := range parts {
+				if p.Type == "text" && p.Text != "" && check(p.CacheControl) {
+					return true
+				}
+			}
+			for _, raw := range msg.ProviderTurnBlocks {
+				// buildAssistantMessage currently forwards map-shaped provider
+				// blocks verbatim; inspect the cache_control using JSON so its
+				// value may still be a named map, struct, or RawMessage.
+				if _, ok := forwardableProviderBlock(raw); ok && checkRawEnvelope(raw) {
+					return true
+				}
+			}
+		default:
+			for _, p := range parts {
+				switch p.Type {
+				case "text":
+					if p.Text != "" && check(p.CacheControl) {
+						return true
+					}
+				case "image_url":
+					if usableImageURL(p.ImageURL) && check(p.CacheControl) {
+						return true
+					}
+				case "file":
+					// Defer to the converter rather than re-deriving when a
+					// file part survives: it owns the drop rules, and a copy
+					// here would silently rot into false positives (a beta
+					// header sent for a cache_control that never shipped).
+					if convertFileToAnthropicDocument(p.File) != nil && check(p.CacheControl) {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -381,11 +622,70 @@ func hasExtendedCacheTTL(req *provider.ChatCompletionRequest) bool {
 			return true
 		}
 	}
+	for _, raw := range normalizeExtraTools(req.ExtraTools) {
+		if checkRawEnvelope(raw) {
+			return true
+		}
+	}
 	return false
+}
+
+// normalizeExtraTools accepts both the ordinary JSON-decoded []any form and
+// programmatic typed slices / json.RawMessage arrays. The latter serialize to
+// the same upstream tools array and therefore must participate in beta-header
+// detection too.
+func normalizeExtraTools(raw any) []any {
+	if raw == nil {
+		return nil
+	}
+	if tools, ok := raw.([]any); ok {
+		return tools
+	}
+	decodeRawArray := func(encoded []byte) []any {
+		var elements []json.RawMessage
+		if err := json.Unmarshal(encoded, &elements); err != nil {
+			return nil
+		}
+		tools := make([]any, len(elements))
+		for i := range elements {
+			tools[i] = elements[i]
+		}
+		return tools
+	}
+	if encoded, ok := raw.(json.RawMessage); ok {
+		return decodeRawArray(encoded)
+	}
+
+	value := reflect.ValueOf(raw)
+	for value.IsValid() && (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() {
+		return nil
+	}
+	// Treat named byte slices as raw JSON too. ExtraTools is an array of
+	// objects, so a byte slice cannot be a meaningful typed tools collection.
+	if value.Kind() == reflect.Slice && value.Type().Elem().Kind() == reflect.Uint8 {
+		return decodeRawArray(value.Bytes())
+	}
+	if value.Kind() != reflect.Slice && value.Kind() != reflect.Array {
+		return nil
+	}
+
+	tools := make([]any, value.Len())
+	for i := 0; i < value.Len(); i++ {
+		tools[i] = value.Index(i).Interface()
+	}
+	return tools
 }
 
 // buildRequest returns the Anthropic request and the json_schema tool name (empty if not used).
 func buildRequest(model string, req *provider.ChatCompletionRequest) (*request, string) {
+	extraTools := normalizeExtraTools(req.ExtraTools)
+	hasUserTools := len(req.Tools) > 0 || len(extraTools) > 0
 	r := &request{
 		Model:     model,
 		MaxTokens: 4096,
@@ -456,19 +756,17 @@ func buildRequest(model string, req *provider.ChatCompletionRequest) (*request, 
 
 	// Anthropic server-side built-in tools (web_search, code_execution,
 	// computer use, bash, text_editor) don't fit OpenAI's function envelope;
-	// callers ship them through ExtraTools as raw objects. JSON unmarshal of
-	// an `any` field always lands as []any with map[string]any elements, so
-	// we only need that one shape here.
-	if v, ok := req.ExtraTools.([]any); ok {
-		r.Tools = append(r.Tools, v...)
-	}
+	// callers ship them through ExtraTools as raw objects. In addition to the
+	// ordinary JSON-decoded []any shape, accept programmatic typed slices and
+	// RawMessage arrays; normalizeExtraTools preserves their JSON meaning.
+	r.Tools = append(r.Tools, extraTools...)
 
 	// P0: Tool Choice — also fold parallel_tool_calls=false into tool_choice.
 	// Anthropic carries this opt-out under tool_choice.disable_parallel_tool_use
 	// rather than as a top-level field.
 	if req.ToolChoice != nil {
 		r.ToolChoice = convertToolChoice(req.ToolChoice)
-	} else if len(req.Tools) > 0 && req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+	} else if hasUserTools && req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
 		// Synthesize an auto choice so we have somewhere to attach the flag.
 		r.ToolChoice = &toolChoiceConfig{Type: "auto"}
 	}
@@ -486,7 +784,7 @@ func buildRequest(model string, req *provider.ChatCompletionRequest) (*request, 
 			systemTextSuffix = "\n\nYou must respond with valid JSON only. Do not include any text outside of the JSON object."
 		case "json_schema":
 			// Only use tool-as-structured-output when user has no tools (avoid conflict)
-			if req.ResponseFormat.JSONSchema != nil && len(req.Tools) == 0 {
+			if req.ResponseFormat.JSONSchema != nil && !hasUserTools {
 				jsonSchemaToolName = req.ResponseFormat.JSONSchema.Name
 				schemaBytes, _ := json.Marshal(req.ResponseFormat.JSONSchema.Schema)
 				r.Tools = append(r.Tools, anthropicTool{
@@ -525,7 +823,10 @@ func buildRequest(model string, req *provider.ChatCompletionRequest) (*request, 
 	var pendingToolResults []contentBlock
 
 	appendSystemText := func(text string, cc any) {
-		if text == "" && cc == nil {
+		// Anthropic rejects empty text blocks outright, and a cache breakpoint
+		// on empty text has nothing to mark, so an empty part is dropped even
+		// when it carries cache_control.
+		if text == "" {
 			return
 		}
 		systemBlocks = append(systemBlocks, contentBlock{
@@ -688,19 +989,23 @@ func buildToolResultBlock(msg provider.Message) contentBlock {
 	hasImage := false
 	hasCacheHint := false
 	for _, p := range parts {
-		if p.Type == "image_url" && p.ImageURL != nil {
+		if p.Type == "image_url" && usableImageURL(p.ImageURL) {
 			hasImage = true
 		}
-		if p.CacheControl != nil {
+		if ((p.Type == "text" && p.Text != "") ||
+			(p.Type == "image_url" && usableImageURL(p.ImageURL))) && p.CacheControl != nil {
 			hasCacheHint = true
 		}
 	}
 	if !hasImage && !hasCacheHint {
-		return contentBlock{
+		block := contentBlock{
 			Type:      "tool_result",
 			ToolUseID: msg.ToolCallID,
-			Content:   provider.ContentToString(msg.Content),
 		}
+		if text := provider.ContentToString(msg.Content); text != "" {
+			block.Content = text
+		}
+		return block
 	}
 	var blocks []contentBlock
 	for _, p := range parts {
@@ -714,11 +1019,20 @@ func buildToolResultBlock(msg provider.Message) contentBlock {
 				})
 			}
 		case "image_url":
-			if p.ImageURL != nil {
+			if usableImageURL(p.ImageURL) {
 				b := convertImageToAnthropicBlock(p.ImageURL.URL)
 				b.CacheControl = p.CacheControl
 				blocks = append(blocks, b)
 			}
+		}
+	}
+	if len(blocks) == 0 {
+		// Content is optional on tool_result. Leave it absent rather than
+		// storing a typed nil slice in an interface (which serializes as null)
+		// or emitting an empty string that carries no result.
+		return contentBlock{
+			Type:      "tool_result",
+			ToolUseID: msg.ToolCallID,
 		}
 	}
 	return contentBlock{
@@ -747,14 +1061,30 @@ func buildToolResultBlock(msg provider.Message) contentBlock {
 // cache_control on the assistant content is preserved so users can mark long
 // responses as cache breakpoints in multi-turn conversations.
 func buildAssistantMessage(msg provider.Message) message {
-	hasThinking := msg.ReasoningContent != nil && msg.ReasoningContentSignature != nil && *msg.ReasoningContentSignature != ""
-	hasRedacted := len(msg.RedactedThinking) > 0
-	hasProviderBlocks := len(msg.ProviderTurnBlocks) > 0
+	hasThinking := hasSignedThinking(msg)
+	hasRedacted := false
+	for _, data := range msg.RedactedThinking {
+		if data != "" {
+			hasRedacted = true
+			break
+		}
+	}
+	hasProviderBlocks := false
+	for _, raw := range msg.ProviderTurnBlocks {
+		if _, ok := forwardableProviderBlock(raw); ok {
+			hasProviderBlocks = true
+			break
+		}
+	}
 
 	contentParts := provider.ContentToParts(msg.Content)
+	// Only a non-empty text part can actually carry a breakpoint into the
+	// request — the emit loop below drops every other part type. Letting a
+	// dropped part raise this flag would divert an otherwise plain turn onto
+	// the block path and emit an empty content array, which Anthropic rejects.
 	hasContentCacheHint := false
 	for _, p := range contentParts {
-		if p.CacheControl != nil {
+		if p.Type == "text" && p.Text != "" && p.CacheControl != nil {
 			hasContentCacheHint = true
 			break
 		}
@@ -781,6 +1111,9 @@ func buildAssistantMessage(msg provider.Message) message {
 	// Echo back redacted_thinking blocks verbatim. Anthropic uses the opaque
 	// `data` blob to retain reasoning state across turns.
 	for _, data := range msg.RedactedThinking {
+		if data == "" {
+			continue
+		}
 		blocks = append(blocks, contentBlock{
 			Type: "redacted_thinking",
 			Data: data,
@@ -792,7 +1125,7 @@ func buildAssistantMessage(msg provider.Message) message {
 	// position between thinking and text matches the original Anthropic
 	// turn ordering, which is what keeps citation continuity intact.
 	for _, raw := range msg.ProviderTurnBlocks {
-		if m, ok := raw.(map[string]any); ok {
+		if m, ok := forwardableProviderBlock(raw); ok {
 			blocks = append(blocks, contentBlock{Raw: m})
 		}
 	}
@@ -813,15 +1146,11 @@ func buildAssistantMessage(msg provider.Message) message {
 		blocks = append(blocks, contentBlock{Type: "text", Text: text})
 	}
 	for _, tc := range msg.ToolCalls {
-		var input any
-		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
-		}
 		blocks = append(blocks, contentBlock{
 			Type:  "tool_use",
 			ID:    tc.ID,
 			Name:  tc.Function.Name,
-			Input: input,
+			Input: json.RawMessage(tc.Function.Arguments),
 		})
 	}
 	return message{
@@ -855,13 +1184,16 @@ func buildUserMessage(msg provider.Message) message {
 	for _, p := range parts {
 		switch p.Type {
 		case "text":
+			if p.Text == "" {
+				continue
+			}
 			blocks = append(blocks, contentBlock{
 				Type:         "text",
 				Text:         p.Text,
 				CacheControl: p.CacheControl,
 			})
 		case "image_url":
-			if p.ImageURL != nil {
+			if usableImageURL(p.ImageURL) {
 				b := convertImageToAnthropicBlock(p.ImageURL.URL)
 				b.CacheControl = p.CacheControl
 				blocks = append(blocks, b)
@@ -900,7 +1232,7 @@ func convertFileToAnthropicDocument(f *provider.FileContent) *contentBlock {
 	data := f.FileData
 	if strings.HasPrefix(data, "data:") {
 		mt, d, ok := provider.ParseDataURI(data)
-		if !ok {
+		if !ok || mt == "" || d == "" {
 			return nil
 		}
 		mediaType, data = mt, d
@@ -1100,16 +1432,33 @@ func convertResponse(ctx context.Context, resp *response, rawContent []map[strin
 // PromptTokens must include cache read/creation tokens; otherwise total_tokens
 // = prompt_tokens + completion_tokens under-counts every cache hit.
 func buildUsage(u responseUsage) *provider.Usage {
-	prompt := u.totalPromptTokens()
-	return &provider.Usage{
-		PromptTokens:     prompt,
-		CompletionTokens: u.OutputTokens,
-		TotalTokens:      prompt + u.OutputTokens,
-		CachedTokens:     u.CacheReadInputTokens,
+	cacheCreationTokens := u.CacheCreationInputTokens
+	cacheCreationDetailsKnown := false
+	if u.CacheCreation != nil {
+		detailTotal := u.CacheCreation.Ephemeral5mInputTokens + u.CacheCreation.Ephemeral1hInputTokens
+		if cacheCreationTokens == 0 {
+			cacheCreationTokens = detailTotal
+		}
+		cacheCreationDetailsKnown = detailTotal == cacheCreationTokens
+	}
+	prompt := u.InputTokens + u.CacheReadInputTokens + cacheCreationTokens
+	usage := &provider.Usage{
+		PromptTokens:        prompt,
+		CompletionTokens:    u.OutputTokens,
+		TotalTokens:         prompt + u.OutputTokens,
+		CachedTokens:        u.CacheReadInputTokens,
+		CacheCreationTokens: cacheCreationTokens,
 		PromptTokensDetails: &provider.PromptTokensDetails{
 			CachedTokens: u.CacheReadInputTokens,
 		},
 	}
+	if cacheCreationDetailsKnown {
+		usage.CacheCreationTokensDetails = &provider.CacheCreationTokensDetails{
+			Ephemeral5mTokens: u.CacheCreation.Ephemeral5mInputTokens,
+			Ephemeral1hTokens: u.CacheCreation.Ephemeral1hInputTokens,
+		}
+	}
+	return usage
 }
 
 // citationToAnnotation flattens an Anthropic citation object into the

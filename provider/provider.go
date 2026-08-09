@@ -31,3 +31,37 @@ type NonChatProvider interface {
 	// method at all is the declaration.
 	ChatUnsupported()
 }
+
+// CacheWriteUsageReporter is implemented by adapters whose current
+// configuration reliably populates Usage.CacheCreationTokens — the aggregate
+// prompt portion written into the vendor's cache — on every successful unified
+// chat path, both buffered and streaming.
+//
+// It exists for billing-aware callers that must not guess. An adapter whose
+// vendor has no cache-write concept leaves CacheCreationTokens at zero, and so
+// does an adapter that has one but never reported it; the field alone cannot
+// tell those apart. When this capability reports true, zero means that no cache
+// write happened for that successful request:
+//
+//	if r, ok := p.(provider.CacheWriteUsageReporter); ok && r.ReportsCacheWriteUsage() {
+//		// zero means no cache write happened
+//	}
+//
+// The aggregate count is not sufficient for exact billing when a vendor prices
+// cache writes differently by TTL. Billing code must use
+// [Usage.CacheCreationTokensDetails] for that calculation.
+//
+// Only the Anthropic adapter exposes this capability today. Not implementing
+// it, or returning false, means "assume nothing about cache writes from this
+// adapter's usage".
+type CacheWriteUsageReporter interface {
+	Provider
+	// ReportsCacheWriteUsage reports a capability of this provider instance's
+	// current configuration, including its configured endpoint. It must return
+	// true only when every successful ChatCompletion and every fully consumed,
+	// successfully completed ChatCompletionStream path reliably reports the
+	// aggregate cache-write count. It is not a
+	// per-request status, must not describe only some paths, and must not depend
+	// on the most recent request.
+	ReportsCacheWriteUsage() bool
+}

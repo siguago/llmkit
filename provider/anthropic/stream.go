@@ -30,19 +30,32 @@ type activeBlock struct {
 }
 
 type StreamReader struct {
-	reader             io.ReadCloser
-	scanner            *bufio.Scanner
-	diag               provider.StreamDiagnostics
-	usage              *provider.Usage
-	msgID              string
-	model              string
-	activeBlocks       map[int]*activeBlock // Anthropic block index → block info
-	toolCallIdx        int                  // next tool_call index to assign
-	jsonSchemaToolName string               // if set, tool_use with this name is json_schema content
-	hasRealToolCalls   bool                 // whether any non-json-schema tool_use blocks exist
+	reader              io.ReadCloser
+	scanner             *bufio.Scanner
+	diag                provider.StreamDiagnostics
+	usage               *provider.Usage
+	inputTokens         int // latest cumulative prompt-side usage fields
+	cacheReadTokens     int
+	cacheCreationTokens int
+	cacheCreation5m     int
+	cacheCreation1h     int
+	cacheDetailsKnown   bool
+	inferAutomatic5m    bool // official Anthropic server-tool cache writes only
+	msgID               string
+	model               string
+	activeBlocks        map[int]*activeBlock // Anthropic block index → block info
+	toolCallIdx         int                  // next tool_call index to assign
+	jsonSchemaToolName  string               // if set, tool_use with this name is json_schema content
+	hasRealToolCalls    bool                 // whether any non-json-schema tool_use blocks exist
 }
 
 func NewStreamReader(ctx context.Context, reader io.ReadCloser, jsonSchemaToolName string) *StreamReader {
+	// Directly constructed readers may consume arbitrary relay output, so they
+	// must not infer a TTL from an aggregate-only update.
+	return newStreamReader(ctx, reader, jsonSchemaToolName, false)
+}
+
+func newStreamReader(ctx context.Context, reader io.ReadCloser, jsonSchemaToolName string, inferAutomatic5m bool) *StreamReader {
 	diag := provider.NewStreamDiagnostics(ctx, "anthropic")
 	scanner := diag.NewScanner(reader)
 	return &StreamReader{
@@ -52,6 +65,7 @@ func NewStreamReader(ctx context.Context, reader io.ReadCloser, jsonSchemaToolNa
 		usage:              &provider.Usage{},
 		activeBlocks:       make(map[int]*activeBlock),
 		jsonSchemaToolName: jsonSchemaToolName,
+		inferAutomatic5m:   inferAutomatic5m,
 	}
 }
 
@@ -102,15 +116,23 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 			}
 			s.msgID = e.Message.ID
 			s.model = e.Message.Model
-			// Anthropic's input_tokens excludes cached portions. PromptTokens must
-			// include cache reads/creation so total_tokens reconciles in clients.
-			s.usage.PromptTokens = e.Message.Usage.totalPromptTokens()
-			s.usage.CachedTokens = e.Message.Usage.CacheReadInputTokens
-			if e.Message.Usage.CacheReadInputTokens > 0 {
-				s.usage.PromptTokensDetails = &provider.PromptTokensDetails{
-					CachedTokens: e.Message.Usage.CacheReadInputTokens,
+			s.inputTokens = e.Message.Usage.InputTokens
+			s.cacheReadTokens = e.Message.Usage.CacheReadInputTokens
+			s.cacheCreationTokens = e.Message.Usage.CacheCreationInputTokens
+			s.cacheDetailsKnown = false
+			s.usage.CompletionTokens = e.Message.Usage.OutputTokens
+			if creation := e.Message.Usage.CacheCreation; creation != nil {
+				detailTotal := creation.Ephemeral5mInputTokens + creation.Ephemeral1hInputTokens
+				if s.cacheCreationTokens == 0 {
+					s.cacheCreationTokens = detailTotal
+				}
+				if detailTotal == s.cacheCreationTokens {
+					s.cacheCreation5m = creation.Ephemeral5mInputTokens
+					s.cacheCreation1h = creation.Ephemeral1hInputTokens
+					s.cacheDetailsKnown = true
 				}
 			}
+			s.syncPromptUsage()
 			continue
 
 		case "content_block_start":
@@ -443,24 +465,51 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 				if e.Usage.OutputTokens > s.usage.CompletionTokens {
 					s.usage.CompletionTokens = e.Usage.OutputTokens
 				}
-				// message_delta restates prompt-side counters with the final
-				// post-cache tally. Take the MAX with message_start values:
-				// some Anthropic implementations emit message_delta usage with
-				// only output_tokens populated (other fields zero), and we
-				// must not regress the more complete message_start data in
-				// that case.
-				if total := e.Usage.totalPromptTokens(); total > s.usage.PromptTokens {
-					s.usage.PromptTokens = total
+				if e.Usage.InputTokens != nil {
+					s.inputTokens = *e.Usage.InputTokens
 				}
-				if e.Usage.CacheReadInputTokens > s.usage.CachedTokens {
-					s.usage.CachedTokens = e.Usage.CacheReadInputTokens
-					s.usage.PromptTokensDetails = &provider.PromptTokensDetails{
-						CachedTokens: e.Usage.CacheReadInputTokens,
+				if e.Usage.CacheReadInputTokens != nil {
+					s.cacheReadTokens = *e.Usage.CacheReadInputTokens
+				}
+
+				previousCacheCreation := s.cacheCreationTokens
+				aggregateReported := e.Usage.CacheCreationInputTokens != nil
+				if aggregateReported {
+					s.cacheCreationTokens = *e.Usage.CacheCreationInputTokens
+				}
+				if creation := e.Usage.CacheCreation; creation != nil {
+					s.mergeCacheCreationDelta(creation, aggregateReported)
+				} else if s.cacheCreationTokens > previousCacheCreation {
+					if s.inferAutomatic5m {
+						// Official Anthropic server-tool results add automatic cache
+						// writes after message_start and document them as always 5m.
+						growth := s.cacheCreationTokens - previousCacheCreation
+						if s.cacheDetailsKnown {
+							s.cacheCreation5m += growth
+						} else if previousCacheCreation == 0 {
+							s.cacheCreation5m = growth
+							s.cacheCreation1h = 0
+							s.cacheDetailsKnown = true
+						}
+					} else {
+						// A relay's late aggregate may describe either TTL. Preserve
+						// the total but do not fabricate a billing breakdown.
+						s.cacheDetailsKnown = false
 					}
+				} else if s.cacheCreationTokens < previousCacheCreation {
+					// Without a fresh breakdown, an older split no longer describes
+					// the explicitly reported aggregate.
+					s.cacheDetailsKnown = false
 				}
-				s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
+				s.syncPromptUsage()
 			}
-			finishReason := mapStopReason(e.Delta.StopReason)
+			if e.Delta.StopReason == nil || *e.Delta.StopReason == "" {
+				// Some relays split the usage update and terminal stop reason
+				// across separate message_delta events. Do not manufacture an
+				// early "stop" for a usage-only delta.
+				continue
+			}
+			finishReason := mapStopReason(*e.Delta.StopReason)
 			// json_schema mode: if all tool_use blocks were json_schema, map "tool_calls" → "stop"
 			if s.jsonSchemaToolName != "" && !s.hasRealToolCalls && finishReason == "tool_calls" {
 				finishReason = "stop"
@@ -536,6 +585,76 @@ func (s *StreamReader) Close() error {
 
 func (s *StreamReader) GetUsage() *provider.Usage {
 	return s.usage
+}
+
+// syncPromptUsage projects Anthropic's three disjoint prompt-side counters into
+// the common usage shape. Keeping each counter independently is important:
+// message_delta can contain only one of them, and summing that partial event
+// would otherwise discard values captured at message_start.
+func (s *StreamReader) syncPromptUsage() {
+	s.usage.PromptTokens = s.inputTokens + s.cacheReadTokens + s.cacheCreationTokens
+	s.usage.CachedTokens = s.cacheReadTokens
+	s.usage.CacheCreationTokens = s.cacheCreationTokens
+	if s.cacheDetailsKnown {
+		s.usage.CacheCreationTokensDetails = &provider.CacheCreationTokensDetails{
+			Ephemeral5mTokens: s.cacheCreation5m,
+			Ephemeral1hTokens: s.cacheCreation1h,
+		}
+	} else {
+		s.usage.CacheCreationTokensDetails = nil
+	}
+	if s.cacheReadTokens > 0 {
+		s.usage.PromptTokensDetails = &provider.PromptTokensDetails{
+			CachedTokens: s.cacheReadTokens,
+		}
+	} else {
+		s.usage.PromptTokensDetails = nil
+	}
+	s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
+}
+
+// mergeCacheCreationDelta applies a possibly partial TTL breakdown. When a
+// prior complete split exists, omitted fields retain their earlier cumulative
+// values. Without prior details, one reported bucket can only be completed when
+// the aggregate is also present; otherwise exposing a split would invent the
+// missing bucket and make exact billing unsafe.
+func (s *StreamReader) mergeCacheCreationDelta(delta *messageDeltaCacheCreationUsage, aggregateReported bool) {
+	fiveReported := delta.Ephemeral5mInputTokens != nil
+	oneReported := delta.Ephemeral1hInputTokens != nil
+
+	if s.cacheDetailsKnown {
+		if fiveReported {
+			s.cacheCreation5m = *delta.Ephemeral5mInputTokens
+		}
+		if oneReported {
+			s.cacheCreation1h = *delta.Ephemeral1hInputTokens
+		}
+		detailTotal := s.cacheCreation5m + s.cacheCreation1h
+		if !aggregateReported {
+			s.cacheCreationTokens = detailTotal
+		}
+		s.cacheDetailsKnown = detailTotal == s.cacheCreationTokens
+		return
+	}
+
+	switch {
+	case fiveReported && oneReported:
+		s.cacheCreation5m = *delta.Ephemeral5mInputTokens
+		s.cacheCreation1h = *delta.Ephemeral1hInputTokens
+		detailTotal := s.cacheCreation5m + s.cacheCreation1h
+		if !aggregateReported {
+			s.cacheCreationTokens = detailTotal
+		}
+		s.cacheDetailsKnown = detailTotal == s.cacheCreationTokens
+	case aggregateReported && fiveReported:
+		s.cacheCreation5m = *delta.Ephemeral5mInputTokens
+		s.cacheCreation1h = s.cacheCreationTokens - s.cacheCreation5m
+		s.cacheDetailsKnown = s.cacheCreation1h >= 0
+	case aggregateReported && oneReported:
+		s.cacheCreation1h = *delta.Ephemeral1hInputTokens
+		s.cacheCreation5m = s.cacheCreationTokens - s.cacheCreation1h
+		s.cacheDetailsKnown = s.cacheCreation5m >= 0
+	}
 }
 
 // extractRetryAfterField pulls a backoff hint out of an upstream error body.

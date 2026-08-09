@@ -2,6 +2,23 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## Unreleased
+
+### 兼容性与迁移
+
+`provider.Usage` 新增缓存写入汇总字段 `CacheCreationTokens`，以及 TTL 拆分字段 `CacheCreationTokensDetails *CacheCreationTokensDetails`；明细中的 `Ephemeral5mTokens` 与 `Ephemeral1hTokens` 分别承载 Anthropic 的 `ephemeral_5m_input_tokens` 和 `ephemeral_1h_input_tokens`。按字段读写、带字段名的 composite literal 和允许响应增加字段的 JSON 调用方不需要修改；现有**不带字段名**的 `provider.Usage{...}` 会因公开 struct 增加字段而无法编译。
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| 不带字段名构造 `provider.Usage{...}` 或根包别名 `llmkit.Usage{...}` | **源码兼容性破坏** —— 新字段改变了位置式 literal 要求的元素数量 | 改为带字段名构造，例如 `provider.Usage{PromptTokens: in, CompletionTokens: out, TotalTokens: in + out}` |
+| 带字段名构造、读取既有字段，或做容忍新增字段的 JSON 编解码 | 不受影响；新明细未提供时保持 `nil` / 省略 | — |
+| 用 `DisallowUnknownFields` 或固定 JSON Schema 解码 `usage` | Anthropic 非零缓存写入会新增 `cache_creation_input_tokens`；有 TTL 明细时还会新增 `cache_creation` | 将这两个可选字段加入允许列表；其他 provider 的 wire 不变 |
+
+### 计费语义
+
+- `Usage.CacheCreationTokens` 继续表示缓存写入 token 的汇总值：正值可确认发生了写入；零值只有在对应 provider 的 `CacheWriteUsageReporter.ReportsCacheWriteUsage()` 返回 `true` 时才能解释为没有写入。该汇总不能在 5 分钟与 1 小时 TTL 混用时精确定价；两种 TTL 费率不同，计费代码必须读取 `Usage.CacheCreationTokensDetails`。明细为 `nil` 表示上游没有提供完整、可核对的拆分，不应把它解释成两档都为零。
+- `CacheWriteUsageReporter.ReportsCacheWriteUsage()` 是 provider 实例**当前配置**的整体能力声明（包括所配 endpoint），只有成功的同步调用和完整消费且正常结束的流式调用都可靠返回汇总值时才能为 `true`。它不是逐请求状态，也不能用 `true` 表示“只有部分路径会报告”；未实现接口或返回 `false` 都表示调用方不能从汇总字段的零值推断没有缓存写入。
+
 ## v0.5.0 — 2026-08-02
 
 新增两套**显式原生协议面**，不改变现有 `Chat` / `ChatStream` 的 DTO、路由或默认 wire 行为。没有按模型名自动切换，也没有把所有 provider 一次性声明成支持。**没有公开 API 的删除或签名变更；唯一需要动手的是给流式调用的 context 加 deadline，见下表。**

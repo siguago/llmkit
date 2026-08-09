@@ -44,9 +44,13 @@
 //   - Stable in shape. [Provider], the mature unified capability interfaces,
 //     [ProviderError], [ChatCompletionRequest]/[ChatCompletionResponse] core
 //     fields (Model, Messages, Temperature, MaxTokens, Tools, ToolChoice,
-//     ResponseFormat, Stream), [Message], [ContentPart], and [Usage] token
-//     counts. These mirror the established unified wire format and are unlikely
-//     to move.
+//     ResponseFormat, Stream), [Message], and [ContentPart]. These mirror the
+//     established unified wire format and are unlikely to move.
+//
+//   - Additive billing metadata. The established [Usage] counters retain their
+//     meanings, but new independently billed dimensions may be added as named
+//     fields. Its exact field count is therefore not stable; use keyed composite
+//     literals instead of positional ones.
 //
 //   - Additive and vendor-specific. The long tail of optional fields on
 //     [ChatCompletionRequest] — ProviderRouting, SafetySettings, CacheID,

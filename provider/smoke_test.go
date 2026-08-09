@@ -194,3 +194,50 @@ func TestNormalizeUsage_DeepSeekAliases(t *testing.T) {
 		t.Fatalf("upstream fields must be preserved: %+v", usage)
 	}
 }
+
+func TestNormalizeUsage_CacheCreationDetails(t *testing.T) {
+	usage := &Usage{
+		CacheCreationTokensDetails: &CacheCreationTokensDetails{
+			Ephemeral5mTokens: 12,
+			Ephemeral1hTokens: 8,
+		},
+	}
+
+	NormalizeUsage(usage)
+
+	if usage.CacheCreationTokens != 20 {
+		t.Fatalf("cache creation total not normalized from details: %+v", usage)
+	}
+
+	wire, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatalf("marshal usage: %v", err)
+	}
+	for _, want := range []string{
+		`"cache_creation_input_tokens":20`,
+		`"cache_creation":{"ephemeral_5m_input_tokens":12,"ephemeral_1h_input_tokens":8}`,
+	} {
+		if !strings.Contains(string(wire), want) {
+			t.Fatalf("usage JSON missing %s: %s", want, wire)
+		}
+	}
+}
+
+func TestNormalizeUsage_DropsInconsistentCacheCreationDetails(t *testing.T) {
+	usage := &Usage{
+		CacheCreationTokens: 25,
+		CacheCreationTokensDetails: &CacheCreationTokensDetails{
+			Ephemeral5mTokens: 12,
+			Ephemeral1hTokens: 8,
+		},
+	}
+
+	NormalizeUsage(usage)
+
+	if usage.CacheCreationTokens != 25 {
+		t.Fatalf("reported aggregate must remain authoritative: %+v", usage)
+	}
+	if usage.CacheCreationTokensDetails != nil {
+		t.Fatalf("inconsistent details must not be exposed as billing-safe: %+v", usage)
+	}
+}

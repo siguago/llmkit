@@ -851,12 +851,37 @@ func sumUsage(a, b *llmkit.Usage) *llmkit.Usage {
 	if b == nil {
 		return a
 	}
-	return &llmkit.Usage{
-		PromptTokens:     a.PromptTokens + b.PromptTokens,
-		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
-		TotalTokens:      a.TotalTokens + b.TotalTokens,
-		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
+	usage := &llmkit.Usage{
+		PromptTokens:          a.PromptTokens + b.PromptTokens,
+		CompletionTokens:      a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:           a.TotalTokens + b.TotalTokens,
+		CachedTokens:          a.CachedTokens + b.CachedTokens,
+		ReasoningTokens:       a.ReasoningTokens + b.ReasoningTokens,
+		PromptCacheHitTokens:  a.PromptCacheHitTokens + b.PromptCacheHitTokens,
+		PromptCacheMissTokens: a.PromptCacheMissTokens + b.PromptCacheMissTokens,
+		CacheCreationTokens:   a.CacheCreationTokens + b.CacheCreationTokens,
+		Cost:                  a.Cost + b.Cost,
+		ImageCount:            a.ImageCount + b.ImageCount,
+		DurationMs:            a.DurationMs + b.DurationMs,
+		RequestCount:          a.RequestCount + b.RequestCount,
+		MediaCount:            a.MediaCount + b.MediaCount,
 	}
+	if a.CacheCreationTokensDetails != nil && b.CacheCreationTokensDetails != nil {
+		details := &llmkit.CacheCreationTokensDetails{
+			Ephemeral5mTokens: a.CacheCreationTokensDetails.Ephemeral5mTokens + b.CacheCreationTokensDetails.Ephemeral5mTokens,
+			Ephemeral1hTokens: a.CacheCreationTokensDetails.Ephemeral1hTokens + b.CacheCreationTokensDetails.Ephemeral1hTokens,
+		}
+		if details.Ephemeral5mTokens+details.Ephemeral1hTokens == usage.CacheCreationTokens {
+			usage.CacheCreationTokensDetails = details
+		}
+	}
+	if usage.CachedTokens > 0 {
+		usage.PromptTokensDetails = &llmkit.PromptTokensDetails{CachedTokens: usage.CachedTokens}
+	}
+	if usage.ReasoningTokens > 0 {
+		usage.CompletionTokensDetails = &llmkit.CompletionTokensDetails{ReasoningTokens: usage.ReasoningTokens}
+	}
+	return usage
 }
 
 // describeErr turns an SDK error into something actionable in one line.

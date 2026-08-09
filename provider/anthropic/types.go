@@ -125,11 +125,11 @@ type response struct {
 }
 
 type responseBlock struct {
-	Type  string `json:"type"`
-	Text  string `json:"text,omitempty"`
-	ID    string `json:"id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Input any    `json:"input,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 	// Thinking
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"` // present on completed thinking blocks
@@ -163,10 +163,18 @@ type citation struct {
 }
 
 type responseUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	InputTokens              int                 `json:"input_tokens"`
+	OutputTokens             int                 `json:"output_tokens"`
+	CacheReadInputTokens     int                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens"`
+	CacheCreation            *cacheCreationUsage `json:"cache_creation"`
+}
+
+// cacheCreationUsage splits cache writes by TTL. Anthropic charges the two
+// buckets at different rates, while CacheCreationInputTokens is their sum.
+type cacheCreationUsage struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
 // totalPromptTokens sums all prompt-side tokens that Anthropic bills as input.
@@ -243,21 +251,26 @@ type messageDeltaEvent struct {
 }
 
 type messageDelta struct {
-	StopReason string `json:"stop_reason"`
+	StopReason *string `json:"stop_reason"`
 }
 
-// messageDeltaUsage carries the final usage tally emitted on the message_delta
-// event. Anthropic re-states all prompt-side counters here (not just the output
-// tokens) so the gateway can reconcile cache writes/reads that only become known
-// at message completion. See message_delta example in:
+// messageDeltaUsage carries the cumulative usage tally emitted on the
+// message_delta event. Prompt-side fields are optional: Anthropic and compatible
+// relays may only emit counters that changed, so pointers preserve the difference
+// between an omitted field and a reported zero. See message_delta example in:
 // https://platform.claude.com/docs/en/api/messages-streaming
 type messageDeltaUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	InputTokens              *int                            `json:"input_tokens"`
+	OutputTokens             int                             `json:"output_tokens"`
+	CacheReadInputTokens     *int                            `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int                            `json:"cache_creation_input_tokens"`
+	CacheCreation            *messageDeltaCacheCreationUsage `json:"cache_creation"`
 }
 
-func (u messageDeltaUsage) totalPromptTokens() int {
-	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+// messageDeltaCacheCreationUsage is separate from the full response shape:
+// compatible relays may emit only the TTL bucket that changed. Pointer fields
+// preserve omitted versus explicitly reported zero values.
+type messageDeltaCacheCreationUsage struct {
+	Ephemeral5mInputTokens *int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens *int `json:"ephemeral_1h_input_tokens"`
 }

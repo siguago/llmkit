@@ -37,6 +37,8 @@ type (
 	Usage = provider.Usage
 	// PromptTokensDetails breaks down prompt token usage.
 	PromptTokensDetails = provider.PromptTokensDetails
+	// CacheCreationTokensDetails breaks down cache writes by TTL.
+	CacheCreationTokensDetails = provider.CacheCreationTokensDetails
 	// CompletionTokensDetails breaks down completion token usage.
 	CompletionTokensDetails = provider.CompletionTokensDetails
 
