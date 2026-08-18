@@ -3,6 +3,7 @@ package openaibatch
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"strings"
 	"testing"
 )
@@ -302,5 +303,23 @@ func TestOutputReader_EmptyFileIsJustEOF(t *testing.T) {
 	defer reader.Close()
 	if _, err := reader.Next(); err != io.EOF {
 		t.Fatalf("err = %v, want io.EOF", err)
+	}
+}
+
+// Regression: maxLineBytes is an int64 for the caller's convenience, but
+// bufio counts in int. An unclamped conversion truncates on a 32-bit build,
+// and a negative maxTokenSize makes bufio reject every line past the initial
+// buffer — silently lowering the ceiling the caller asked to raise.
+func TestOutputReader_OversizedCapIsClampedNotTruncated(t *testing.T) {
+	line := `{"id":"a","custom_id":"1","response":{"status_code":200,"request_id":"r","body":"` +
+		strings.Repeat("x", 256<<10) + `"}}`
+	r := NewOutputReader(io.NopCloser(strings.NewReader(line+"\n")), math.MaxInt64)
+	defer r.Close()
+	item, err := r.Next()
+	if err != nil {
+		t.Fatalf("a 256 KiB line under a MaxInt64 ceiling must decode: %v", err)
+	}
+	if item.CustomID != "1" {
+		t.Fatalf("item = %+v", item)
 	}
 }

@@ -16,6 +16,10 @@ import (
 // on a single line.
 const DefaultMaxLineBytes = 32 << 20
 
+// maxPlatformInt is the largest value bufio can use as a token-size ceiling
+// on this build.
+const maxPlatformInt = int64(^uint(0) >> 1)
+
 // InputItem is one line of a batch input file.
 type InputItem struct {
 	// CustomID must be unique within the batch; it is the only way to map
@@ -121,6 +125,14 @@ type OutputReader struct {
 func NewOutputReader(body io.ReadCloser, maxLineBytes int64) *OutputReader {
 	if maxLineBytes <= 0 {
 		maxLineBytes = DefaultMaxLineBytes
+	}
+	// The ceiling is an int64 for callers' convenience but bufio counts in
+	// int. Clamp instead of converting blindly: on a 32-bit build a value
+	// above MaxInt truncates, and a negative maxTokenSize makes bufio reject
+	// every line longer than the initial buffer — silently *lowering* the
+	// limit the caller asked to raise.
+	if maxLineBytes > maxPlatformInt {
+		maxLineBytes = maxPlatformInt
 	}
 	scanner := bufio.NewScanner(body)
 	// The effective scanner cap is max(maxLineBytes, cap(initial)), so the

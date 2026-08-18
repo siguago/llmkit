@@ -206,3 +206,66 @@ func TestBatch_UpstreamErrorClassified(t *testing.T) {
 		t.Errorf("provider code = %q", provider.ProviderCode(err))
 	}
 }
+
+// Regression: batch GET and DELETE carried Content-Type: application/json and
+// Content-Length: 0, describing a request body that does not exist. Strict
+// intermediaries have no reason to accept that, and relays are exactly the
+// deployments this transport has to survive.
+func TestBatchReadRoutes_SendNoBodyHeaders(t *testing.T) {
+	type seen struct {
+		method, ctype string
+		length        int64
+	}
+	var got []seen
+	p := newBatchTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, seen{r.Method, r.Header.Get("Content-Type"), r.ContentLength})
+		switch {
+		case r.Method == http.MethodDelete:
+			_, _ = io.WriteString(w, `{"id":"msgbatch_1","type":"message_batch_deleted"}`)
+		case strings.HasSuffix(r.URL.Path, "/results"):
+			_, _ = io.WriteString(w, `{"custom_id":"r1","result":{"type":"canceled"}}`+"\n")
+		default:
+			_, _ = io.WriteString(w, wireBatch)
+		}
+	})
+	ctx := context.Background()
+	if _, err := p.RetrieveAnthropicMessageBatch(ctx, "sk", "msgbatch_1"); err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if _, err := p.DeleteAnthropicMessageBatch(ctx, "sk", "msgbatch_1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	reader, err := p.ReadAnthropicMessageBatchResults(ctx, "sk", "msgbatch_1")
+	if err != nil {
+		t.Fatalf("results: %v", err)
+	}
+	reader.Close()
+
+	if len(got) != 3 {
+		t.Fatalf("requests = %+v", got)
+	}
+	for _, s := range got {
+		if s.ctype != "" {
+			t.Errorf("%s advertised Content-Type %q with no body", s.method, s.ctype)
+		}
+		if s.length > 0 {
+			t.Errorf("%s advertised Content-Length %d with no body", s.method, s.length)
+		}
+	}
+}
+
+// The POST routes must be untouched: they do carry JSON.
+func TestBatchWriteRoutes_StillSendJSONContentType(t *testing.T) {
+	var ctypes []string
+	p := newBatchTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		ctypes = append(ctypes, r.Header.Get("Content-Type"))
+		_, _ = io.WriteString(w, wireBatch)
+	})
+	ctx := context.Background()
+	if _, err := p.CreateAnthropicMessageBatch(ctx, "sk", minimalBatchCreate()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if ctypes[0] != "application/json" {
+		t.Errorf("create Content-Type = %q, want application/json", ctypes[0])
+	}
+}

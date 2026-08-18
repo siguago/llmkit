@@ -99,6 +99,11 @@ func (c *Client) SupportsBatchCancellation() bool {
 	return ok
 }
 
+// waitNotFoundGracePolls bounds how long the batch waiters absorb a 404 while
+// a just-created batch propagates. Past it the error surfaces, because these
+// waiters run on an hours-long budget where an indefinite 404 is a hang.
+const waitNotFoundGracePolls = 3
+
 // WaitBatchOptions tunes WaitBatch polling.
 type WaitBatchOptions struct {
 	// Interval between polls. Default 60s — batches are measured in minutes
@@ -151,6 +156,7 @@ func (c *Client) WaitBatch(ctx context.Context, batch *openaibatch.Batch, opts *
 	defer ticker.Stop()
 
 	current := batch
+	notFoundPolls := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -159,11 +165,24 @@ func (c *Client) WaitBatch(ctx context.Context, batch *openaibatch.Batch, opts *
 		}
 		updated, err := c.RetrieveBatch(ctx, current.ID)
 		if err != nil {
-			if IsRetryable(err) || IsNotFound(err) {
+			if IsRetryable(err) {
 				continue
+			}
+			// A freshly created batch can briefly lag behind in the retrieval
+			// store, so tolerate a 404 for the first few polls — but only
+			// those. The wait budget here is measured in hours, and a batch ID
+			// comes straight from a successful create: a persistent 404 means
+			// the wrong ID or a deleted batch, and swallowing it would turn
+			// that into a day-long silent hang instead of an error.
+			if IsNotFound(err) {
+				notFoundPolls++
+				if notFoundPolls <= waitNotFoundGracePolls {
+					continue
+				}
 			}
 			return current, err
 		}
+		notFoundPolls = 0
 		current = updated
 		if onUpdate != nil {
 			onUpdate(current)

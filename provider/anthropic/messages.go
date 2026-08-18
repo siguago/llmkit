@@ -211,11 +211,20 @@ func (p *Provider) doAnthropicRequest(
 	if method == "" {
 		method = http.MethodPost
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	// A nil body means there is nothing to send: handing net/http an empty
+	// reader instead would advertise Content-Length: 0 (and, below, a JSON
+	// content type) on the batch GET and DELETE routes, which describes a
+	// body that does not exist and gives strict intermediaries something to
+	// object to.
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
 	if err != nil {
 		return nil, err
 	}
-	setNativeHeaders(httpReq, apiKey, requestOptions, behavior.acceptEventStream)
+	setNativeHeaders(httpReq, apiKey, requestOptions, behavior.acceptEventStream, body != nil)
 
 	client := p.client
 	if behavior.useStreamClient {
@@ -252,10 +261,12 @@ func (p *Provider) doAnthropicRequest(
 	return nil, apiErr
 }
 
-func setNativeHeaders(req *http.Request, apiKey string, opts anthropicapi.RequestOptions, acceptEventStream bool) {
+func setNativeHeaders(req *http.Request, apiKey string, opts anthropicapi.RequestOptions, acceptEventStream, hasBody bool) {
 	provider.SetKeyHeader(req.Header, "x-api-key", apiKey)
 	req.Header.Set("anthropic-version", opts.Version)
-	req.Header.Set("content-type", "application/json")
+	if hasBody {
+		req.Header.Set("content-type", "application/json")
+	}
 	if acceptEventStream {
 		req.Header.Set("accept", "text/event-stream")
 	}

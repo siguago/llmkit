@@ -195,6 +195,7 @@ func (c *Client) WaitAnthropicMessageBatch(ctx context.Context, batch *anthropic
 	defer ticker.Stop()
 
 	current := batch
+	notFoundPolls := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,11 +204,21 @@ func (c *Client) WaitAnthropicMessageBatch(ctx context.Context, batch *anthropic
 		}
 		updated, err := c.RetrieveAnthropicMessageBatch(ctx, current.ID)
 		if err != nil {
-			if IsRetryable(err) || IsNotFound(err) {
+			if IsRetryable(err) {
 				continue
+			}
+			// Same bounded grace as WaitBatch, and it matters more here:
+			// deleting an ended batch is a documented operation, so polling a
+			// deleted one is a realistic mistake rather than a freak event.
+			if IsNotFound(err) {
+				notFoundPolls++
+				if notFoundPolls <= waitNotFoundGracePolls {
+					continue
+				}
 			}
 			return current, err
 		}
+		notFoundPolls = 0
 		current = updated
 		if onUpdate != nil {
 			onUpdate(current)

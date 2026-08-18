@@ -269,3 +269,89 @@ func TestCancelAnthropicMessageBatch_Facade(t *testing.T) {
 		t.Errorf("path = %q", gotPath)
 	}
 }
+
+// Regression: the batch waiters run on a 26-hour budget, so the "tolerate a
+// 404 while the store catches up" rule copied from WaitResponse (30-minute
+// budget) turned a wrong or deleted batch ID into a day-long silent hang.
+// A persistent 404 must surface instead.
+func TestWaitBatch_PersistentNotFoundSurfaces(t *testing.T) {
+	var polls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"message":"no such batch","type":"invalid_request_error","code":"not_found"}}`)
+	})
+	start := &openaibatch.Batch{}
+	if err := startFromJSON(start, `{"id":"batch_gone","object":"batch","status":"in_progress"}`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.WaitBatch(context.Background(), start, &WaitBatchOptions{Interval: time.Millisecond})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a batch that is gone must not wait out the full budget")
+		}
+		if !IsNotFound(err) {
+			t.Fatalf("err = %v, want the upstream 404 to reach the caller", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("WaitBatch swallowed a persistent 404 instead of returning it")
+	}
+	if got := polls.Load(); got > waitNotFoundGracePolls+1 {
+		t.Errorf("polled %d times, want at most %d before giving up", got, waitNotFoundGracePolls+1)
+	}
+}
+
+// The grace window still exists: a batch that 404s briefly, then appears,
+// must be waited out rather than failed.
+func TestWaitBatch_TransientNotFoundStillTolerated(t *testing.T) {
+	var polls atomic.Int32
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		if polls.Add(1) == 1 {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"message":"not yet","type":"invalid_request_error","code":"not_found"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"batch_1","object":"batch","status":"completed"}`)
+	})
+	start := &openaibatch.Batch{}
+	if err := startFromJSON(start, `{"id":"batch_1","object":"batch","status":"validating"}`); err != nil {
+		t.Fatal(err)
+	}
+	final, err := c.WaitBatch(context.Background(), start, &WaitBatchOptions{Interval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("a transient 404 must still be absorbed: %v", err)
+	}
+	if final.Status != openaibatch.StatusCompleted {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestWaitAnthropicMessageBatch_PersistentNotFoundSurfaces(t *testing.T) {
+	c := newTestClientFor(t, Anthropic, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"not_found_error","message":"deleted"}}`)
+	})
+	start := &anthropicapi.MessageBatch{}
+	if err := startFromJSON(start, `{"id":"msgbatch_gone","type":"message_batch","processing_status":"in_progress","request_counts":{"processing":1,"succeeded":0,"errored":0,"canceled":0,"expired":0},"created_at":"2026-08-18T00:00:00Z","expires_at":"2026-08-19T00:00:00Z"}`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.WaitAnthropicMessageBatch(context.Background(), start,
+			&WaitAnthropicMessageBatchOptions{Interval: time.Millisecond})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !IsNotFound(err) {
+			t.Fatalf("err = %v, want the upstream 404", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("WaitAnthropicMessageBatch swallowed a persistent 404: deleting an ended batch is a documented operation")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 )
@@ -325,5 +326,17 @@ func TestBatchRawJSONAccessors(t *testing.T) {
 		if !strings.Contains(raw, "vendor_extra") {
 			t.Errorf("%s.RawJSON lost the unmodeled field: %s", name, raw)
 		}
+	}
+}
+
+// Same clamp as protocol/openaibatch: an int64 ceiling above the platform int
+// must not truncate into a negative bufio token size.
+func TestMessageBatchResultsReader_OversizedCapIsClampedNotTruncated(t *testing.T) {
+	line := `{"custom_id":"r1","result":{"type":"canceled","pad":"` +
+		strings.Repeat("y", 256<<10) + `"}}`
+	r := NewMessageBatchResultsReader(io.NopCloser(strings.NewReader(line+"\n")), math.MaxInt64)
+	defer r.Close()
+	if _, err := r.Next(); err != nil {
+		t.Fatalf("a 256 KiB line under a MaxInt64 ceiling must decode: %v", err)
 	}
 }

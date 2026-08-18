@@ -371,7 +371,8 @@ for {
 
 - **结果顺序不保证**，一律用 `custom_id` 对账 —— 与 rerank 一样，这是协议本身的语义，不是实现细节。
 - **创建即排队计费**，没有幂等键，所以 `CreateBatch` / `CreateAnthropicMessageBatch` 只重试能证明「上游没接活」的错误（同 `CreateResponse`）。同一份输入建两次 batch 是两份钱。
-- **JSONL 恒严格**：坏行直接报错并给出行号，不走 `WithStreamTolerance` —— 结果文件是完整工件，坏行是数据损坏而非网络抖动。单行上限默认 32 MiB，可用 `WithMaxStreamFrameBytes` 收紧。
+- **JSONL 恒严格**：坏行直接报错并给出行号，不走 `WithStreamTolerance` —— 结果文件是完整工件，坏行是数据损坏而非网络抖动。
+- **两侧的行上限设法不同**，因为构造读取器的人不同：Anthropic 的 results 由 SDK 打开，跟随 `WithMaxStreamFrameBytes`（未设时 32 MiB）；OpenAI 的输出文件由你自己下载并构造 `openaibatch.NewOutputReader(body, maxLineBytes)`，上限就是那个参数（传 0 用 32 MiB 默认值），客户端选项管不到它。
 - **请求体保持 `json.RawMessage`**：batch 包不复述被批处理端点的请求 schema，你用哪个端点就拿那个端点的 DTO 组 body。
 - **Anthropic 的 results 始终按配置 base URL 拼路径**，不跟随响应里的 `results_url` —— 让响应体决定出站目标与本库的 SSRF 立场相悖；该字段只当「结果已可用」的信号读。
 - **保留期**：OpenAI 输出文件 30 天后删除；Anthropic 结果 29 天后不可下载。`expired` 的请求不计费。

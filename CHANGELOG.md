@@ -2,6 +2,24 @@
 
 自 v1.0.0 起遵循[语义化版本](https://semver.org/lang/zh-CN/)，冻结范围与「破坏」的确切定义见 [STABILITY.md](STABILITY.md)。1.0 之前的破坏性变更在下面逐条列出，并说明为什么值得破坏。
 
+## v1.0.1 — 2026-08-18
+
+发布后自审揪出的四处问题，全是修复，**升级不需要改任何代码**。没有 API 变化。
+
+### 修复
+
+**`WaitBatch` / `WaitAnthropicMessageBatch` 会把一个不存在的 batch 空等 26 小时。** 两个 waiter 从 `WaitResponse` 抄来了「先容忍 404，等检索库跟上」的规则，却没跟着抄它的前提：`WaitResponse` 的预算是 30 分钟，而 batch 的是 26 小时。于是传错 ID、或轮询一个已被删除的 batch，都不会报错，只会静默轮询一整天，最后返回一个只说「超时」的错误。Anthropic 这侧更容易撞上——删除已结束的 batch 是官方文档写明的操作。
+
+现在 404 只在**头三次轮询**内被吸收（原理由「新建资源可能短暂滞后」本来就只说得通这么久），之后原样返回。轮询成功一次即重置计数。可重试错误的处理不变：那类失败继续等下去是对的。
+
+**JSONL 行上限在 32 位构建上会被截断成负数。** `NewOutputReader` 与 `NewMessageBatchResultsReader` 为调用方方便收 `int64`，但 `bufio` 用 `int` 计数。超过平台 `int` 上限的值会截断，负的 `maxTokenSize` 让 bufio 拒绝一切超过初始缓冲的行——**把调用方想调高的上限反而压到了 64 KiB**。现在先夹紧再转换。失效方向本来就是安全的（报错而非静默截断数据），但与文档承诺相反。
+
+**batch 的 GET / DELETE 请求带着 `Content-Type: application/json` 和 `Content-Length: 0`。** 描述了一个不存在的请求体。这是 v0.9.0 给共享的 Anthropic transport 加 method 参数时带出来的：nil body 仍被包成空 reader。严格的中间层没有理由接受这种请求，而中转站正是这套 transport 必须活下来的部署环境。现在 nil body 就真的不发 body，content-type 只在有 body 时设置。POST 路由不受影响，有测试两个方向都钉住。
+
+### 文档
+
+**README 关于 batch 行上限的说法对 OpenAI 那侧是错的。** 原文说「可用 `WithMaxStreamFrameBytes` 收紧」——这只对 Anthropic 的 results 成立（读取器由 SDK 打开，跟随客户端选项）。OpenAI 的输出文件由调用方自己下载并构造 `NewOutputReader`，上限是那个函数参数，客户端选项触及不到。已按两侧的实际差异改写。
+
 ## v1.0.0 — 2026-08-18
 
 **API 冻结。** 从 v0.9.0 升级**零改动** —— 本版没有任何代码变更，只把已经成立的承诺写成文档和门禁。

@@ -41,6 +41,10 @@ const (
 // models can grow to megabytes; 32 MiB matches the Responses SSE default.
 const DefaultBatchResultsMaxLineBytes = 32 << 20
 
+// maxPlatformInt is the largest value bufio can use as a token-size ceiling
+// on this build.
+const maxPlatformInt = int64(^uint(0) >> 1)
+
 // MessageBatchRequestItem is one request inside a batch create call.
 type MessageBatchRequestItem struct {
 	// CustomID must be unique within the batch; results arrive in arbitrary
@@ -368,6 +372,14 @@ type MessageBatchResultsReader struct {
 func NewMessageBatchResultsReader(body io.ReadCloser, maxLineBytes int64) *MessageBatchResultsReader {
 	if maxLineBytes <= 0 {
 		maxLineBytes = DefaultBatchResultsMaxLineBytes
+	}
+	// The ceiling is an int64 for callers' convenience but bufio counts in
+	// int. Clamp instead of converting blindly: on a 32-bit build a value
+	// above MaxInt truncates, and a negative maxTokenSize makes bufio reject
+	// every line longer than the initial buffer — silently *lowering* the
+	// limit the caller asked to raise.
+	if maxLineBytes > maxPlatformInt {
+		maxLineBytes = maxPlatformInt
 	}
 	scanner := bufio.NewScanner(body)
 	// The effective scanner cap is max(maxLineBytes, cap(initial)), so the
