@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/siguago/llmkit"
 	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+	"github.com/siguago/llmkit/protocol/openaifiles"
 	responsesapi "github.com/siguago/llmkit/protocol/responses"
 )
 
@@ -59,6 +61,7 @@ type probeOptions struct {
 	model   string
 	baseURL string
 	media   bool
+	files   bool
 	verbose bool
 	timeout time.Duration
 }
@@ -162,6 +165,7 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 		{"模型任务", func(ctx context.Context) result { return probeModelTaskTypes(ctx, c) }},
 		{"OpenAI Responses", func(ctx context.Context) result { return probeResponses(ctx, c, model) }},
 		{"Anthropic Messages", func(ctx context.Context) result { return probeAnthropicMessages(ctx, c, model) }},
+		{"Files", func(ctx context.Context) result { return probeFiles(ctx, c, opts.files) }},
 		{"非流式对话", func(ctx context.Context) result { return probeChat(ctx, c, model) }},
 		{"流式对话", func(ctx context.Context) result { return probeStream(ctx, c, model) }},
 		{"多轮上下文", func(ctx context.Context) result { return probeMultiTurn(ctx, c, model) }},
@@ -338,6 +342,80 @@ func sortedKeys(m map[string][]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// probeFiles 上传一个几十字节的小文件，走完 retrieve → list → download →
+// delete 全生命周期并自行清理。费用为零（Files 按存储计，探测完即删），但
+// 会在账号里短暂留下一个对象，所以默认不跑。
+func probeFiles(ctx context.Context, c *llmkit.Client, files bool) result {
+	if !c.SupportsFileUpload() {
+		return result{outcome: notApplicable, detail: "无 Files transport"}
+	}
+	if !c.SupportsFileListing() || !c.SupportsFileRetrieval() ||
+		!c.SupportsFileDeletion() || !c.SupportsFileContentDownload() {
+		return result{outcome: fail, detail: "Files 端点能力声明不完整"}
+	}
+	if !files {
+		return result{outcome: skipped, detail: "加 -files 启用（上传后即删，费用为零）"}
+	}
+
+	const content = "llmkit probe file: safe to delete\n"
+	uploaded, err := c.UploadFile(ctx, &openaifiles.UploadRequest{
+		Filename:    "llmkit-probe.txt",
+		Purpose:     openaifiles.PurposeUserData,
+		Content:     strings.NewReader(content),
+		ContentType: "text/plain",
+	})
+	if err != nil {
+		return result{outcome: fail, detail: "上传: " + describeErr(err)}
+	}
+	// 之后任何一步失败都不能把文件留在账号里。
+	defer func() { _, _ = c.DeleteFile(ctx, uploaded.ID) }()
+
+	retrieved, err := c.RetrieveFile(ctx, uploaded.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "retrieve: " + describeErr(err)}
+	}
+	if retrieved.Filename != "llmkit-probe.txt" {
+		return result{outcome: fail, detail: fmt.Sprintf("retrieve 返回的文件名不符: %q", retrieved.Filename)}
+	}
+	list, err := c.ListFiles(ctx, &openaifiles.ListRequest{Limit: 100})
+	if err != nil {
+		return result{outcome: fail, detail: "list: " + describeErr(err)}
+	}
+	found := false
+	for _, f := range list.Data {
+		if f.ID == uploaded.ID {
+			found = true
+			break
+		}
+	}
+	if !found && !list.HasMore {
+		return result{outcome: fail, detail: "上传的文件没有出现在列表里"}
+	}
+	body, err := c.DownloadFileContent(ctx, uploaded.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "download: " + describeErr(err)}
+	}
+	downloaded, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return result{outcome: fail, detail: "download 读取: " + describeErr(err)}
+	}
+	if string(downloaded) != content {
+		return result{outcome: fail, detail: "下载内容与上传不一致"}
+	}
+	deleted, err := c.DeleteFile(ctx, uploaded.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "delete: " + describeErr(err)}
+	}
+	if !deleted.Deleted {
+		return result{outcome: fail, detail: "delete 未确认"}
+	}
+	return result{
+		outcome: pass,
+		detail:  fmt.Sprintf("upload %dB → retrieve → list → download → delete", uploaded.Bytes),
+	}
 }
 
 func probeChat(ctx context.Context, c *llmkit.Client, model string) result {

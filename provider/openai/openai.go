@@ -21,6 +21,7 @@ type Provider struct {
 	modelsURL              string
 	responsesURL           string
 	responseInputTokensURL string
+	filesURL               string
 	imagesGenURL           string
 	imagesEditURL          string
 	client                 *http.Client
@@ -109,6 +110,7 @@ func NewWithBaseURL(baseURL string) *Provider {
 		modelsURL:              baseURL + "/models",
 		responsesURL:           baseURL + "/responses",
 		responseInputTokensURL: baseURL + "/responses/input_tokens",
+		filesURL:               baseURL + "/files",
 		imagesGenURL:           baseURL + "/images/generations",
 		imagesEditURL:          baseURL + "/images/edits",
 		// 300s 与其它长任务 provider 对齐：共享给 ListModels（短任务，自带 30s

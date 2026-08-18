@@ -38,6 +38,20 @@ func TestNativeProtocolCapabilityMatrix(t *testing.T) {
 			}
 		}
 
+		wantFiles := name == OpenAI
+		fileCapabilities := map[string]bool{
+			"upload":   client.SupportsFileUpload(),
+			"list":     client.SupportsFileListing(),
+			"retrieve": client.SupportsFileRetrieval(),
+			"delete":   client.SupportsFileDeletion(),
+			"download": client.SupportsFileContentDownload(),
+		}
+		for capability, got := range fileCapabilities {
+			if got != wantFiles {
+				t.Errorf("%s Files %s = %v, want %v", name, capability, got, wantFiles)
+			}
+		}
+
 		wantAnthropic := name == Anthropic
 		anthropicCapabilities := map[string]bool{
 			"create":      client.SupportsAnthropicMessages(),

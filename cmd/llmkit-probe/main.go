@@ -43,6 +43,7 @@ func main() {
 		baseURL  = flag.String("base-url", "", "override the API endpoint (relay / private deployment)")
 		model    = flag.String("model", "", "chat model to probe (default: a sensible per-provider choice)")
 		media    = flag.Bool("media", false, "also probe image/video generation (slower, more expensive)")
+		files    = flag.Bool("files", false, "also probe the Files API (uploads then deletes a tiny file)")
 		verbose  = flag.Bool("v", false, "print full model responses")
 		timeout  = flag.Duration("timeout", 2*time.Minute, "per-probe timeout")
 		envFile  = flag.String("env", ".env", "file to read API keys from")
@@ -78,6 +79,7 @@ func main() {
 		model:   *model,
 		baseURL: *baseURL,
 		media:   *media,
+		files:   *files,
 		verbose: *verbose,
 		timeout: *timeout,
 	}

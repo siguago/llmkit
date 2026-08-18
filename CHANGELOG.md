@@ -2,6 +2,25 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## v0.8.0 — 2026-08-18
+
+新增 **OpenAI Files 原生资源面**（[1.0 计划](V1_RELEASE_PLAN.md) M2）。**纯加法，升级不需要改任何代码。**
+
+### 新增
+
+- `protocol/openaifiles`：File / FileList / DeletedFile / UploadRequest / ListRequest 与 purpose 常量，仅标准库。保真契约与 Responses/Messages 那套刻意不同（[ADR 0002](docs/adr/0002-files-and-batch-resource-surfaces.md)）：这批对象是上游产生、SDK 只读的资源，承诺「解码不丢已建模字段 + `RawJSON()` 保留原始字节 + 未知 purpose 透传 + 顶层 `null` 拒绝」，不承诺 decode→encode 往返。
+- OpenAI adapter 实现 upload（`io.Pipe` 流式 multipart，不整块缓冲——单文件上限 512 MB）/ list / retrieve / delete / content 下载；根 Client 新增 `UploadFile` / `ListFiles` / `RetrieveFile` / `DeleteFile` / `DownloadFileContent` 与五个对应 `Supports*`。能力接口按端点拆分、不进 compat 基类，只有官方 OpenAI adapter opt in——其他 OpenAI 形状厂商逐家验证 wire 后再接。
+- `llmkit-probe` 新增 `-files`：上传几十字节的探测文件，走完 retrieve → list → download → delete 并自行清理；任何一步失败也会兜底删除。默认不跑——费用为零，但会在账号里短暂留下对象。
+- 原生能力矩阵守卫（`TestNativeProtocolCapabilityMatrix`）扩到 Files 五端点：openai 全 true，其余 20 家全 false。
+
+### 行为边界
+
+- **上传永不自动重试**：请求体是 `io.Reader`，第二次尝试读不到内容——与 `EditImage` 同规则，重试由调用方重开文件。计数 server 测试钉住「5xx 也只打一次」。
+- **下载返回活体流**：`DownloadFileContent` 走无绝对超时的 stream client（300 秒的普通 client 会把大文件下载腰斩），只重试握手，body 读错误原样返回；`WithTimeout` 不约束它，生命周期归调用 ctx。
+- **删除不重试**（改变资源状态，与 `DeleteResponse` 同语义）；list / retrieve 按常规读策略重试。
+- **文件是持久数据**：SDK 不替调用方决定保留策略。`ExpiresAfter` 可让上游到期自动删；probe 与文档示例都在用完后显式删除。
+- **Anthropic Files 明确不接**：上游至今是 beta（`files-api-2025-04-14`）。1.0 不冻结一个上游未冻结的面；待 GA 后在 1.x 以纯加法接入。
+
 ## v0.7.0 — 2026-08-18
 
 行为收口版，[v1.0 发布计划](V1_RELEASE_PLAN.md)的第一步：**这是 1.0 前最后一个计划内破坏性版本**，此后到 1.0 只有加法。两件事：全部 adapter 的流式生命周期统一交给调用 context（移除最后四处 900 秒兜底），以及清零全部废弃标记。

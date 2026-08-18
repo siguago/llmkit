@@ -2,8 +2,10 @@ package provider
 
 import (
 	"context"
+	"io"
 
 	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+	"github.com/siguago/llmkit/protocol/openaifiles"
 	"github.com/siguago/llmkit/protocol/responses"
 )
 
@@ -44,6 +46,36 @@ type ResponsesInputItemLister interface {
 // ResponsesTokenCounter calls the Responses input-token counting endpoint.
 type ResponsesTokenCounter interface {
 	CountResponseInputTokens(ctx context.Context, apiKey string, req *responses.TokenCountRequest) (*responses.TokenCountResponse, error)
+}
+
+// FileUploader is implemented by providers that expose the OpenAI Files
+// upload endpoint (POST /v1/files, multipart). Like every native-surface
+// capability it is opt-in per endpoint, so a relay that only proxies part of
+// the resource can declare exactly what it has.
+type FileUploader interface {
+	UploadFile(ctx context.Context, apiKey string, req *openaifiles.UploadRequest) (*openaifiles.File, error)
+}
+
+// FileLister lists uploaded files (GET /v1/files).
+type FileLister interface {
+	ListFiles(ctx context.Context, apiKey string, req *openaifiles.ListRequest) (*openaifiles.FileList, error)
+}
+
+// FileRetriever retrieves one file's metadata (GET /v1/files/{id}).
+type FileRetriever interface {
+	RetrieveFile(ctx context.Context, apiKey, fileID string) (*openaifiles.File, error)
+}
+
+// FileDeleter deletes an uploaded file (DELETE /v1/files/{id}).
+type FileDeleter interface {
+	DeleteFile(ctx context.Context, apiKey, fileID string) (*openaifiles.DeletedFile, error)
+}
+
+// FileContentDownloader downloads a file's content (GET /v1/files/{id}/content).
+// The returned body is a live network stream: the caller must Close it, and
+// its lifetime is bounded by the request context, not by any client timeout.
+type FileContentDownloader interface {
+	DownloadFileContent(ctx context.Context, apiKey, fileID string) (io.ReadCloser, error)
 }
 
 // AnthropicMessagesCreator exposes Anthropic's native Messages JSON response

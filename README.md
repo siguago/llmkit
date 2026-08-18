@@ -118,6 +118,14 @@ for _, model := range models {
 
 Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsResponseStreaming`、`SupportsResponseRetrieval`、`SupportsResponseCancellation`、`SupportsResponseDeletion`、`SupportsResponseInputItems`、`SupportsResponseTokenCount`。Anthropic 对应 `SupportsAnthropicMessages`、`SupportsAnthropicMessageStreaming`、`SupportsAnthropicTokenCount`。这能让只实现部分路由的 relay 如实声明能力；当前首发 transport 仍只保证两家官方直连端点。
 
+原生**资源面**同样按端点探测：
+
+| 资源面 | 已接入 transport | 端点 |
+|---|---|---|
+| OpenAI Files | 直连 OpenAI | upload / list / retrieve / delete / content 全 ✅ |
+
+对应 `SupportsFileUpload` / `SupportsFileListing` / `SupportsFileRetrieval` / `SupportsFileDeletion` / `SupportsFileContentDownload`。Anthropic 的 Files API 上游仍是 beta（`files-api-2025-04-14`），按[1.0 计划](V1_RELEASE_PLAN.md)不接 beta 面，待 GA 后接入。
+
 Anthropic 原生响应按官方 schema 严格校验稳定身份字段、`type=message`、`role=assistant` 和必填 usage 计数器。某些中转站或私有部署会精简这些字段；这种载荷会返回 `anthropicapi.ErrInvalidWire`，不会被补成看似成功的零值消息。非官方端点应先验证同步响应和流式 `message_start` 的实际 wire shape，再声明原生 Messages 能力。
 
 > 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
@@ -305,6 +313,25 @@ ANTHROPIC_API_KEY=sk-ant-... go run ./examples/anthropic-native -mode=tokens
 ```
 
 默认发送稳定的 `anthropic-version: 2023-06-01`；只有确实使用对应 beta 字段时才给单次调用传 `anthropicapi.WithBetas(...)`，不要把 beta header 偷塞进全局自定义 header。
+
+### OpenAI Files（原生）
+
+上传一次、多处引用（Batch 输入、Responses 的 `file_id` 文件引用），DTO 在 `protocol/openaifiles`：
+
+```go
+import filesapi "github.com/siguago/llmkit/protocol/openaifiles"
+
+f, err := client.UploadFile(ctx, &filesapi.UploadRequest{
+    Filename:    "input.jsonl",
+    Purpose:     filesapi.PurposeBatch,
+    Content:     reader,               // 流式上传，不整块缓冲
+    ContentType: "application/jsonl",
+})
+// ...用完记得删：文件是持久资源，按存储保留
+_, _ = client.DeleteFile(ctx, f.ID)
+```
+
+三条边界：**上传永不自动重试**（`io.Reader` 一次性，重试请自己重开文件，与 `EditImage` 同规则）；**下载返回活体流**（`DownloadFileContent` 给 `io.ReadCloser`，调用方负责 Close，生命周期归 ctx 管、不受 `WithTimeout` 约束）；**purpose 不做本地校验**（上游会加新值，`filesapi.Purpose*` 常量只是当前已知集合）。文件是**持久数据**：SDK 不替你决定保留策略，示例与探测都在用完后显式删除。
 
 ### 工具调用
 
@@ -659,7 +686,7 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 | 缺口 | 说明 |
 |---|---|
 | 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
-| Files API | 上传、列举、删除等文件资源端点未接；原生请求 DTO 仍可在协议允许时内联文件或引用已有 `file_id` |
+| Anthropic Files API | 上游仍是 beta（`files-api-2025-04-14`），按 [1.0 计划](V1_RELEASE_PLAN.md)不冻结 beta 面，待 GA 后接入。OpenAI Files 已在 v0.8.0 接入 |
 | Batch API | OpenAI Batch 与 Anthropic Message Batches 均未接 |
 | Moderation API | 独立的内容审核端点未接；图像 / Responses 请求体里的 `moderation` 参数不是这个资源 API |
 | 通用 / 本地 Token 计数 | 统一 Chat 接口没有本地 tokenizer；只有原生 OpenAI Responses input tokens 与 Anthropic Messages `count_tokens` 端点已接 |
@@ -714,6 +741,7 @@ go run ./cmd/llmkit-probe -list                    # 支持的厂商与对应环
 go run ./cmd/llmkit-probe deepseek -v              # 打印模型的完整回复
 go run ./cmd/llmkit-probe deepseek -model deepseek-v4-pro
 go run ./cmd/llmkit-probe openai -media            # 额外测图像生成（更贵）
+go run ./cmd/llmkit-probe openai -files            # 额外测 Files 全生命周期（上传后即删，零费用）
 go run ./cmd/llmkit-probe deepseek -base-url https://my-relay.example/v1
 ```
 
