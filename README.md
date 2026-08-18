@@ -640,6 +640,9 @@ llmkit/
 ├── client.go            # Client：统一 chat / embeddings / images / video
 ├── responses.go         # OpenAI Responses 原生门面
 ├── anthropic_messages.go # Anthropic Messages 原生门面
+├── files.go             # OpenAI Files 门面
+├── batches.go           # OpenAI Batch 门面
+├── anthropic_batches.go # Anthropic Message Batches 门面
 ├── messages.go          # 便捷构造器与响应提取
 ├── options.go           # WithAPIKey / WithBaseURL / WithTimeout / ...
 ├── retry.go             # 退避重试
@@ -653,7 +656,11 @@ llmkit/
 │   ├── anthropic/       #   原生实现
 │   ├── gemini/          #   原生实现
 │   └── ...              #   其余 11 家
-├── protocol/            # Responses / Anthropic 原生 DTO、union 与 event
+├── protocol/            # 原生 DTO、union 与 event（仅标准库的叶子包）
+│   ├── responses/       #   OpenAI Responses
+│   ├── anthropic/       #   Anthropic Messages 与 Message Batches
+│   ├── openaifiles/     #   OpenAI Files
+│   └── openaibatch/     #   OpenAI Batch 与 JSONL 输入输出
 ├── internal/
 │   ├── sse/             #   两套原生 stream 共用的 SSE framing
 │   ├── httpx/           #   统一 transport（代理 / 连接池 / 头注入）
@@ -726,21 +733,43 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 
 ---
 
-## 尚未覆盖的能力
+## 稳定性承诺
 
-这个库覆盖的是**对话及其周边**。以下能力各家 API 有、但 SDK 目前没有，别指望：
+自 v1.0.0 起遵循语义化版本：**1.x 不会破坏导出 API 与文档化行为**。完整政策见 [STABILITY.md](STABILITY.md)，两条最该先知道的：
 
-| 缺口 | 说明 |
+- **给 struct 加字段不算破坏。** 请始终**带字段名**构造本项目的 struct —— 位置式 composite literal 不在承诺内（v0.6.0 给 `provider.Usage` 加字段时咬过人）。
+- **只接上游已 GA 的 API。** 冻结一个上游自己都没冻结的面，等于把别人的破坏性变更变成我们的。
+
+承诺不靠人记：CI 有一个 `api-compat` job 用 `apidiff` 对比最近的 release tag，v1 基线下出现不兼容变更直接失败。
+
+---
+
+## 不做什么 · 1.x 路线
+
+这个库覆盖的是**对话及其周边**。下面这些各家 API 有、本库没有。
+
+**1.x 会以纯加法接入**（不阻塞 1.0）：
+
+| 待接 | 前提 |
 |---|---|
-| 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
-| Anthropic Files API | 上游仍是 beta（`files-api-2025-04-14`），按 [1.0 计划](V1_RELEASE_PLAN.md)不冻结 beta 面，待 GA 后接入。OpenAI Files 已在 v0.8.0 接入 |
-| Batch webhook 事件 | OpenAI Batch 与 Anthropic 的完成通知 webhook 未接；轮询用 `WaitBatch` / `WaitAnthropicMessageBatch` |
-| Moderation API | 独立的内容审核端点未接；图像 / Responses 请求体里的 `moderation` 参数不是这个资源 API |
-| 通用 / 本地 Token 计数 | 统一 Chat 接口没有本地 tokenizer；只有原生 OpenAI Responses input tokens 与 Anthropic Messages `count_tokens` 端点已接 |
-| Responses 扩展产品面 | Conversations、WebSocket、`/responses/compact` 未接；部分内置工具只有 Raw 保真，没有专项强类型 |
-| 余额 / 额度查询 | 未接 |
-| 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 都需要各自的鉴权与路径实现；本版原生 Claude 只保证 Anthropic 官方直连 transport |
-| 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，需要自己在上层做 |
+| Anthropic Files API | 上游仍是 beta（`files-api-2025-04-14`）。OpenAI Files 已 GA，v0.8.0 接了 |
+| Batch webhook 事件 | 完成通知未接；当前轮询用 `WaitBatch` / `WaitAnthropicMessageBatch` |
+| rerank 第二家实现 | Cohere 形状的 usage 已按契约实现但无厂商实测，接第二家时一并验 |
+| 其余厂商的 Files / Batch | 智谱、Moonshot 等 OpenAI 形状厂商，逐家验证 wire 后 opt in |
+
+**明确的非目标**（除非另立计划，1.x 都不做）：
+
+| 不做 | 原因 |
+|---|---|
+| 语音转写 (STT) / 语音合成 (TTS) | 不属于"对话及其周边"，值得单独一套接口 |
+| Moderation API | 独立的内容审核端点；图像 / Responses 请求体里的 `moderation` 参数不是这个资源 API |
+| 通用 / 本地 Token 计数 | 统一 Chat 接口没有本地 tokenizer；只有原生 Responses input tokens 与 Anthropic `count_tokens` 端点已接 |
+| Responses 扩展产品面 | Conversations、WebSocket、`/responses/compact`；部分内置工具只有 Raw 保真，没有专项强类型 |
+| OpenAI 其余资源面 | vector stores、assistants、fine-tuning、分片 Uploads |
+| 余额 / 额度查询 | 各家形状差异大且与对话无关 |
+| 云托管入口 | Azure OpenAI / AWS Bedrock / Google Vertex AI 各需自己的鉴权与路径；原生协议面只保证两家官方直连 transport |
+| 多 key 轮换 / 故障转移 | 一个 Client 绑定一个 key，属于上层调度的职责 |
+| 入站兼容网关 | 这是出站 SDK，不是 HTTP gateway |
 
 > 自定义 `Transport` 曾经在这张表里，现在有了：见上面的 `WithTransport`，mTLS / 自签证书 / 埋点都走它。
 

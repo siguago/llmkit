@@ -148,3 +148,24 @@ jobs:
       # them. Without this the floor check stays green while tagged code quietly
       # starts depending on an API newer than the declared minimum.
       - run: go vet -tags=integration ./...
+
+  # The v1 compatibility promise (STABILITY.md), made mechanical. Runs on the
+  # newest Go rather than the 1.22 floor job: this checks the shape of the
+  # exported API, not what the minimum toolchain can build.
+  api-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The baseline is the most recent release tag, so the tags have to
+          # come along with the checkout.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache: false
+      # apidiff runs through `go run` with a pinned version so it never lands
+      # in go.mod and the zero-dependency gate above keeps passing.
+      - name: Compare exported API against the last release
+        run: bash .github/scripts/check-api-compat.sh
