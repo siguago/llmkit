@@ -859,7 +859,17 @@ bash .github/scripts/run-fuzz.sh 100000x \
 
 这里暂时使用固定次数，是为了绕开 `-fuzztime=<时长>` 到期时偶发误报 `context deadline exceeded` 的[官方问题](https://go.dev/issue/75804)。修复目前只在 Go 的 master 上，截至 `go1.27rc2` 尚未进入任何发布分支，预计随 Go 1.28 发布——**升级到 1.27 不要切回按时长运行**。任何 fuzz 非零退出仍会让门禁失败，CI 只把本次新生成的 crasher 作为 artifact 上传。
 
-它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、任意网络分片不能改变 SSE 帧、未知原生 union/event 必须 Raw 保真、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
+它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、任意网络分片不能改变 SSE 帧、未知原生 union/event 必须 Raw 保真、batch JSONL 的坏行一定报错且失败是粘性的、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
+
+这不是形式主义：`FuzzMessageBatchResultsReader` 在门禁首次运行时就抓到一个真缺陷 —— Anthropic 结果行缺少 `custom_id` / `result` 时会解码成零值成功。修在 v0.9.0，失败输入已作为回归种子提交。
+
+### API 兼容门禁
+
+```bash
+make api-compat            # 对比最近的 release tag；BASE=v0.9.0 可指定基线
+```
+
+`apidiff` 比对导出面，基线为 v1 及以上时出现不兼容变更即失败（见 [STABILITY.md](STABILITY.md)）。工具经 `go run` 以钉死的版本执行，不进 `go.mod`。
 
 要验证真的能跑通，有两条路，都会发真实请求、产生真实费用（每家几分之一美分，token 都封了顶）：
 
@@ -869,6 +879,8 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 ```
 
 两者覆盖面接近，差别在用途：`probe` 给你一张「这家支持什么」的表，失败不中断、继续跑完；集成测试是标准 `go test`，可以 `-run TestLiveTools` 单点跑、失败即红。集成测试的模型用 `LLMKIT_TEST_MODEL_<PROVIDER>` 覆盖，媒体测试加 `-media`。
+
+更贵或更慢的几项要再显式开一道，避免日常冒烟意外扩大耗时和费用：`-media`（图像/视频）、`LLMKIT_RUN_BATCH=1`（Files 与 Batch 全生命周期）、`LLMKIT_RUN_NATIVE_BACKGROUND=1`、`LLMKIT_RUN_NATIVE_THINKING=1`。这些测试都会清理自己创建的资源 —— 上传的文件一律删除，创建的 batch 一律取消（被取消的 OpenAI batch 对象删不掉，会留在账号里直到上游归档）。
 
 覆盖率现状（`make cover`）：
 

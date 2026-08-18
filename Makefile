@@ -1,4 +1,4 @@
-.PHONY: help test test-race cover lint probe probe-all live install clean
+.PHONY: help test test-race cover lint api-compat probe probe-all live install clean
 
 # PROVIDER selects which vendor `make probe` targets.
 PROVIDER ?= deepseek
@@ -10,6 +10,7 @@ help:
 	@echo "  make test-race               同上 + race 检测"
 	@echo "  make cover                   覆盖率报告"
 	@echo "  make lint                    gofmt + vet + 零依赖校验"
+	@echo "  make api-compat              对比最近 release tag 的导出 API（见 STABILITY.md）"
 	@echo
 	@echo "  make probe PROVIDER=deepseek 用你的 key 实测一家厂商的能力"
 	@echo "  make probe-all               实测所有配了 key 的厂商"
@@ -37,6 +38,10 @@ lint:
 	@# 零第三方依赖是这个库的硬约束
 	@if grep -q '^require' go.mod; then echo "go.mod 出现了第三方依赖"; exit 1; fi
 	@echo "lint 通过（含零依赖校验）"
+
+# BASE 覆盖对比基线，默认取最近的 release tag。
+api-compat:
+	@bash .github/scripts/check-api-compat.sh $(BASE)
 
 probe:
 	go run ./cmd/llmkit-probe $(PROVIDER) $(ARGS)
