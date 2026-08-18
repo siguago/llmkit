@@ -125,3 +125,21 @@ func TestUploadFile_NilRequestFailsFast(t *testing.T) {
 		t.Error("want error for nil request")
 	}
 }
+
+func TestRetrieveFile_Facade(t *testing.T) {
+	var gotPath string
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.Method + " " + r.URL.Path
+		_, _ = io.WriteString(w, `{"id":"file-abc","object":"file","bytes":42,"created_at":1,"filename":"a.jsonl","purpose":"batch","expires_at":99}`)
+	})
+	file, err := c.RetrieveFile(context.Background(), "file-abc")
+	if err != nil {
+		t.Fatalf("RetrieveFile: %v", err)
+	}
+	if file.ID != "file-abc" || file.Bytes != 42 || file.Purpose != openaifiles.PurposeBatch || file.ExpiresAt != 99 {
+		t.Fatalf("file = %+v", file)
+	}
+	if !strings.HasSuffix(gotPath, "/files/file-abc") {
+		t.Errorf("path = %q", gotPath)
+	}
+}

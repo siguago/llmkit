@@ -292,3 +292,38 @@ func TestBatchObjectsRejectTopLevelNull(t *testing.T) {
 		}
 	}
 }
+
+func TestBatchRawJSONAccessors(t *testing.T) {
+	var batch MessageBatch
+	if err := json.Unmarshal([]byte(`{"id":"b","type":"message_batch","vendor_extra":1}`), &batch); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	var list MessageBatchList
+	if err := json.Unmarshal([]byte(`{"data":[],"vendor_extra":2}`), &list); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var deleted DeletedMessageBatch
+	if err := json.Unmarshal([]byte(`{"id":"b","type":"message_batch_deleted","vendor_extra":3}`), &deleted); err != nil {
+		t.Fatalf("deleted: %v", err)
+	}
+	var line MessageBatchIndividualResult
+	if err := json.Unmarshal([]byte(`{"custom_id":"r1","result":{"type":"canceled"},"vendor_extra":4}`), &line); err != nil {
+		t.Fatalf("line: %v", err)
+	}
+	var envelope MessageBatchErrorResponse
+	if err := json.Unmarshal([]byte(`{"type":"error","error":{"type":"api_error","message":"m"},"vendor_extra":5}`), &envelope); err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	raws := map[string]string{
+		"MessageBatch":                 string(batch.RawJSON()),
+		"MessageBatchList":             string(list.RawJSON()),
+		"DeletedMessageBatch":          string(deleted.RawJSON()),
+		"MessageBatchIndividualResult": string(line.RawJSON()),
+		"MessageBatchErrorResponse":    string(envelope.RawJSON()),
+	}
+	for name, raw := range raws {
+		if !strings.Contains(raw, "vendor_extra") {
+			t.Errorf("%s.RawJSON lost the unmodeled field: %s", name, raw)
+		}
+	}
+}

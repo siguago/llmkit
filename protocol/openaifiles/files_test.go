@@ -113,3 +113,39 @@ func TestFileMarshal_KnownFieldsOnly(t *testing.T) {
 		t.Fatalf("absent optional fields must stay omitted: %s", encoded)
 	}
 }
+
+// RawJSON is public API: callers reach for it exactly when a field this
+// package does not model matters to them.
+func TestRawJSONAccessors(t *testing.T) {
+	var file File
+	if err := json.Unmarshal([]byte(`{"id":"f","vendor_extra":1}`), &file); err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	if !strings.Contains(string(file.RawJSON()), "vendor_extra") {
+		t.Error("File.RawJSON lost the unmodeled field")
+	}
+
+	var list FileList
+	if err := json.Unmarshal([]byte(`{"object":"list","data":[],"vendor_extra":2}`), &list); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(string(list.RawJSON()), "vendor_extra") {
+		t.Error("FileList.RawJSON lost the unmodeled field")
+	}
+
+	var deleted DeletedFile
+	if err := json.Unmarshal([]byte(`{"id":"f","object":"file","deleted":true,"vendor_extra":3}`), &deleted); err != nil {
+		t.Fatalf("deleted: %v", err)
+	}
+	if !deleted.Deleted || deleted.ID != "f" {
+		t.Fatalf("deleted = %+v", deleted)
+	}
+	if !strings.Contains(string(deleted.RawJSON()), "vendor_extra") {
+		t.Error("DeletedFile.RawJSON lost the unmodeled field")
+	}
+
+	// Not produced by decoding: nothing to hand back.
+	if (&File{ID: "local"}).RawJSON() != nil {
+		t.Error("a hand-built object must report no raw bytes")
+	}
+}

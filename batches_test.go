@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,4 +206,66 @@ func TestDeleteAnthropicMessageBatch_NotRetried(t *testing.T) {
 // exercise the same UnmarshalJSON paths production traffic does.
 func startFromJSON(target interface{ UnmarshalJSON([]byte) error }, wire string) error {
 	return target.UnmarshalJSON([]byte(wire))
+}
+
+// The list and cancel facades were shipping with no test exercising them at
+// all: the provider layer was covered, but the root path that resolves the
+// capability, applies the retry policy, and translates errors was not.
+func TestListBatches_Facade(t *testing.T) {
+	var gotQuery string
+	c := newTestClientFor(t, OpenAI, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"batch_1","object":"batch","status":"completed"}],"first_id":"batch_1","last_id":"batch_1","has_more":false}`)
+	})
+	list, err := c.ListBatches(context.Background(), &openaibatch.ListRequest{After: "batch_0", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListBatches: %v", err)
+	}
+	if len(list.Data) != 1 || list.Data[0].ID != "batch_1" || list.HasMore {
+		t.Fatalf("list = %+v", list)
+	}
+	if !strings.Contains(gotQuery, "after=batch_0") || !strings.Contains(gotQuery, "limit=10") {
+		t.Errorf("query = %q", gotQuery)
+	}
+}
+
+func TestListAnthropicMessageBatches_Facade(t *testing.T) {
+	var gotQuery string
+	c := newTestClientFor(t, Anthropic, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"data":[{"id":"msgbatch_1","type":"message_batch","processing_status":"ended","request_counts":{"processing":0,"succeeded":1,"errored":0,"canceled":0,"expired":0},"created_at":"2026-08-18T00:00:00Z","expires_at":"2026-08-19T00:00:00Z"}],"first_id":"msgbatch_1","last_id":"msgbatch_1","has_more":false}`)
+	})
+	list, err := c.ListAnthropicMessageBatches(context.Background(), &anthropicapi.MessageBatchListRequest{
+		BeforeID: "msgbatch_9", Limit: 50,
+	})
+	if err != nil {
+		t.Fatalf("ListAnthropicMessageBatches: %v", err)
+	}
+	if len(list.Data) != 1 || !list.Data[0].HasEnded() {
+		t.Fatalf("list = %+v", list)
+	}
+	if !strings.Contains(gotQuery, "before_id=msgbatch_9") || !strings.Contains(gotQuery, "limit=50") {
+		t.Errorf("query = %q", gotQuery)
+	}
+}
+
+func TestCancelAnthropicMessageBatch_Facade(t *testing.T) {
+	var gotPath string
+	c := newTestClientFor(t, Anthropic, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.Method + " " + r.URL.Path
+		_, _ = io.WriteString(w, `{"id":"msgbatch_1","type":"message_batch","processing_status":"canceling","request_counts":{"processing":1,"succeeded":0,"errored":0,"canceled":0,"expired":0},"created_at":"2026-08-18T00:00:00Z","expires_at":"2026-08-19T00:00:00Z","cancel_initiated_at":"2026-08-18T00:01:00Z"}`)
+	})
+	batch, err := c.CancelAnthropicMessageBatch(context.Background(), "msgbatch_1")
+	if err != nil {
+		t.Fatalf("CancelAnthropicMessageBatch: %v", err)
+	}
+	if batch.ProcessingStatus != anthropicapi.BatchProcessingStatusCanceling {
+		t.Errorf("status = %q", batch.ProcessingStatus)
+	}
+	if batch.CancelInitiatedAt == "" {
+		t.Error("cancel_initiated_at lost")
+	}
+	if !strings.HasSuffix(gotPath, "/messages/batches/msgbatch_1/cancel") {
+		t.Errorf("path = %q", gotPath)
+	}
 }

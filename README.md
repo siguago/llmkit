@@ -130,7 +130,7 @@ Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsRespon
 
 Anthropic 原生响应按官方 schema 严格校验稳定身份字段、`type=message`、`role=assistant` 和必填 usage 计数器。某些中转站或私有部署会精简这些字段；这种载荷会返回 `anthropicapi.ErrInvalidWire`，不会被补成看似成功的零值消息。非官方端点应先验证同步响应和流式 `message_start` 的实际 wire shape，再声明原生 Messages 能力。
 
-> 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，以及 Anthropic Messages create/stream 和 token count。Batch、Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型另行提供；未知 item/block/event 可通过 Raw 形态无损保留。
+> 支持 OpenAI Responses 核心资源、状态生命周期与 SSE，Anthropic Messages create/stream 和 token count，以及 OpenAI Files、OpenAI Batch 与 Anthropic Message Batches 的资源生命周期。Conversations、WebSocket、Responses compact、云厂商 Claude transport 与部分内置工具专项类型不在声明内；未知 item/block/event 可通过 Raw 形态无损保留。
 
 > 前面的统一 Chat / 媒体能力表由 `TestCapabilityMatrix` 守卫，代码变了测试会先失败。
 >
@@ -886,19 +886,24 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
-| 门面层（根包） | 94% | |
+| 门面层（根包） | 85% | |
 | `internal/logging` | 100% | |
 | `internal/safehttp` | 96% | SSRF 拨号拦截、大小上限、重定向降级、MIME 双重校验各有断言 |
 | `internal/httpx` | 94% | |
+| `internal/sse` | 92% | |
 | `internal/ipprivacy` | 80% | |
-| `provider`（公共类型与流策略） | 75% | |
-| `provider/*` 适配层 | 41–88% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
-| `provider/vercel` | 99% | |
-| `provider/minimax` | 89% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
-| `cmd/llmkit-probe` | 20% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
-| `provider/siliconflow` | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0%。新增的 8 家薄封装同理 |
+| `protocol/openaifiles` | 92% | |
+| `protocol/openaibatch` | 90% | JSONL 编解码含 fuzz |
+| `protocol/anthropic` | 80% | |
+| `protocol/responses` | 70% | |
+| `provider`（公共类型与流策略） | 76% | |
+| `provider/*` 适配层 | 48–98% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
+| `provider/vercel` | 98% | |
+| `provider/minimax` | 90% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
+| `cmd/llmkit-probe` | 22% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
+| `provider/siliconflow` 等薄封装 | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0% |
 
-总覆盖率 58%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
+总覆盖率 66%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
 ---
 
