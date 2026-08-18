@@ -123,8 +123,10 @@ Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsRespon
 | 资源面 | 已接入 transport | 端点 |
 |---|---|---|
 | OpenAI Files | 直连 OpenAI | upload / list / retrieve / delete / content 全 ✅ |
+| OpenAI Batch | 直连 OpenAI | create / retrieve / list / cancel ✅ + JSONL 输入输出 helper |
+| Anthropic Message Batches | 直连 Anthropic | create / retrieve / list / cancel / delete / results ✅ |
 
-对应 `SupportsFileUpload` / `SupportsFileListing` / `SupportsFileRetrieval` / `SupportsFileDeletion` / `SupportsFileContentDownload`。Anthropic 的 Files API 上游仍是 beta（`files-api-2025-04-14`），按[1.0 计划](V1_RELEASE_PLAN.md)不接 beta 面，待 GA 后接入。
+对应 `SupportsFileUpload` / `SupportsFileListing` / `SupportsFileRetrieval` / `SupportsFileDeletion` / `SupportsFileContentDownload`、`SupportsBatchCreation` / `SupportsBatchRetrieval` / `SupportsBatchListing` / `SupportsBatchCancellation`，以及 `SupportsAnthropicMessageBatchCreation` / `...Retrieval` / `...Listing` / `...Cancellation` / `...Deletion` / `...Results`。Anthropic 的 Files API 上游仍是 beta（`files-api-2025-04-14`），按[1.0 计划](V1_RELEASE_PLAN.md)不接 beta 面，待 GA 后接入。
 
 Anthropic 原生响应按官方 schema 严格校验稳定身份字段、`type=message`、`role=assistant` 和必填 usage 计数器。某些中转站或私有部署会精简这些字段；这种载荷会返回 `anthropicapi.ErrInvalidWire`，不会被补成看似成功的零值消息。非官方端点应先验证同步响应和流式 `message_start` 的实际 wire shape，再声明原生 Messages 能力。
 
@@ -332,6 +334,49 @@ _, _ = client.DeleteFile(ctx, f.ID)
 ```
 
 三条边界：**上传永不自动重试**（`io.Reader` 一次性，重试请自己重开文件，与 `EditImage` 同规则）；**下载返回活体流**（`DownloadFileContent` 给 `io.ReadCloser`，调用方负责 Close，生命周期归 ctx 管、不受 `WithTimeout` 约束）；**purpose 不做本地校验**（上游会加新值，`filesapi.Purpose*` 常量只是当前已知集合）。文件是**持久数据**：SDK 不替你决定保留策略，示例与探测都在用完后显式删除。
+
+### Batch（原生）
+
+异步批处理，半价换 24 小时窗口。两家的形状不同：**OpenAI 走输入文件**（先上传 JSONL，再建 batch），**Anthropic 内联请求**（create 时直接带 `params`）。
+
+```go
+// OpenAI：JSONL helper + Files + Batch
+item, _ := openaibatch.NewInputItem("req-1", openaibatch.EndpointChatCompletions, map[string]any{
+    "model": "gpt-5-mini", "messages": msgs, "max_tokens": 128,
+})
+var input strings.Builder
+_ = openaibatch.EncodeInput(&input, item)
+file, _ := client.UploadFile(ctx, &filesapi.UploadRequest{
+    Filename: "in.jsonl", Purpose: filesapi.PurposeBatch, Content: strings.NewReader(input.String()),
+})
+batch, _ := client.CreateBatch(ctx, &openaibatch.CreateRequest{
+    InputFileID: file.ID, Endpoint: openaibatch.EndpointChatCompletions,
+    CompletionWindow: openaibatch.CompletionWindow24h,
+})
+
+// Anthropic：请求内联，结果按行流式读
+mb, _ := client.CreateAnthropicMessageBatch(ctx, &anthropicapi.MessageBatchCreateRequest{
+    Requests: []anthropicapi.MessageBatchRequestItem{{CustomID: "req-1", Params: msgReq}},
+})
+reader, _ := client.ReadAnthropicMessageBatchResults(ctx, mb.ID)
+defer reader.Close()
+for {
+    line, err := reader.Next()
+    if errors.Is(err, io.EOF) { break }
+    // line.Result.Type: succeeded / errored / canceled / expired
+}
+```
+
+要点：
+
+- **结果顺序不保证**，一律用 `custom_id` 对账 —— 与 rerank 一样，这是协议本身的语义，不是实现细节。
+- **创建即排队计费**，没有幂等键，所以 `CreateBatch` / `CreateAnthropicMessageBatch` 只重试能证明「上游没接活」的错误（同 `CreateResponse`）。同一份输入建两次 batch 是两份钱。
+- **JSONL 恒严格**：坏行直接报错并给出行号，不走 `WithStreamTolerance` —— 结果文件是完整工件，坏行是数据损坏而非网络抖动。单行上限默认 32 MiB，可用 `WithMaxStreamFrameBytes` 收紧。
+- **请求体保持 `json.RawMessage`**：batch 包不复述被批处理端点的请求 schema，你用哪个端点就拿那个端点的 DTO 组 body。
+- **Anthropic 的 results 始终按配置 base URL 拼路径**，不跟随响应里的 `results_url` —— 让响应体决定出站目标与本库的 SSRF 立场相悖；该字段只当「结果已可用」的信号读。
+- **保留期**：OpenAI 输出文件 30 天后删除；Anthropic 结果 29 天后不可下载。`expired` 的请求不计费。
+
+`WaitBatch` / `WaitAnthropicMessageBatch` 默认 60 秒轮询、26 小时上限；batch 以小时计，长任务更适合自己的调度器。完整分步示例见 [examples/batch](examples/batch/main.go) 与 [examples/anthropic-batch](examples/anthropic-batch/main.go)。
 
 ### 工具调用
 
@@ -668,6 +713,8 @@ OPENAI_API_KEY=sk-...  go run ./examples/images "一只柴犬"
 GEMINI_API_KEY=...     go run ./examples/videos
 OPENAI_API_KEY=sk-...  go run ./examples/responses -mode=sync
 ANTHROPIC_API_KEY=...  go run ./examples/anthropic-native -mode=stream
+OPENAI_API_KEY=sk-...  go run ./examples/batch -mode=submit
+ANTHROPIC_API_KEY=...  go run ./examples/anthropic-batch -mode=submit
 go run ./examples/multiprovider     # 跑所有配了 key 的厂商
 
 DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
@@ -687,7 +734,7 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 |---|---|
 | 语音转写 (STT) / 语音合成 (TTS) | 完全没有 |
 | Anthropic Files API | 上游仍是 beta（`files-api-2025-04-14`），按 [1.0 计划](V1_RELEASE_PLAN.md)不冻结 beta 面，待 GA 后接入。OpenAI Files 已在 v0.8.0 接入 |
-| Batch API | OpenAI Batch 与 Anthropic Message Batches 均未接 |
+| Batch webhook 事件 | OpenAI Batch 与 Anthropic 的完成通知 webhook 未接；轮询用 `WaitBatch` / `WaitAnthropicMessageBatch` |
 | Moderation API | 独立的内容审核端点未接；图像 / Responses 请求体里的 `moderation` 参数不是这个资源 API |
 | 通用 / 本地 Token 计数 | 统一 Chat 接口没有本地 tokenizer；只有原生 OpenAI Responses input tokens 与 Anthropic Messages `count_tokens` 端点已接 |
 | Responses 扩展产品面 | Conversations、WebSocket、`/responses/compact` 未接；部分内置工具只有 Raw 保真，没有专项强类型 |
@@ -742,6 +789,7 @@ go run ./cmd/llmkit-probe deepseek -v              # 打印模型的完整回复
 go run ./cmd/llmkit-probe deepseek -model deepseek-v4-pro
 go run ./cmd/llmkit-probe openai -media            # 额外测图像生成（更贵）
 go run ./cmd/llmkit-probe openai -files            # 额外测 Files 全生命周期（上传后即删，零费用）
+go run ./cmd/llmkit-probe openai -batch            # 额外测 Batch（建单请求 batch 后立即取消）
 go run ./cmd/llmkit-probe deepseek -base-url https://my-relay.example/v1
 ```
 

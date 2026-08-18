@@ -44,6 +44,7 @@ func main() {
 		model    = flag.String("model", "", "chat model to probe (default: a sensible per-provider choice)")
 		media    = flag.Bool("media", false, "also probe image/video generation (slower, more expensive)")
 		files    = flag.Bool("files", false, "also probe the Files API (uploads then deletes a tiny file)")
+		batch    = flag.Bool("batch", false, "also probe the Batch API (creates then cancels a one-request batch)")
 		verbose  = flag.Bool("v", false, "print full model responses")
 		timeout  = flag.Duration("timeout", 2*time.Minute, "per-probe timeout")
 		envFile  = flag.String("env", ".env", "file to read API keys from")
@@ -80,6 +81,7 @@ func main() {
 		baseURL: *baseURL,
 		media:   *media,
 		files:   *files,
+		batch:   *batch,
 		verbose: *verbose,
 		timeout: *timeout,
 	}

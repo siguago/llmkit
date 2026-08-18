@@ -2,6 +2,33 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## v0.9.0 — 2026-08-18
+
+新增 **OpenAI Batch** 与 **Anthropic Message Batches**（[1.0 计划](V1_RELEASE_PLAN.md) M3）。异步批处理是两家都提供的半价通道，代价是 24 小时窗口。**纯加法，升级不需要改任何代码。**
+
+### 新增
+
+- `protocol/openaibatch`：Batch 对象（8 状态、9 个时间戳、`request_counts`、`errors.data[].line` 可空、可选 `usage`）、CreateRequest / ListRequest，以及 JSONL 输入输出：`NewInputItem` / `EncodeInput` / `OutputReader`。请求体与响应体保持 `json.RawMessage` —— batch 包不复述被批处理端点（当前 8 个）的 schema，你用哪个端点就拿那个端点的 DTO 组 body。
+- `protocol/anthropic` 追加 Message Batches：MessageBatch（三态 `processing_status`、五桶计数、RFC 3339 时间戳原样保留）、四型结果 union（`succeeded` / `errored` / `canceled` / `expired`，未知类型 Raw 保真不跳过）、`MessageBatchResultsReader`。succeeded 结果内嵌完整 `MessageResponse`，继续走官方 schema 严格校验。
+- 两家 adapter 实现全部端点：OpenAI 的 create / retrieve / list / cancel，Anthropic 的 create / retrieve / list / cancel / delete / results。根 Client 门面 + 十个 `Supports*`，能力矩阵守卫同步扩展。
+- `WaitBatch` 与 `WaitAnthropicMessageBatch`：默认 60 秒轮询、26 小时上限（覆盖 24 小时窗口加落定余量）。batch 以小时计，10 秒级轮询只会烧配额；文档写明长任务更适合自己的调度器。
+- `examples/batch` 与 `examples/anthropic-batch`：按 `-mode=submit|status|results|cancel[|delete]` 分步执行，一次运行只做一件事，示例本身不会悄悄排队 24 小时的计费任务。`llmkit-probe` 新增 `-batch`（建单请求 batch 后立即取消，自行清理输入文件）。
+- fuzz 目标增至 24 个：JSONL 解码（不 panic、行上限恒生效、未知结果类型 Raw 保真、失败粘性）进 PR 门禁与每日深度任务，`protocol/openaibatch` 同时接进 `ci.yml` 与 `deep-fuzz.yml` 的包清单。
+
+### 行为边界
+
+- **创建即排队计费**，且没有 SDK 级幂等键：`CreateBatch` / `CreateAnthropicMessageBatch` 只重试能证明「上游没接活」的错误（同 `CreateResponse`）。5xx 与读超时不重放，429 重放 —— 计数 server 测试两个方向都钉住了。cancel / delete 不重试（改变资源状态），retrieve / list 按常规读策略。
+- **结果顺序不保证**，一律按 `custom_id` 对账。这是协议语义，不是实现细节 —— 与 rerank 打破位置契约同理。
+- **JSONL 恒严格**：坏行报错并带行号，且失败是粘性的，不接 `WithStreamTolerance`。结果文件是完整工件，坏行是数据损坏而不是网络抖动，静默跳过等于悄悄丢结果。行上限默认 32 MiB（batch 化的图像生成单行可含 base64），`WithMaxStreamFrameBytes` 可收紧。
+- **Anthropic 的 results 按配置 base URL 拼路径，不跟随响应体里的 `results_url`。** 让上游响应决定出站目标与本库 safehttp 的 SSRF 立场相悖，经中转站时尤其危险；该字段只作为「结果已可用」的信号读。有专门的测试：伪造的 `results_url` 指向另一台服务器时，请求仍须打到配置的 base URL。
+- **保留期不由 SDK 决定**：OpenAI 输出文件 30 天后删除，Anthropic 结果 29 天后不可下载，`expired` 的请求不计费。批次上限（OpenAI 单文件 50,000 行 / 200 MB / 单模型，Anthropic 100,000 请求 / 256 MB）写在文档里，**不做本地校验** —— 这些是会变的运营约束，不是协议不变量。
+
+### 修复
+
+**Anthropic 结果行缺少必填成员时不再解码成零值成功。** `{}` 这样的行原本会「成功」解出一个既没有 `custom_id`（唯一的对账键）也没有 `result`（唯一的结果载体）的空对象，调用方要到使用时才发现。现在两个成员都按官方 schema 强制，缺失返回 `ErrInvalidWire`，与 `MessageResponse` 对自身必填字段的既有立场一致。
+
+这个缺陷是新增的 `FuzzMessageBatchResultsReader` 在门禁首跑时抓到的（不变量：解码成功的结果必须带判别式和原始字节），失败输入已作为回归种子提交。
+
 ## v0.8.0 — 2026-08-18
 
 新增 **OpenAI Files 原生资源面**（[1.0 计划](V1_RELEASE_PLAN.md) M2）。**纯加法，升级不需要改任何代码。**

@@ -5,6 +5,7 @@ import (
 	"io"
 
 	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+	"github.com/siguago/llmkit/protocol/openaibatch"
 	"github.com/siguago/llmkit/protocol/openaifiles"
 	"github.com/siguago/llmkit/protocol/responses"
 )
@@ -76,6 +77,64 @@ type FileDeleter interface {
 // its lifetime is bounded by the request context, not by any client timeout.
 type FileContentDownloader interface {
 	DownloadFileContent(ctx context.Context, apiKey, fileID string) (io.ReadCloser, error)
+}
+
+// BatchCreator creates an OpenAI batch (POST /v1/batches) over a previously
+// uploaded JSONL input file.
+type BatchCreator interface {
+	CreateBatch(ctx context.Context, apiKey string, req *openaibatch.CreateRequest) (*openaibatch.Batch, error)
+}
+
+// BatchRetriever retrieves one batch by ID; the polling primitive.
+type BatchRetriever interface {
+	RetrieveBatch(ctx context.Context, apiKey, batchID string) (*openaibatch.Batch, error)
+}
+
+// BatchLister lists batches (GET /v1/batches).
+type BatchLister interface {
+	ListBatches(ctx context.Context, apiKey string, req *openaibatch.ListRequest) (*openaibatch.BatchList, error)
+}
+
+// BatchCanceller cancels an in-progress batch. Cancellation is asynchronous:
+// the batch stays "cancelling" for up to ten minutes and partial results
+// still land in the output file.
+type BatchCanceller interface {
+	CancelBatch(ctx context.Context, apiKey, batchID string) (*openaibatch.Batch, error)
+}
+
+// AnthropicMessageBatchCreator creates an Anthropic Message Batch
+// (POST /v1/messages/batches) with inline requests.
+type AnthropicMessageBatchCreator interface {
+	CreateAnthropicMessageBatch(ctx context.Context, apiKey string, req *anthropicapi.MessageBatchCreateRequest, opts ...anthropicapi.RequestOption) (*anthropicapi.MessageBatch, error)
+}
+
+// AnthropicMessageBatchRetriever retrieves one Message Batch by ID; the
+// idempotent polling primitive.
+type AnthropicMessageBatchRetriever interface {
+	RetrieveAnthropicMessageBatch(ctx context.Context, apiKey, batchID string, opts ...anthropicapi.RequestOption) (*anthropicapi.MessageBatch, error)
+}
+
+// AnthropicMessageBatchLister lists Message Batches in the workspace.
+type AnthropicMessageBatchLister interface {
+	ListAnthropicMessageBatches(ctx context.Context, apiKey string, req *anthropicapi.MessageBatchListRequest, opts ...anthropicapi.RequestOption) (*anthropicapi.MessageBatchList, error)
+}
+
+// AnthropicMessageBatchCanceller cancels a Message Batch. Non-interruptible
+// in-flight requests may still complete.
+type AnthropicMessageBatchCanceller interface {
+	CancelAnthropicMessageBatch(ctx context.Context, apiKey, batchID string, opts ...anthropicapi.RequestOption) (*anthropicapi.MessageBatch, error)
+}
+
+// AnthropicMessageBatchDeleter deletes a Message Batch that has ended.
+type AnthropicMessageBatchDeleter interface {
+	DeleteAnthropicMessageBatch(ctx context.Context, apiKey, batchID string, opts ...anthropicapi.RequestOption) (*anthropicapi.DeletedMessageBatch, error)
+}
+
+// AnthropicMessageBatchResultsReader streams the results JSONL of an ended
+// Message Batch. The returned reader wraps a live network stream: the caller
+// must Close it, and its lifetime is bounded by the request context.
+type AnthropicMessageBatchResultsReader interface {
+	ReadAnthropicMessageBatchResults(ctx context.Context, apiKey, batchID string, opts ...anthropicapi.RequestOption) (*anthropicapi.MessageBatchResultsReader, error)
 }
 
 // AnthropicMessagesCreator exposes Anthropic's native Messages JSON response

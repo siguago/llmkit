@@ -17,6 +17,7 @@ import (
 
 	"github.com/siguago/llmkit"
 	anthropicapi "github.com/siguago/llmkit/protocol/anthropic"
+	"github.com/siguago/llmkit/protocol/openaibatch"
 	"github.com/siguago/llmkit/protocol/openaifiles"
 	responsesapi "github.com/siguago/llmkit/protocol/responses"
 )
@@ -62,6 +63,7 @@ type probeOptions struct {
 	baseURL string
 	media   bool
 	files   bool
+	batch   bool
 	verbose bool
 	timeout time.Duration
 }
@@ -166,6 +168,7 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 		{"OpenAI Responses", func(ctx context.Context) result { return probeResponses(ctx, c, model) }},
 		{"Anthropic Messages", func(ctx context.Context) result { return probeAnthropicMessages(ctx, c, model) }},
 		{"Files", func(ctx context.Context) result { return probeFiles(ctx, c, opts.files) }},
+		{"Batch", func(ctx context.Context) result { return probeBatch(ctx, c, t.provider, model, opts.batch) }},
 		{"非流式对话", func(ctx context.Context) result { return probeChat(ctx, c, model) }},
 		{"流式对话", func(ctx context.Context) result { return probeStream(ctx, c, model) }},
 		{"多轮上下文", func(ctx context.Context) result { return probeMultiTurn(ctx, c, model) }},
@@ -342,6 +345,121 @@ func sortedKeys(m map[string][]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// probeBatch 建一个单请求 batch 并立即取消，验证 create → cancel →
+// retrieve 三个端点真实可用。取消赶在执行前通常零费用，但若该请求已不可
+// 中断则会正常执行并计费（一条几十 token 的请求），所以默认不跑。
+// OpenAI 形状还需要先上传输入文件，探测完即删；被取消的 batch 对象本身
+// 无法删除，会留在账号列表里直到过期归档。
+func probeBatch(ctx context.Context, c *llmkit.Client, providerName, model string, batch bool) result {
+	switch {
+	case c.SupportsBatchCreation():
+		if !c.SupportsBatchRetrieval() || !c.SupportsBatchListing() || !c.SupportsBatchCancellation() {
+			return result{outcome: fail, detail: "Batch 端点能力声明不完整"}
+		}
+		if !batch {
+			return result{outcome: skipped, detail: "加 -batch 启用（create 后立即 cancel，通常零费用）"}
+		}
+		return probeOpenAIBatch(ctx, c, model)
+	case c.SupportsAnthropicMessageBatchCreation():
+		if !c.SupportsAnthropicMessageBatchRetrieval() || !c.SupportsAnthropicMessageBatchListing() ||
+			!c.SupportsAnthropicMessageBatchCancellation() || !c.SupportsAnthropicMessageBatchDeletion() ||
+			!c.SupportsAnthropicMessageBatchResults() {
+			return result{outcome: fail, detail: "Message Batches 端点能力声明不完整"}
+		}
+		if !batch {
+			return result{outcome: skipped, detail: "加 -batch 启用（create 后立即 cancel，通常零费用）"}
+		}
+		return probeAnthropicBatch(ctx, c, model)
+	default:
+		return result{outcome: notApplicable, detail: "无 Batch transport"}
+	}
+}
+
+func probeOpenAIBatch(ctx context.Context, c *llmkit.Client, model string) result {
+	item, err := openaibatch.NewInputItem("probe-1", openaibatch.EndpointChatCompletions, map[string]any{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": "回答：1+1=?"}},
+		"max_tokens": 16,
+	})
+	if err != nil {
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	var input strings.Builder
+	if err := openaibatch.EncodeInput(&input, item); err != nil {
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	uploaded, err := c.UploadFile(ctx, &openaifiles.UploadRequest{
+		Filename:    "llmkit-probe-batch.jsonl",
+		Purpose:     openaifiles.PurposeBatch,
+		Content:     strings.NewReader(input.String()),
+		ContentType: "application/jsonl",
+	})
+	if err != nil {
+		return result{outcome: fail, detail: "上传输入: " + describeErr(err)}
+	}
+	defer func() { _, _ = c.DeleteFile(ctx, uploaded.ID) }()
+
+	created, err := c.CreateBatch(ctx, &openaibatch.CreateRequest{
+		InputFileID:      uploaded.ID,
+		Endpoint:         openaibatch.EndpointChatCompletions,
+		CompletionWindow: openaibatch.CompletionWindow24h,
+		Metadata:         map[string]string{"origin": "llmkit-probe"},
+	})
+	if err != nil {
+		return result{outcome: fail, detail: "create: " + describeErr(err)}
+	}
+	cancelled, err := c.CancelBatch(ctx, created.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "cancel: " + describeErr(err)}
+	}
+	fetched, err := c.RetrieveBatch(ctx, created.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "retrieve: " + describeErr(err)}
+	}
+	return result{
+		outcome: pass,
+		detail: fmt.Sprintf("create %s → cancel(%s) → retrieve(%s)",
+			created.Status, cancelled.Status, fetched.Status),
+	}
+}
+
+func probeAnthropicBatch(ctx context.Context, c *llmkit.Client, model string) result {
+	created, err := c.CreateAnthropicMessageBatch(ctx, &anthropicapi.MessageBatchCreateRequest{
+		Requests: []anthropicapi.MessageBatchRequestItem{{
+			CustomID: "probe-1",
+			Params: &anthropicapi.MessageRequest{
+				Model: model, MaxTokens: 16,
+				Messages: []anthropicapi.MessageParam{{
+					Role: anthropicapi.RoleUser, Content: anthropicapi.StringContent("回答：1+1=?"),
+				}},
+			},
+		}},
+	})
+	if err != nil {
+		return result{outcome: fail, detail: "create: " + describeErr(err)}
+	}
+	cancelled, err := c.CancelAnthropicMessageBatch(ctx, created.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "cancel: " + describeErr(err)}
+	}
+	fetched, err := c.RetrieveAnthropicMessageBatch(ctx, created.ID)
+	if err != nil {
+		return result{outcome: fail, detail: "retrieve: " + describeErr(err)}
+	}
+	// 只有 ended 的 batch 可删；canceling 阶段就把清理交给上游的过期归档。
+	cleanup := "留待过期归档"
+	if fetched.HasEnded() {
+		if _, err := c.DeleteAnthropicMessageBatch(ctx, fetched.ID); err == nil {
+			cleanup = "已删除"
+		}
+	}
+	return result{
+		outcome: pass,
+		detail: fmt.Sprintf("create %s → cancel(%s) → retrieve(%s) · %s",
+			created.ProcessingStatus, cancelled.ProcessingStatus, fetched.ProcessingStatus, cleanup),
+	}
 }
 
 // probeFiles 上传一个几十字节的小文件，走完 retrieve → list → download →

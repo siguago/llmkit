@@ -184,6 +184,9 @@ func (p *Provider) doLegacyChatRequest(
 }
 
 type anthropicRequestBehavior struct {
+	// method is the HTTP method; empty means POST, which every pre-batches
+	// caller relies on.
+	method            string
 	useStreamClient   bool
 	acceptEventStream bool
 	decodeNativeError bool
@@ -204,7 +207,11 @@ func (p *Provider) doAnthropicRequest(
 		return nil, fmt.Errorf("anthropic: anthropic-version must not be empty")
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	method := behavior.method
+	if method == "" {
+		method = http.MethodPost
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

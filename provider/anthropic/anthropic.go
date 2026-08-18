@@ -24,6 +24,7 @@ type Provider struct {
 	baseURL       string
 	messagesURL   string
 	tokenCountURL string
+	batchesURL    string
 	modelsURL     string
 	client        *http.Client // non-streaming requests (with timeout)
 	streamClient  *http.Client // streaming requests (no global timeout)
@@ -63,6 +64,7 @@ func NewWithBaseURL(baseURL string) *Provider {
 		baseURL:       baseURL,
 		messagesURL:   baseURL + "/messages",
 		tokenCountURL: baseURL + "/messages/count_tokens",
+		batchesURL:    baseURL + "/messages/batches",
 		modelsURL:     baseURL + "/models",
 		client: &http.Client{
 			Timeout:       300 * time.Second,

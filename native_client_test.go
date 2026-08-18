@@ -52,6 +52,19 @@ func TestNativeProtocolCapabilityMatrix(t *testing.T) {
 			}
 		}
 
+		wantBatches := name == OpenAI
+		batchCapabilities := map[string]bool{
+			"create":   client.SupportsBatchCreation(),
+			"retrieve": client.SupportsBatchRetrieval(),
+			"list":     client.SupportsBatchListing(),
+			"cancel":   client.SupportsBatchCancellation(),
+		}
+		for capability, got := range batchCapabilities {
+			if got != wantBatches {
+				t.Errorf("%s Batch %s = %v, want %v", name, capability, got, wantBatches)
+			}
+		}
+
 		wantAnthropic := name == Anthropic
 		anthropicCapabilities := map[string]bool{
 			"create":      client.SupportsAnthropicMessages(),
@@ -61,6 +74,20 @@ func TestNativeProtocolCapabilityMatrix(t *testing.T) {
 		for capability, got := range anthropicCapabilities {
 			if got != wantAnthropic {
 				t.Errorf("%s Anthropic %s = %v, want %v", name, capability, got, wantAnthropic)
+			}
+		}
+
+		anthropicBatchCapabilities := map[string]bool{
+			"create":   client.SupportsAnthropicMessageBatchCreation(),
+			"retrieve": client.SupportsAnthropicMessageBatchRetrieval(),
+			"list":     client.SupportsAnthropicMessageBatchListing(),
+			"cancel":   client.SupportsAnthropicMessageBatchCancellation(),
+			"delete":   client.SupportsAnthropicMessageBatchDeletion(),
+			"results":  client.SupportsAnthropicMessageBatchResults(),
+		}
+		for capability, got := range anthropicBatchCapabilities {
+			if got != wantAnthropic {
+				t.Errorf("%s Anthropic Message Batches %s = %v, want %v", name, capability, got, wantAnthropic)
 			}
 		}
 	}

@@ -87,7 +87,8 @@ jobs:
             ./provider/ \
             ./internal/sse/ \
             ./protocol/responses/ \
-            ./protocol/anthropic/
+            ./protocol/anthropic/ \
+            ./protocol/openaibatch/
 
       # Go writes a newly discovered failure under testdata/fuzz. Stage only
       # untracked files: tracked regression seeds already exist in the tree and

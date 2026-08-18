@@ -34,6 +34,8 @@ jobs:
             package: ./protocol/responses/
           - name: anthropic
             package: ./protocol/anthropic/
+          - name: openai-batch
+            package: ./protocol/openaibatch/
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -41,7 +43,7 @@ jobs:
           go-version: '1.25'
           cache: false
 
-      # 21 targets x 500,000 executions gives this scheduled run a slightly
+      # 24 targets x 500,000 executions gives this scheduled run a slightly
       # larger aggregate search budget than the former duration-based PR pass.
       - name: Fuzz parsers deeply
         id: fuzz
