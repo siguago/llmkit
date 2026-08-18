@@ -33,6 +33,7 @@
 - **初稿漏了 fuzz 门禁的接线。** v0.5.0 修过"新增 fuzz 目标静默漏出 CI"的问题,靠的是 `go test -list` 目标发现,但**包清单**仍是手写的(`ci.yml` 的 run-fuzz 行与 `deep-fuzz.yml` 的矩阵)。新增 `protocol/openaibatch` 包时两处都必须加,列入 M3 的 DoD。
 - **初稿未说明 usage 字段的时间边界。** OpenAI Batch 的 `usage` 仅在 2025-09-07 之后创建的 batch 上填充;解码为可选指针,`nil` 表示"上游没给",不得补零。
 - **初稿把 cancel / delete 笼统归入"常规重试"。** delete 的重试在"上游已删成功但响应丢失"时会把成功变成一个 404 错误,离病因很远。修正为:cancel / delete 与既有 `CancelResponse` / `DeleteResponse` 的重试语义严格对齐(实现时核对现状并用计数 server 测试钉住),不在本计划里另立一套。
+- **初稿把媒体请求的 `ResponseFormat` 字段当成死代码列入删除清单。** 实施核对发现 openai / vercel / easyrouter 三家 adapter 都在读它并向上游转发(`url` / `b64_json` 交付偏好,DALL·E 一代模型仍接受),删除是功能回退而非清理。真正错的是那条废弃注释:它把请求侧偏好和响应侧读取混为一谈。修正为:**取消废弃并改正文档**(说明它是 OpenAI 形状图像端点的请求侧偏好、不支持的 adapter 忽略、实际拿到什么以返回的 `MediaAsset` 为准);`SupportsImages` / `SupportsVideo` 是纯别名、零内部使用,照删。M1 交付物从"删四处"改为"删两处方法 + 两处字段取消废弃",`grep Deprecated:` 归零的验收不变。
 - **初稿的能力矩阵守卫只提了统一面。** README 的原生协议矩阵新增三行(Files / Batch / Message Batches)后,必须有与 `TestCapabilityMatrix` 同等地位的守卫断言 `Supports*` 与 adapter 方法集一致;若现状没有原生面的矩阵守卫,M2 先补基建再加行。
 
 ## 3. 首次发布范围(按里程碑)
@@ -41,16 +42,16 @@
 
 **流超时统一。** compat、Gemini、OpenRouter、DeepSeek 四处 `streamClient` 的 900 秒 `http.Client.Timeout` 移除(`provider/compat/compat.go`、`provider/gemini/gemini.go`、`provider/openrouter/openrouter.go`、`provider/deepseek/deepseek.go`),与 v0.5.0 已改的 OpenAI Responses / Anthropic 流路径一致:**活跃流没有 SDK 兜底超时,调用 context 是唯一生命周期约束**。这是 v0.5.0 CHANGELOG"已知问题"里预告过的收口。迁移表必须重复 v0.5.0 那条警告:从"900 秒后报错"变成"不报错也不返回",无 deadline 的 context 会让 `Recv` 永久阻塞。
 
-**删除全部已废弃 API。** 四处,均自 v0.2.0 标记:
+**清零全部废弃标记。** 四处,均自 v0.2.0 标记;处置方式经实施核对分成两类(见第 2 节最后一条):
 
-| 删除项 | 位置 | 替代 |
+| 项 | 位置 | 处置 |
 |---|---|---|
-| `Client.SupportsImages()` | client.go | `SupportsImageGeneration()` / `SupportsImageEditing()` |
-| `Client.SupportsVideo()` | client.go | `SupportsVideoGeneration()` / `SupportsVideoCancellation()` |
-| `ImageGenerationRequest.ResponseFormat` | provider/media_types.go | 读返回的 `MediaAsset` |
+| `Client.SupportsImages()` | client.go | **删除**(纯别名,零内部使用)→ `SupportsImageGeneration()` / `SupportsImageEditing()` |
+| `Client.SupportsVideo()` | client.go | **删除** → `SupportsVideoGeneration()` / `SupportsVideoCancellation()` |
+| `ImageGenerationRequest.ResponseFormat` | provider/media_types.go | **取消废弃,改正文档**(openai / vercel / easyrouter 在读并转发;删除是功能回退) |
 | `ImageEditRequest.ResponseFormat` | provider/media_types.go | 同上 |
 
-删完后 `grep -rn "Deprecated:"` 于非测试代码必须为零 —— 1.0 不带着已废弃项出生。
+处理完后 `grep -rn "Deprecated:"` 于非测试代码必须为零 —— 1.0 不带着已废弃项出生。
 
 **文档同步。** README 的配置、流式容错、已知问题三节及 `options.go` 注释里所有"900 秒"表述更新;CHANGELOG v0.7.0 声明:这是 1.0 前最后一个计划内破坏性版本,此后到 1.0 之间只有加法。
 

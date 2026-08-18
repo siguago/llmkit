@@ -30,7 +30,7 @@ type Provider struct {
 	modelsURL string // baseURL + "/models"
 
 	client       *http.Client // non-streaming requests (with timeout)
-	streamClient *http.Client // streaming requests (900s client-wide ceiling)
+	streamClient *http.Client // streaming requests (no global timeout)
 }
 
 // New constructs a Gemini provider pointed at the official API.
@@ -54,7 +54,6 @@ func NewWithBaseURL(baseURL string) *Provider {
 			Transport: outboundTransport,
 		},
 		streamClient: &http.Client{
-			Timeout:   900 * time.Second, // compatibility ceiling for active streams
 			Transport: outboundTransport,
 		},
 	}

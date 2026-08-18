@@ -40,7 +40,7 @@ type Provider struct {
 	passModalities   bool
 	passAudio        bool
 	client           *http.Client
-	streamClient     *http.Client // streaming requests (900s client-wide ceiling)
+	streamClient     *http.Client // streaming requests (no global timeout)
 }
 
 // New creates a new OpenAI-compatible provider.
@@ -60,7 +60,6 @@ func New(cfg Config) *Provider {
 			Transport: outboundTransport,
 		},
 		streamClient: &http.Client{
-			Timeout:   900 * time.Second,
 			Transport: outboundTransport,
 		},
 	}

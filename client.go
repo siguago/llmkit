@@ -325,13 +325,6 @@ func (c *Client) SupportsImageEditing() bool {
 	return ok
 }
 
-// SupportsImages reports whether GenerateImage is available.
-//
-// Deprecated: it could never express that a provider generates images but
-// cannot edit them, which is the common case among the aggregators. Use
-// SupportsImageGeneration or SupportsImageEditing.
-func (c *Client) SupportsImages() bool { return c.SupportsImageGeneration() }
-
 // ---------------------------------------------------------------- video
 
 // CreateVideo submits an asynchronous video generation job. Video generation is
@@ -422,12 +415,6 @@ func (c *Client) SupportsVideoCancellation() bool {
 	_, ok := c.provider.(provider.VideoCanceller)
 	return ok
 }
-
-// SupportsVideo reports whether CreateVideo / GetVideo / WaitVideo are available.
-//
-// Deprecated: it could never express that no provider can actually cancel a job.
-// Use SupportsVideoGeneration or SupportsVideoCancellation.
-func (c *Client) SupportsVideo() bool { return c.SupportsVideoGeneration() }
 
 // WaitOptions tunes WaitVideo's polling.
 type WaitOptions struct {

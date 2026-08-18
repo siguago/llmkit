@@ -21,11 +21,11 @@ type ImageGenerationRequest struct {
 	OutputFormat      string `json:"output_format,omitempty"`
 	OutputCompression *int   `json:"output_compression,omitempty"`
 	Moderation        string `json:"moderation,omitempty"`
-	// ResponseFormat is a provider-specific passthrough.
-	//
-	// Deprecated: it was never uniform across vendors. Read the returned
-	// MediaAsset instead — it carries whichever of URL / B64JSON the vendor
-	// actually sent.
+	// ResponseFormat is a request-side delivery preference ("url" or
+	// "b64_json") for OpenAI-shaped image endpoints that still accept it.
+	// Adapters that support it forward it; the rest ignore it. It is a
+	// preference, not a guarantee — what you actually received is whichever
+	// of URL / B64JSON the returned MediaAsset carries.
 	ResponseFormat string         `json:"response_format,omitempty"`
 	Stream         *bool          `json:"stream,omitempty"`
 	User           string         `json:"user,omitempty"`
@@ -49,7 +49,8 @@ type ImageEditRequest struct {
 	Background        string
 	OutputFormat      string
 	OutputCompression *int
-	// Deprecated: 同 ImageGenerationRequest.ResponseFormat。
+	// ResponseFormat 语义同 ImageGenerationRequest.ResponseFormat：请求侧交付
+	// 偏好，支持的 adapter 转发，实际拿到什么以返回的 MediaAsset 为准。
 	ResponseFormat  string
 	User            string
 	Metadata        map[string]any

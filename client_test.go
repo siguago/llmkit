@@ -449,23 +449,6 @@ func TestVideoCancellation_ProbeMatchesBehavior(t *testing.T) {
 	}
 }
 
-// The deprecated aliases must keep reporting what they always did for the
-// generation case, so existing callers don't silently change behavior.
-func TestDeprecatedCapabilityAliases(t *testing.T) {
-	for name := range factories {
-		c, err := Wrap(factories[name](""), WithAPIKey("sk-test"))
-		if err != nil {
-			t.Fatalf("Wrap(%s): %v", name, err)
-		}
-		if c.SupportsImages() != c.SupportsImageGeneration() {
-			t.Errorf("%s: SupportsImages diverged from SupportsImageGeneration", name)
-		}
-		if c.SupportsVideo() != c.SupportsVideoGeneration() {
-			t.Errorf("%s: SupportsVideo diverged from SupportsVideoGeneration", name)
-		}
-	}
-}
-
 func TestUnsupportedCapability_ReturnsTypedError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream should not be called")

@@ -2,6 +2,33 @@
 
 本项目尚未到 1.0，API 未冻结。破坏性变更会在这里逐条列出，并说明为什么值得破坏。
 
+## v0.7.0 — 2026-08-18
+
+行为收口版，[v1.0 发布计划](V1_RELEASE_PLAN.md)的第一步：**这是 1.0 前最后一个计划内破坏性版本**，此后到 1.0 只有加法。两件事：全部 adapter 的流式生命周期统一交给调用 context（移除最后四处 900 秒兜底），以及清零全部废弃标记。
+
+### 从 v0.6.0 升级
+
+| 你的代码里如果有 | 升级后会怎样 | 怎么改 |
+|---|---|---|
+| compat 系 / Gemini / OpenRouter / DeepSeek 上的 `ChatStream`，且 context 没有 deadline | **行为变化** —— 此前有 900 秒 `http.Client.Timeout` 兜底，现在没有了。对端建连后不再发数据时，`Recv` 会永久阻塞，而不是 900 秒后报错 | `ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)` |
+| `SupportsImages()` / `SupportsVideo()` | **编译失败** —— v0.2.0 起废弃，本版删除 | `SupportsImageGeneration()` / `SupportsImageEditing()`、`SupportsVideoGeneration()` / `SupportsVideoCancellation()` |
+| OpenAI Responses / Anthropic 的流式调用 | 不受影响 —— v0.5.0 起就没有兜底超时，本版只是把其余 adapter 拉齐 | — |
+| 读写 `ImageGenerationRequest.ResponseFormat` / `ImageEditRequest.ResponseFormat` | 不受影响 —— 字段保留且**取消废弃**（见「修正」） | — |
+
+第一行和 v0.5.0 那次 Anthropic 的变化完全同型：从「900 秒后报错」变成「不报错也不返回」，比报错更难排查，所以放在最前面。生产代码给所有流式调用的 context 设 deadline。
+
+### 破坏性变更
+
+**compat、Gemini、OpenRouter、DeepSeek 的流不再有 900 秒兜底。** v0.5.0 给 OpenAI Responses 与 Anthropic 的流去掉 `http.Client.Timeout` 时，这四处被刻意保留并在「已知问题」里声明「后续版本可能统一去掉，调用方不应依赖」——本版兑现。理由不变：background、deep-research 和长推理会合法地长时间持有连接，任何固定上限都会砍断正常的流；请求级 context 是唯一正确的生命周期约束。四个包各有一条守卫测试钉住「流 client 无绝对超时、非流式 client 保留 300 秒上限」。
+
+**删除 `Client.SupportsImages()` 与 `Client.SupportsVideo()`。** v0.2.0 起废弃的纯别名（分别等价于 `SupportsImageGeneration()` / `SupportsVideoGeneration()`），无法表达「能生成不能编辑」「能建任务不能取消」。1.0 要冻结的 API 面不该带着已废弃项出生，这是最后的删除窗口。
+
+### 修正
+
+**`ImageGenerationRequest.ResponseFormat` / `ImageEditRequest.ResponseFormat` 取消废弃。** 原计划本版删除，实施核对发现废弃注释写错了方向：openai / vercel / easyrouter 三家 adapter 都在读这个字段并向上游转发（`url` / `b64_json` 交付偏好，DALL·E 一代模型仍接受），删除是功能回退而非清理。旧注释「读返回的 MediaAsset 就行」混淆了请求侧偏好和响应侧读取——两者本就该同时存在。字段文档改写为如实描述：它是 OpenAI 形状图像端点的请求侧偏好，支持的 adapter 转发、其余忽略，实际拿到什么以返回的 `MediaAsset` 为准。
+
+`grep -rn "Deprecated:"` 于非测试代码现为零。
+
 ## v0.6.0 — 2026-08-09
 
 Anthropic 的缓存写入 token 进入统一 usage，并按 5 分钟 / 1 小时两档 TTL 拆分——两档费率不同，只有汇总值无法精确计价。同时修掉三处 `cache_control` 的既有问题，其中一处会让上游把 1 小时缓存按 5 分钟处理。**唯一需要动手的是不带字段名的 `provider.Usage{...}`；其余全是加法。**

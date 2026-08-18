@@ -100,11 +100,9 @@ func WithBaseURL(url string) Option {
 // whole-wait budgets; this option still bounds each poll request they make.
 //
 // Streaming methods do not apply this option because the returned stream
-// outlives the method call. OpenAI Responses and every Anthropic streaming
-// entry point impose no SDK fallback timeout on an active stream, so a context
-// deadline or cancellation is their only lifetime bound. Some other adapters
-// retain a 900-second client ceiling for compatibility; callers should not
-// rely on it.
+// outlives the method call. No adapter imposes an SDK fallback timeout on an
+// active stream, so a context deadline or cancellation is the only lifetime
+// bound — always set one in production code.
 //
 // The deadline applies per provider operation. A Chat that retries twice
 // shares one budget across all three attempts.

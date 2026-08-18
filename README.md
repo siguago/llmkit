@@ -419,7 +419,7 @@ client, err := llmkit.New(llmkit.OpenAI,
 )
 ```
 
-- **`WithTransport`** 只替换链路最底层。凭据头、调用方附加头照常先加上，客户端 IP 头照常先剥掉，然后才轮到你的 `RoundTrip` —— 埋点用的 transport 不该有能力悄悄绕掉隐私处理。普通非流式 provider 操作归 `WithTimeout` 管（一次操作含全部重试共享一个预算）；`WaitResponse` / `WaitVideo` 的整体轮询预算由各自 options 和调用 context 控制，`WithTimeout` 只约束其中每次查询。流式不受 `WithTimeout` 控制：OpenAI Responses 与 Anthropic 的所有流式入口（包括统一 `Client.ChatStream`）没有活跃流的 SDK 兜底超时，context deadline 或取消是唯一生命周期约束；compat、Gemini、OpenRouter、DeepSeek 目前仍保留 900 秒兼容上限，但调用方不应依赖它。默认 transport 的 `IdleConnTimeout` 只回收连接池中的空闲连接，不会终止活跃流。因此这里不接受 `*http.Client`。
+- **`WithTransport`** 只替换链路最底层。凭据头、调用方附加头照常先加上，客户端 IP 头照常先剥掉，然后才轮到你的 `RoundTrip` —— 埋点用的 transport 不该有能力悄悄绕掉隐私处理。普通非流式 provider 操作归 `WithTimeout` 管（一次操作含全部重试共享一个预算）；`WaitResponse` / `WaitVideo` 的整体轮询预算由各自 options 和调用 context 控制，`WithTimeout` 只约束其中每次查询。流式不受 `WithTimeout` 控制：**所有 adapter 的流式入口都没有活跃流的 SDK 兜底超时**，context deadline 或取消是唯一生命周期约束（v0.7.0 起统一；此前 compat、Gemini、OpenRouter、DeepSeek 保留过 900 秒兼容上限），生产代码请总是给流式调用的 context 设 deadline。默认 transport 的 `IdleConnTimeout` 只回收连接池中的空闲连接，不会终止活跃流。因此这里不接受 `*http.Client`。
 - **`WithLogger`** 默认丢弃一切。库往宿主程序的全局 logger 里写东西是越界的，所以不问就不说。开启后能看到的是：被跳过的畸形流帧、被丢弃的非法工具定义这类"绕过去了但你可能想知道"的事；真正影响结果的一律走 error 返回。
 - **`WithRequestID`** 每个**出站 HTTP 请求**调一次（重试的每一次尝试都是新 ID），用于和厂商日志对账。厂商自己生成的那个 ID 走另一条路：`APIError.RequestID`，报障时对方要的是它。
 
