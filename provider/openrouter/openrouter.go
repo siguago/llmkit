@@ -114,31 +114,52 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 	// 结构化资产提取：让客户端在 message.images 上拿到 MediaAsset 列表。
 	// 与 countImagesInChunk 互补——后者只负责轻量计数（用于 usage），
 	// 这里负责把 URL/data URL/base64 拆出来。
-	if assets := extractMediaAssets(respBody); len(assets) > 0 {
-		attachAssetsToChoices(result.Choices, assets)
-		if result.Usage != nil && result.Usage.MediaCount == 0 {
-			result.Usage.MediaCount = len(assets)
-		}
+	//
+	// 无条件调用：没有可归一化的资产时也要清掉解码留下的原始条目，见
+	// attachAssetsToChoices 的说明。
+	assets := extractMediaAssets(respBody)
+	attachAssetsToChoices(result.Choices, assets)
+	if len(assets) > 0 && result.Usage != nil && result.Usage.MediaCount == 0 {
+		result.Usage.MediaCount = len(assets)
 	}
 
 	return &result, nil
 }
 
-// attachAssetsToChoices 把提取到的 MediaAsset 列表挂到第一个 assistant choice 的
-// Message.Images 字段上。流式/非流式都用同一种"放在 choice[0]"的简化——OpenRouter
-// 实际只会输出一个 assistant choice；多 choice 情景由调用方按需扩展。
+// attachAssetsToChoices 把归一化后的 MediaAsset 列表装到第一个 assistant choice 的
+// Message.Images 上，并**先清空**解码遗留在同一字段里的原始条目。
+//
+// 统一 Message 的 Images 字段绑定了 `json:"images"`，所以 OpenRouter 响应里的原始条目
+// （`{"type":"image_url","image_url":{"url":…}}`）在 json.Unmarshal 阶段就已经落进这个
+// 切片。归一化资产的目的地正是同一个切片，直接 append 会让调用方同时拿到一条没有任何
+// 载荷的原始垃圾条目和它的归一化孪生体（已实测：len(Images) == 2）。这里是"替换"而不是
+// "追加"，并且在没有资产可装时也要清空——否则一条无法归一化的原始条目会留在结果里。
+//
+// 流式/非流式都用同一种"放在 choice[0]"的简化——OpenRouter 实际只会输出一个 assistant
+// choice；多 choice 情景由调用方按需扩展。
 func attachAssetsToChoices(choices []provider.Choice, assets []provider.MediaAsset) {
-	if len(assets) == 0 || len(choices) == 0 {
+	if len(choices) == 0 {
 		return
 	}
-	target := choices[0].Message
-	if target == nil {
-		target = choices[0].Delta
-	}
-	if target == nil {
+	clearRawMediaEntries(&choices[0])
+	if choices[0].Message != nil {
+		choices[0].Message.Images = assets
 		return
 	}
-	target.Images = append(target.Images, assets...)
+	if choices[0].Delta != nil {
+		choices[0].Delta.Images = assets
+	}
+}
+
+// clearRawMediaEntries 丢弃解码阶段从上游原始 JSON 落进 Images 的条目。这些条目与归一化
+// 资产的存放位置是同一个字段，必须先清空再装，否则两者会并存。
+func clearRawMediaEntries(choice *provider.Choice) {
+	if choice.Message != nil {
+		choice.Message.Images = nil
+	}
+	if choice.Delta != nil {
+		choice.Delta.Images = nil
+	}
 }
 
 // normalizeReasoningOnResponse extracts choices[].message.reasoning (a string

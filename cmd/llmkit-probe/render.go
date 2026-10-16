@@ -307,6 +307,9 @@ var embedModelUnknown = map[string]string{
 // enforced by TestRerankModelsCoverRerankers.
 var rerankModels = map[string]string{
 	llmkit.SiliconFlow: "BAAI/bge-reranker-v2-m3",
+	// The gateway addresses upstream models as "<owner>/<model>"; its rerank
+	// route is Cohere's dialect, so the slug is Cohere's.
+	llmkit.Vercel: "cohere/rerank-v3.5",
 }
 
 // rerankModelUnknown mirrors embedModelUnknown: providers that claim the

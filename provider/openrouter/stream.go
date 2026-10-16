@@ -90,11 +90,13 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		s.imageCount += countImagesInChunk([]byte(data))
 
 		// 结构化资产：把每个增量 chunk 中的 image entry 解析成 MediaAsset，
-		// 直接挂到 chunk 的第一个 delta 上，客户端能在流式响应里拿到完整 URL/base64。
-		if assets := extractMediaAssets([]byte(data)); len(assets) > 0 {
-			attachAssetsToChunk(&chunk, assets)
-			s.mediaCount += len(assets)
-		}
+		// 直接挂到 chunk 的第一个 choice 上，客户端能在流式响应里拿到完整 URL/base64。
+		//
+		// 无条件调用：归一化资产必须**覆盖**（而不是追加到）解码阶段落进 Images 的
+		// 原始条目，理由见 attachAssetsToChunk。
+		assets := extractMediaAssets([]byte(data))
+		attachAssetsToChunk(&chunk, assets)
+		s.mediaCount += len(assets)
 
 		if chunk.Usage != nil {
 			provider.NormalizeUsage(chunk.Usage)
@@ -345,20 +347,29 @@ func normalizeChatImageEntry(raw json.RawMessage) (provider.MediaAsset, bool) {
 	return asset, true
 }
 
-// attachAssetsToChunk 把流式 chunk 中提取到的 MediaAsset 列表挂到第一个 choice 的
-// delta.Images（流式增量）上。该字段在 SSE 序列化时会出 JSON，让客户端在流式响应里直接看到结构化资产。
+// attachAssetsToChunk 把流式 chunk 中提取到的 MediaAsset 列表装到第一个 choice 上。
+// 该字段在 SSE 序列化时会出 JSON，让客户端在流式响应里直接看到结构化资产。
+//
+// 与 attachAssetsToChoices 同理：统一 Message 的 Images 绑定了 `json:"images"`，原始
+// OpenRouter 条目在解码时就已经进了这个切片，所以这里是替换 + 先清空，而不是追加。
+// 两个载体（delta 与 message）都要清，因为 chunk 可能同时带着它们。
 func attachAssetsToChunk(chunk *provider.ChatCompletionChunk, assets []provider.MediaAsset) {
-	if chunk == nil || len(assets) == 0 || len(chunk.Choices) == 0 {
+	if chunk == nil || len(chunk.Choices) == 0 {
 		return
 	}
-	target := chunk.Choices[0].Delta
+	choice := &chunk.Choices[0]
+	clearRawMediaEntries(choice)
+	if len(assets) == 0 {
+		return
+	}
+	target := choice.Delta
 	if target == nil {
-		target = chunk.Choices[0].Message
+		target = choice.Message
 	}
 	if target == nil {
 		return
 	}
-	target.Images = append(target.Images, assets...)
+	target.Images = assets
 }
 
 func fillURLOrDataURL(asset *provider.MediaAsset, raw string) {

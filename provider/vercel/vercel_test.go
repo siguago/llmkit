@@ -2,12 +2,15 @@ package vercel
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
+	"github.com/siguago/llmkit/provider/compat"
 )
 
 // Users configure either a host root or a full /v1 URL; both must end up at the
@@ -53,6 +56,125 @@ func TestNew_UsesNormalizedBaseURL(t *testing.T) {
 func TestName(t *testing.T) {
 	if got := New("").Name(); got != name {
 		t.Errorf("Name() = %q, want %q", got, name)
+	}
+}
+
+func TestRerank_FollowsReplacementCompatProvider(t *testing.T) {
+	original := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("request reached the replaced provider's server")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer original.Close()
+
+	connections := make(chan string, 2)
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connections <- r.RemoteAddr
+		switch r.URL.Path {
+		case "/replacement/chat/completions":
+			_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"replacement"}}]}`)
+		case "/replacement/rerank":
+			_, _ = io.WriteString(w, `{"results":[{"index":0,"relevance_score":0.9}]}`)
+		default:
+			t.Errorf("path = %q, want a replacement provider route", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer replacement.Close()
+
+	p := New(original.URL)
+	p.Provider = compat.New(compat.Config{ProviderName: "replacement", BaseURL: replacement.URL + "/replacement"})
+	if _, err := p.ChatCompletion(context.Background(), "k", "m", &provider.ChatCompletionRequest{
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	resp, err := p.Rerank(context.Background(), "k", "m", &provider.RerankRequest{
+		Query: "q", Documents: []string{"a"},
+	})
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if resp.Provider != "replacement" {
+		t.Errorf("provider = %q, want the current embedded provider", resp.Provider)
+	}
+	if chatConn, rerankConn := <-connections, <-connections; chatConn != rerankConn {
+		t.Error("chat and rerank did not reuse their shared compat transport's connection")
+	}
+}
+
+func TestRerank_RequiresCompatProvider(t *testing.T) {
+	for _, p := range []*Provider{
+		nil,
+		{},
+	} {
+		if _, err := p.Rerank(context.Background(), "k", "m", &provider.RerankRequest{
+			Query: "q", Documents: []string{"a"},
+		}); err == nil {
+			t.Error("Rerank without an embedded compat Provider must return an error")
+		}
+	}
+}
+
+// TestRerank_CohereDialectAtDerivedPath is why this adapter opts into rerank.
+//
+// The route is Cohere's dialect served at <base>/rerank — a path the adapter
+// derives rather than configures, so an off-by-one in normalizeBaseURL would
+// silently point the call at a URL that does not exist. And the response shape
+// is the one that had no live vendor behind it: usage arrives as
+// meta.billed_units.search_units, with no top-level "tokens" block at all.
+func TestRerank_CohereDialectAtDerivedPath(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"gen_01J",
+			"results":[{"index":2,"relevance_score":0.999071},{"index":0,"relevance_score":0.32713068}],
+			"meta":{"api_version":{"version":"2"},"billed_units":{"search_units":1}}
+		}`)
+	}))
+	defer srv.Close()
+
+	// A bare host root must still land on <root>/v1/rerank.
+	p := New(srv.URL)
+	resp, err := p.Rerank(context.Background(), "sk-test", "cohere/rerank-v3.5",
+		&provider.RerankRequest{
+			Query:     "什么是熊猫？",
+			Documents: []string{"苹果是一种水果", "汽车有四个轮子", "熊猫是中国特有的哺乳动物"},
+		})
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+
+	if gotPath != "/v1/rerank" {
+		t.Errorf("path = %q, want /v1/rerank", gotPath)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if gotBody["model"] != "cohere/rerank-v3.5" {
+		t.Errorf("model = %#v", gotBody["model"])
+	}
+	if len(resp.Results) != 2 || resp.Results[0].Index != 2 {
+		t.Errorf("results = %+v, want index 2 first", resp.Results)
+	}
+	if resp.Usage == nil {
+		t.Fatal("usage dropped from a Cohere-shaped response")
+	}
+	if resp.Usage.RequestCount != 1 {
+		t.Errorf("RequestCount = %d, want 1 (one search unit)", resp.Usage.RequestCount)
+	}
+	// Search units are a billing dimension, not tokens. Inventing token counts
+	// from them would put a fabricated number on someone's bill.
+	if resp.Usage.TotalTokens != 0 {
+		t.Errorf("TotalTokens = %d, want 0", resp.Usage.TotalTokens)
+	}
+	if resp.Provider != name {
+		t.Errorf("Provider = %q, want %q", resp.Provider, name)
 	}
 }
 

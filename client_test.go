@@ -390,14 +390,19 @@ func TestCapabilityMatrix(t *testing.T) {
 		Ollama:     {chat: true, models: true, embeddings: true},
 		OpenAI:     {chat: true, models: true, embeddings: true, imageGen: true, imageEdit: true},
 		OpenRouter: {chat: true, models: true, modelTasks: true, imageGen: true, videoGen: true},
-		// The only bundled adapter with a rerank route. Rerank is not part of the
-		// OpenAI API, so compat does not get it by default — it is opted into via
-		// compat.NewWithRerank, which is why every other compat provider is false
-		// here rather than inheriting a claim it cannot serve.
+		// The two bundled adapters with a rerank route. Rerank is not part of
+		// the OpenAI API, so compat does not get it by default — it is opted into
+		// via compat.WithRerank, which is why every other compat provider is
+		// false here rather than inheriting a claim it cannot serve.
+		//
+		// siliconflow and vercel were picked deliberately as the pair: the two
+		// vendors report usage in the two different places the compat mapping
+		// reads (top-level "tokens" vs. meta.billed_units), so live probing both
+		// exercises the whole mapping instead of half of it.
 		SiliconFlow: {chat: true, models: true, embeddings: true, rerank: true},
 		Together:    {chat: true, models: true, embeddings: true},
 		VLLM:        {chat: true, models: true, embeddings: true},
-		Vercel:      {chat: true, models: true, modelTasks: true, embeddings: true, imageGen: true},
+		Vercel:      {chat: true, models: true, modelTasks: true, embeddings: true, rerank: true, imageGen: true},
 		Zhipu:       {chat: true, models: true, embeddings: true},
 	}
 	if len(want) != len(factories) {

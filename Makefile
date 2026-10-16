@@ -1,16 +1,27 @@
-.PHONY: help test test-race cover lint api-compat probe probe-all live install clean
+.PHONY: help test test-race cover cover-check bench lint api-compat fuzz check-fuzz probe probe-all live install clean
 
 # PROVIDER selects which vendor `make probe` targets.
 PROVIDER ?= deepseek
+
+# FUZZTIME is the per-target budget for `make fuzz`. Fixed counts, not a
+# duration: Go can fail a duration-based -fuzztime spuriously (go.dev/issue/75804).
+FUZZTIME ?= 20000x
+
+# BENCHTIME is the per-benchmark budget for `make bench`.
+BENCHTIME ?= 1s
 
 help:
 	@echo "llmkit"
 	@echo
 	@echo "  make test                    离线测试（不需要 key，不产生费用）"
 	@echo "  make test-race               同上 + race 检测"
-	@echo "  make cover                   覆盖率报告"
+	@echo "  make cover                   重新生成覆盖率表（跨包口径，写回 README）"
+	@echo "  make cover-check             只校验 README 的覆盖率表是否过期"
+	@echo "  make bench                   跑基准测试（基线，不是门禁；见 docs/benchmarks.md）"
 	@echo "  make lint                    gofmt + vet + 零依赖校验"
 	@echo "  make api-compat              对比最近 release tag 的导出 API（见 STABILITY.md）"
+	@echo "  make fuzz                    跑全部 fuzz 目标（FUZZTIME 覆盖单目标预算）"
+	@echo "  make check-fuzz              校验 fuzz 包级自动发现与源码一致"
 	@echo
 	@echo "  make probe PROVIDER=deepseek 用你的 key 实测一家厂商的能力"
 	@echo "  make probe-all               实测所有配了 key 的厂商"
@@ -26,10 +37,22 @@ test:
 test-race:
 	go test ./... -race -count=1
 
+# The coverage basis and the rounding rule live in tools/coverage-table, and
+# both the README table and the CI guard go through that one command — the old
+# numbers came from two different commands and could not be reconciled.
 cover:
-	@go test ./... -coverprofile=coverage.out >/dev/null
-	@go tool cover -func=coverage.out | tail -1
+	@go test ./... -coverpkg=./... -coverprofile=coverage.out >/dev/null
+	@go run ./tools/coverage-table
 	@echo "详细报告: go tool cover -html=coverage.out"
+
+cover-check:
+	@bash .github/scripts/check-coverage-table.sh
+
+# Benchmarks are a recorded baseline, not a gate: no threshold fails CI.
+# docs/benchmarks.md holds the last recorded numbers and the machine they
+# came from, so a shift here is only interesting if it is explained there.
+bench:
+	go test ./... -run '^$$' -bench . -benchmem -benchtime=$(BENCHTIME)
 
 lint:
 	@unformatted=$$(gofmt -l .); \
@@ -42,6 +65,15 @@ lint:
 # BASE 覆盖对比基线，默认取最近的 release tag。
 api-compat:
 	@bash .github/scripts/check-api-compat.sh $(BASE)
+
+# The package list is discovered by the script, so this stays in sync with CI
+# without a second hand-maintained list.
+fuzz:
+	bash .github/scripts/run-fuzz.sh $(FUZZTIME) --all
+
+check-fuzz:
+	bash .github/scripts/test-fuzz-scripts.sh
+	bash .github/scripts/check-fuzz-targets.sh
 
 probe:
 	go run ./cmd/llmkit-probe $(PROVIDER) $(ARGS)

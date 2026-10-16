@@ -1,13 +1,15 @@
 // Package vercel wraps Vercel AI Gateway as an OpenAI-compatible aggregator
 // provider. Vercel's API at https://ai-gateway.vercel.sh/v1 is 1:1 OpenAI
-// Chat Completions / Embeddings / Models, so we ride on top of compat.New for
-// the chat path and only override ListModels to pull Vercel's richer metadata
-// (context_window + display name straight from the upstream).
+// Chat Completions / Embeddings / Models, and the gateway additionally serves a
+// Cohere-dialect rerank route at /v1/rerank. The adapter shares a compat
+// provider between chat and rerank, and overrides ListModels to pull Vercel's
+// richer metadata (context_window + display name straight from the upstream).
 package vercel
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -24,8 +26,9 @@ const (
 	defaultBaseURL = "https://ai-gateway.vercel.sh/v1"
 )
 
-// Provider embeds the OpenAI-compat surface and adds a ListModels override
-// that surfaces Vercel's per-model context_window + human-readable name.
+// Provider embeds the OpenAI-compat surface, adds the gateway's Cohere-dialect
+// rerank route, and overrides ListModels to surface Vercel's per-model
+// context_window + human-readable name.
 type Provider struct {
 	*compat.Provider
 	baseURL string
@@ -36,6 +39,16 @@ type Provider struct {
 // official endpoint; env VERCEL_BASE_URL or yaml providers.vercel_base_url can
 // override (handled by config loader). Mirrors easyrouter's normalize so users
 // can configure just the host root and we'll append /v1.
+//
+// Why this gateway is the adapter that opts into rerank: the route it serves is
+//
+//	POST https://ai-gateway.vercel.sh/v1/rerank
+//
+// which is exactly what compat.WithRerank derives from this base URL, and it
+// speaks Cohere's dialect — the response carries meta.billed_units.search_units
+// rather than the top-level "tokens" object SiliconFlow uses. Both halves of the
+// compat usage mapping are therefore reachable by a real vendor, which is what
+// the second implementation is for.
 func New(baseURL string) *Provider {
 	baseURL = normalizeBaseURL(baseURL)
 	outboundTransport := httpx.NewOutbound()
@@ -57,6 +70,17 @@ func New(baseURL string) *Provider {
 			Transport: outboundTransport,
 		},
 	}
+}
+
+// Rerank scores documents through the gateway's /v1/rerank route.
+func (p *Provider) Rerank(ctx context.Context, apiKey, model string, req *provider.RerankRequest) (*provider.RerankResponse, error) {
+	if p == nil || p.Provider == nil {
+		return nil, fmt.Errorf("vercel rerank: compat provider is required")
+	}
+	// Keep Provider directly embedded for existing keyed literals and field
+	// assignments. The local wrapper shares its current endpoint and transport.
+	reranker := compat.WithRerank{Provider: p.Provider}
+	return reranker.Rerank(ctx, apiKey, model, req)
 }
 
 // normalizeBaseURL accepts either a full /v1 URL or a host root and ensures
