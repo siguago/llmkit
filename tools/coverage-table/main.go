@@ -14,13 +14,13 @@
 //
 // Usage:
 //
-//	go test ./... -coverpkg=./... -coverprofile=coverage.out
-//	go run ./tools/coverage-table            # rewrite README.md in place
-//	go run ./tools/coverage-table -check     # exit 1 if README.md is stale
+//	make cover         # pinned Go, fresh profile, rewrite README.md in place
+//	make cover-check   # same basis; exit 1 if README.md is stale
 //
-// The measurement basis and the rounding rule are fixed here and nowhere else:
-// cross-package (-coverpkg=./...), one decimal, round-half-up on statement
-// counts. The generated prose states the same thing, so the two cannot drift.
+// The entrypoint measures cross-package (-coverpkg=./...) coverage. Rendering
+// rounds statement counts half-up to one decimal. The script selects the exact
+// toolchain in .github/coverage-go-version; the generated prose reads that same
+// file.
 package main
 
 import (
@@ -32,6 +32,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +62,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	version, err := readCoverageVersion(moduleRoot)
+	if err != nil {
+		return err
+	}
+	if got := runtime.Version(); got != "go"+version {
+		return fmt.Errorf("coverage table requires Go %s (running %s); run `make cover` or `make cover-check`", version, got)
+	}
 	counts, err := readProfile(*profilePath, modulePath)
 	if err != nil {
 		return err
@@ -83,7 +92,7 @@ func run() error {
 			fmt.Printf("%s: coverage table is current\n", *readmePath)
 			return nil
 		}
-		return fmt.Errorf("%s: coverage table is stale — run `go run ./tools/coverage-table`\n%s", *readmePath, diffBlocks(string(current), block))
+		return fmt.Errorf("%s: coverage table is stale — run `make cover`\n%s", *readmePath, diffBlocks(string(current), block))
 	}
 	if updated == string(current) {
 		fmt.Printf("%s: coverage table already current\n", *readmePath)
@@ -253,10 +262,10 @@ func packageOf(file, modulePath string) (string, error) {
 	return pkg, nil
 }
 
-// percent rounds half-up to one decimal. The rule is fixed here so the table is
-// a pure function of the profile. Note that `go tool cover -func` truncates
-// instead, so its own total line can differ from this one by 0.1 — the
-// generated block says as much, and `make cover` reports this number.
+// percent rounds half-up to one decimal. The fixed rule makes the table a pure
+// function of the profile. The function-level `go tool cover -func` total can
+// use a different denominator: this table includes every profile block, even
+// those outside function declarations.
 func percent(covered, total int) float64 {
 	if total <= 0 {
 		return 0
@@ -366,7 +375,7 @@ func rows(thin map[string]bool) []row {
 		pkgRow("cmd/llmkit-probe", "参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到"),
 		row{
 			label: "`tools/*`（%d 个开发工具）",
-			note:  "只被 `go run` 调用，不属于库的行为面，恒为 0%；计入分母是因为口径不排除任何包",
+			note:  "覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母",
 			match: func(pkg string) bool { return pkg == "tools" || strings.HasPrefix(pkg, "tools/") },
 		},
 		row{
@@ -385,6 +394,10 @@ var adapterRowNotes = map[string]string{
 }
 
 func render(counts map[string]stats, moduleRoot string) (string, error) {
+	banner, err := coverageBanner(moduleRoot)
+	if err != nil {
+		return "", err
+	}
 	packages := make([]string, 0, len(counts))
 	for pkg := range counts {
 		packages = append(packages, pkg)
@@ -446,7 +459,7 @@ func render(counts map[string]stats, moduleRoot string) (string, error) {
 	var out strings.Builder
 	out.WriteString(startMarker)
 	out.WriteString("\n")
-	out.WriteString(coverageBanner)
+	out.WriteString(banner)
 	out.WriteString("| 包 | 覆盖率 | 备注 |\n")
 	out.WriteString("|---|---|---|\n")
 	out.WriteString(body.String())
@@ -457,19 +470,39 @@ func render(counts map[string]stats, moduleRoot string) (string, error) {
 	return out.String(), nil
 }
 
-// coverageBanner is generated along with the table because it states the basis
-// the numbers were produced under; leaving it hand-written is how the two
-// measurements (66% and 70%) ended up quoted side by side as if comparable.
-const coverageBanner = `覆盖率现状。口径**跨包**，一条命令产出 —— 跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（` + "`go test ./... -coverprofile`" + `）只统计包自己的测试，两者数字不可混用：
+func readCoverageVersion(moduleRoot string) (string, error) {
+	versionFile := filepath.Join(moduleRoot, ".github", "coverage-go-version")
+	data, err := os.ReadFile(versionFile)
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(string(data))
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) {
+		return "", fmt.Errorf("%s: want an exact Go patch version, got %q", versionFile, version)
+	}
+	return version, nil
+}
 
-` + "```bash" + `
-go test ./... -coverpkg=./... -coverprofile=coverage.out
-go run ./tools/coverage-table        # 重新生成下表；-check 只校验
-` + "```" + `
+// The version and measurement instructions are generated with the numbers, so
+// the table cannot silently describe a different measurement toolchain.
+func coverageBanner(moduleRoot string) (string, error) {
+	version, err := readCoverageVersion(moduleRoot)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`覆盖率现状。口径**跨包**，使用 **Go %s**；精确工具链版本由 `+"`.github/coverage-go-version`"+` 统一维护。Go 补丁版本也可能改变语句数统计，升级该文件后需重新生成下表。
 
-百分比按语句数四舍五入到一位小数，分母是 profile 里的**每一个语句块**。` + "`go tool cover -func`" + ` 的 total 行只累计函数体内的块（包级声明的块不计入），所以它的总数比这里略小、百分比也略有出入。
+跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（`+"`go test ./... -coverprofile`"+`）只统计包自己的测试，两者数字不可混用：
 
-`
+`+"```bash"+`
+make cover         # 固定工具链生成下表，保留 coverage.out 供 HTML 报告使用
+make cover-check   # 同一口径重新测量，只校验下表是否过期
+`+"```"+`
+
+百分比按语句数四舍五入到一位小数，分母是 profile 里的**每一个语句块**。`+"`go tool cover -func`"+` 的 total 行只累计函数声明内的块（包级声明的块不计入），所以它的总数比这里略小、百分比也可能略有出入。
+
+`, version), nil
+}
 
 // value renders the coverage cell for one row.
 func value(members []string, counts map[string]stats, kind rowKind) string {

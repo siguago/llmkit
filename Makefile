@@ -37,12 +37,10 @@ test:
 test-race:
 	go test ./... -race -count=1
 
-# The coverage basis and the rounding rule live in tools/coverage-table, and
-# both the README table and the CI guard go through that one command — the old
-# numbers came from two different commands and could not be reconciled.
+# Generation and verification share the exact toolchain and measurement flags.
+# Even Go patch releases can change coverage instrumentation.
 cover:
-	@go test ./... -coverpkg=./... -coverprofile=coverage.out >/dev/null
-	@go run ./tools/coverage-table
+	@bash .github/scripts/check-coverage-table.sh --write
 	@echo "详细报告: go tool cover -html=coverage.out"
 
 cover-check:

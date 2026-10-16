@@ -887,48 +887,50 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 更贵或更慢的几项要再显式开一道，避免日常冒烟意外扩大耗时和费用：`-media`（图像/视频）、`LLMKIT_RUN_BATCH=1`（Files 与 Batch 全生命周期）、`LLMKIT_RUN_NATIVE_BACKGROUND=1`、`LLMKIT_RUN_NATIVE_THINKING=1`。这些测试都会清理自己创建的资源 —— 上传的文件一律删除，创建的 batch 一律取消（被取消的 OpenAI batch 对象删不掉，会留在账号里直到上游归档）。
 
 <!-- coverage-table:start -->
-覆盖率现状。口径**跨包**，一条命令产出 —— 跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（`go test ./... -coverprofile`）只统计包自己的测试，两者数字不可混用：
+覆盖率现状。口径**跨包**，使用 **Go 1.27.2**；精确工具链版本由 `.github/coverage-go-version` 统一维护。Go 补丁版本也可能改变语句数统计，升级该文件后需重新生成下表。
+
+跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（`go test ./... -coverprofile`）只统计包自己的测试，两者数字不可混用：
 
 ```bash
-go test ./... -coverpkg=./... -coverprofile=coverage.out
-go run ./tools/coverage-table        # 重新生成下表；-check 只校验
+make cover         # 固定工具链生成下表，保留 coverage.out 供 HTML 报告使用
+make cover-check   # 同一口径重新测量，只校验下表是否过期
 ```
 
-百分比按语句数四舍五入到一位小数，分母是 profile 里的**每一个语句块**。`go tool cover -func` 的 total 行只累计函数体内的块（包级声明的块不计入），所以它的总数比这里略小、百分比也略有出入。
+百分比按语句数四舍五入到一位小数，分母是 profile 里的**每一个语句块**。`go tool cover -func` 的 total 行只累计函数声明内的块（包级声明的块不计入），所以它的总数比这里略小、百分比也可能略有出入。
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
-| 门面层（根包） | 87.2% |  |
+| 门面层（根包） | 86.0% |  |
 | `internal/logging` | 100.0% |  |
-| `internal/safehttp` | 96.8% | SSRF 拨号拦截、大小上限、重定向降级、MIME 双重校验各有断言 |
+| `internal/safehttp` | 96.4% | SSRF 拨号拦截、大小上限、重定向降级、MIME 双重校验各有断言 |
 | `internal/httpx` | 94.3% |  |
-| `internal/sse` | 92.7% |  |
+| `internal/sse` | 92.4% |  |
 | `internal/ipprivacy` | 80.0% |  |
 | `protocol/openaifiles` | 92.1% |  |
-| `protocol/openaibatch` | 89.2% | JSONL 编解码含 fuzz |
-| `protocol/anthropic` | 80.1% |  |
-| `protocol/responses` | 72.4% |  |
-| `provider` | 96.3% | 跨全部适配器共享的类型、流策略与守卫 |
-| `provider/compat` | 86.1% | OpenAI 兼容适配器的公共基座：chat/stream 读取、能力裁剪、rerank 方言 |
-| `provider/*` 适配层（区间） | 67.7–100.0% | 迁移自一个跑在生产上的网关，路径被真实流量验证过；这一行是全部适配器的跨度 |
-| `provider/anthropic` | 83.7% |  |
-| `provider/dashscope` | 73.6% |  |
-| `provider/deepseek` | 85.6% |  |
-| `provider/easyrouter` | 74.3% |  |
-| `provider/gemini` | 69.5% |  |
-| `provider/minimax` | 90.6% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
+| `protocol/openaibatch` | 88.8% | JSONL 编解码含 fuzz |
+| `protocol/anthropic` | 79.9% |  |
+| `protocol/responses` | 71.7% |  |
+| `provider` | 96.1% | 跨全部适配器共享的类型、流策略与守卫 |
+| `provider/compat` | 83.2% | OpenAI 兼容适配器的公共基座：chat/stream 读取、能力裁剪、rerank 方言 |
+| `provider/*` 适配层（区间） | 66.2–100.0% | 迁移自一个跑在生产上的网关，路径被真实流量验证过；这一行是全部适配器的跨度 |
+| `provider/anthropic` | 82.4% |  |
+| `provider/dashscope` | 72.7% |  |
+| `provider/deepseek` | 83.4% |  |
+| `provider/easyrouter` | 71.9% |  |
+| `provider/gemini` | 66.8% |  |
+| `provider/minimax` | 89.7% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
 | `provider/moonshot` | 90.6% |  |
-| `provider/openai` | 78.0% |  |
-| `provider/openrouter` | 84.0% | 媒体资产归一化（把 raw 条目替换成规范化条目）有专门的回归测试 |
-| `provider/vercel` | 98.4% |  |
-| `provider/volcengine` | 67.7% |  |
+| `provider/openai` | 76.5% |  |
+| `provider/openrouter` | 81.7% | 媒体资产归一化（把 raw 条目替换成规范化条目）有专门的回归测试 |
+| `provider/vercel` | 98.3% |  |
+| `provider/volcengine` | 66.2% |  |
 | `provider/zhipu` | 90.0% |  |
 | `provider/siliconflow` 等 9 个薄封装 | 100.0% | 只有构造与能力声明，没有自有测试；跨包口径下由 `provider` 包的冒烟测试执行（包内口径会显示 0%） |
-| `cmd/llmkit-probe` | 21.3% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
-| `tools/*`（1 个开发工具） | 0.0% | 只被 `go run` 调用，不属于库的行为面，恒为 0%；计入分母是因为口径不排除任何包 |
+| `cmd/llmkit-probe` | 22.2% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
+| `tools/*`（1 个开发工具） | 11.2% | 覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母 |
 | `examples/*`（15 个示例程序） | 0.0% | 示例只做编译与 `go vet` 检查，不跑真实请求，所以恒为 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母 |
 
-**总覆盖率 69.7%**（8546/12255 条语句）。
+**总覆盖率 69.4%**（7818/11260 条语句）。
 <!-- coverage-table:end -->
 
 缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
