@@ -39,7 +39,7 @@
 
 **只接入上游已 GA 的 API。** 冻结一个上游自己都没冻结的面，等于把别人的破坏性变更变成我们的。
 
-具体例子：Anthropic 的 Files API 至今需要 `anthropic-beta: files-api-2025-04-14`，因此不在 1.0 内；待其 GA 后以纯加法接入。作为对照，Anthropic Message Batches 已 GA，所以 v0.9.0 接了。
+具体例子：Anthropic 的 Files API 在 2026-08-19 GA 之前一直要求 `anthropic-beta: files-api-2025-04-14`，**这就是 1.0 没有接它的原因**；上游 GA 之后，它才具备"纯加法接入"的前提条件。反过来，截至本文写作时仍需 beta header 的端点 —— 例如 Anthropic 的 context editing（`context-management-2025-06-27`）—— 一律不进冻结面。冻结一个上游自己都声明"可能无预告破坏性变更"的面，等于把对方的变更变成我们的。
 
 用 `anthropicapi.WithBetas(...)` 给单次调用传 beta header 是**调用方的**显式选择，不构成本项目对该 beta 面的支持承诺。
 
@@ -61,7 +61,7 @@
 | 重试语义 | 各操作的计数 server 测试（打了几次就是几次） |
 | 零依赖 | CI「Verify zero dependencies」 |
 | Go 最低版本 | CI `min-go-version` job（`GOTOOLCHAIN=local`） |
-| 解析器不被畸形上游数据击穿 | 24 个 fuzz 目标，每 PR 各 10 万次执行，另有每日深度任务 |
+| 解析器不被畸形上游数据击穿 | 24 个 fuzz 目标；包级清单由 `run-fuzz.sh --discover` 自动发现、`check-fuzz-targets.sh` 与源码对账，新包新增目标不会再静默漏出 CI；每 PR 各 10 万次执行，另有每日深度任务 |
 
 `apidiff` 通过 `go run` 以钉死的版本执行，不进 `go.mod`，因此零依赖门禁不受影响。
 

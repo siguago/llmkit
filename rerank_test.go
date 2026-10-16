@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// SiliconFlow is the one bundled adapter with a rerank route, so it is the only
-// path through Client.Rerank's Reranker assertion.
+// SiliconFlow and Vercel are the two bundled adapters with a rerank route, so
+// they are the only paths through Client.Rerank's Reranker assertion.
 //
 // The request body here mirrors the "rerank" example in README.md — if that
 // example stops working, this fails.
@@ -91,6 +91,7 @@ func TestSupportsRerank(t *testing.T) {
 	// confer it — only an adapter that opted in via compat.NewWithRerank.
 	for name, want := range map[string]bool{
 		SiliconFlow: true,
+		Vercel:      true,
 		DeepSeek:    false,
 		OpenAI:      false,
 		Zhipu:       false,

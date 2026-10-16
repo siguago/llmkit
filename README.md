@@ -92,7 +92,7 @@ go get github.com/siguago/llmkit
 | vllm | ✅ | ✅ | — | ✅ | — | — | — | — | — |
 | openrouter | ✅ | ✅ | ✅ | — | — | ✅ | — | ✅ | — |
 | easyrouter | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | ✅ | — |
-| vercel | ✅ | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
+| vercel | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
 
 对应的探测方法：`SupportsChat` / `SupportsModels` / `SupportsModelTaskTypes` / `SupportsEmbeddings` / `SupportsRerank` / `SupportsImageGeneration` / `SupportsImageEditing` / `SupportsVideoGeneration` / `SupportsVideoCancellation`。
 
@@ -126,7 +126,7 @@ Responses 的能力按端点分别探测：`SupportsResponses`、`SupportsRespon
 | OpenAI Batch | 直连 OpenAI | create / retrieve / list / cancel ✅ + JSONL 输入输出 helper |
 | Anthropic Message Batches | 直连 Anthropic | create / retrieve / list / cancel / delete / results ✅ |
 
-对应 `SupportsFileUpload` / `SupportsFileListing` / `SupportsFileRetrieval` / `SupportsFileDeletion` / `SupportsFileContentDownload`、`SupportsBatchCreation` / `SupportsBatchRetrieval` / `SupportsBatchListing` / `SupportsBatchCancellation`，以及 `SupportsAnthropicMessageBatchCreation` / `...Retrieval` / `...Listing` / `...Cancellation` / `...Deletion` / `...Results`。Anthropic 的 Files API 上游仍是 beta（`files-api-2025-04-14`），按[1.0 计划](V1_RELEASE_PLAN.md)不接 beta 面，待 GA 后接入。
+对应 `SupportsFileUpload` / `SupportsFileListing` / `SupportsFileRetrieval` / `SupportsFileDeletion` / `SupportsFileContentDownload`、`SupportsBatchCreation` / `SupportsBatchRetrieval` / `SupportsBatchListing` / `SupportsBatchCancellation`，以及 `SupportsAnthropicMessageBatchCreation` / `...Retrieval` / `...Listing` / `...Cancellation` / `...Deletion` / `...Results`。Anthropic 的 Files API 已于 **2026-08-19 GA**，不再要求 `anthropic-beta: files-api-2025-04-14`；本库尚未接入，这是**排期问题，不是上游仍在 beta** —— 它已列在下面的 [1.x 路线](#不做什么--1x-路线)里。
 
 Anthropic 原生响应按官方 schema 严格校验稳定身份字段、`type=message`、`role=assistant` 和必填 usage 计数器。某些中转站或私有部署会精简这些字段；这种载荷会返回 `anthropicapi.ErrInvalidWire`，不会被补成看似成功的零值消息。非官方端点应先验证同步响应和流式 `message_start` 的实际 wire shape，再声明原生 Messages 能力。
 
@@ -217,7 +217,9 @@ for _, r := range resp.Results {
 
 `RelevanceScore` 的量纲**不跨厂商也不跨模型可比** —— 有的给 0..1 概率，有的给无界 logit。用它排序、用它跟你为那个具体模型调好的阈值比较，别拿去跨模型比。
 
-目前只有 siliconflow 一家实现。rerank 不属于 OpenAI API，所以 compat 层默认不带它，得由 adapter 显式选用 `compat.NewWithRerank` —— 否则 21 家 compat 厂商会集体声称支持一条大多数都没有的路由。厂商特有参数（比如硅基流动的 `max_chunks_per_doc`）走 `ProviderOptions["siliconflow"]`。
+目前只有 **siliconflow** 和 **vercel** 两家实现，这两家是刻意选的：rerank 的 usage 在不同厂商那里落在不同字段，siliconflow 报 token 计数（顶层 `tokens`），Vercel 网关走的是 Cohere 那套方言、报 `meta.billed_units.search_units`（计费单位，不是 token）—— 两家合起来才把 `Usage` 的映射跑全。选两家而不是一家，也是为了排序验收：单家只能证明"这条路由能通"，两家才能说明它不是把某家的偶发行为写进了统一语义。
+
+rerank 不属于 OpenAI API，所以 compat 层默认不带它，得由 adapter 显式使用 `compat.WithRerank`（通常通过 `compat.NewWithRerank` 构造）—— 否则 21 家 compat 厂商会集体声称支持一条大多数都没有的路由。厂商特有参数（比如硅基流动的 `max_chunks_per_doc`）走 `ProviderOptions["siliconflow"]`。可运行示例见 [examples/rerank](examples/rerank/main.go)。
 
 ---
 
@@ -717,6 +719,7 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/tools
 GEMINI_API_KEY=...     go run ./examples/vision ./photo.png
 OPENAI_API_KEY=sk-...  go run ./examples/structured
 SILICONFLOW_API_KEY=sk-... go run ./examples/embeddings
+SILICONFLOW_API_KEY=sk-... go run ./examples/rerank          # 换 PROVIDER=vercel 试第二家
 OPENAI_API_KEY=sk-...  go run ./examples/images "一只柴犬"
 GEMINI_API_KEY=...     go run ./examples/videos
 OPENAI_API_KEY=sk-...  go run ./examples/responses -mode=sync
@@ -753,9 +756,9 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 
 | 待接 | 前提 |
 |---|---|
-| Anthropic Files API | 上游仍是 beta（`files-api-2025-04-14`）。OpenAI Files 已 GA，v0.8.0 接了 |
+| Anthropic Files API | 已于 **2026-08-19 GA**，无需 beta header。此前因上游带 beta 头未接；现按 GA 形状接入即可（`expires_in_seconds` / `expires_at`，分页用 `page` / `next_page`，批量下载用 `ids[]`） |
 | Batch webhook 事件 | 完成通知未接；当前轮询用 `WaitBatch` / `WaitAnthropicMessageBatch` |
-| rerank 第二家实现 | Cohere 形状的 usage 已按契约实现但无厂商实测，接第二家时一并验 |
+| rerank 第二家实现 | 已完成：接入了 vercel（网关的 Cohere 方言 `/v1/rerank`）。排序与 usage 的**线上**验收仍需各家 key，单独验收 Vercel 可运行 `go test -tags=integration -v -run '^TestLiveRerank$/^vercel$' .` |
 | 其余厂商的 Files / Batch | 智谱、Moonshot 等 OpenAI 形状厂商，逐家验证 wire 后 opt in |
 
 **明确的非目标**（除非另立计划，1.x 都不做）：
@@ -883,39 +886,72 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 
 更贵或更慢的几项要再显式开一道，避免日常冒烟意外扩大耗时和费用：`-media`（图像/视频）、`LLMKIT_RUN_BATCH=1`（Files 与 Batch 全生命周期）、`LLMKIT_RUN_NATIVE_BACKGROUND=1`、`LLMKIT_RUN_NATIVE_THINKING=1`。这些测试都会清理自己创建的资源 —— 上传的文件一律删除，创建的 batch 一律取消（被取消的 OpenAI batch 对象删不掉，会留在账号里直到上游归档）。
 
-覆盖率现状（`make cover`）：
+<!-- coverage-table:start -->
+覆盖率现状。口径**跨包**，使用 **Go 1.27.2**；精确工具链版本由 `.github/coverage-go-version` 统一维护。Go 补丁版本也可能改变语句数统计，升级该文件后需重新生成下表。
+
+跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（`go test ./... -coverprofile`）只统计包自己的测试，两者数字不可混用：
+
+```bash
+make cover         # 固定工具链生成下表，保留 coverage.out 供 HTML 报告使用
+make cover-check   # 同一口径重新测量，只校验下表是否过期
+```
+
+百分比按语句数四舍五入到一位小数，分母是 profile 里的**每一个语句块**。`go tool cover -func` 的 total 行只累计函数声明内的块（包级声明的块不计入），所以它的总数比这里略小、百分比也可能略有出入。
 
 | 包 | 覆盖率 | 备注 |
 |---|---|---|
-| 门面层（根包） | 85% | |
-| `internal/logging` | 100% | |
-| `internal/safehttp` | 96% | SSRF 拨号拦截、大小上限、重定向降级、MIME 双重校验各有断言 |
-| `internal/httpx` | 94% | |
-| `internal/sse` | 92% | |
-| `internal/ipprivacy` | 80% | |
-| `protocol/openaifiles` | 92% | |
-| `protocol/openaibatch` | 90% | JSONL 编解码含 fuzz |
-| `protocol/anthropic` | 80% | |
-| `protocol/responses` | 70% | |
-| `provider`（公共类型与流策略） | 76% | |
-| `provider/*` 适配层 | 48–98% | 迁移自一个跑在生产上的网关，路径被真实流量验证过 |
-| `provider/vercel` | 98% | |
-| `provider/minimax` | 90% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
-| `cmd/llmkit-probe` | 22% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
-| `provider/siliconflow` 等薄封装 | 0% | 构造与 chat/stream 路径由 `provider` 包的冒烟测试覆盖，故本包自身显示 0% |
+| 门面层（根包） | 86.0% |  |
+| `internal/logging` | 100.0% |  |
+| `internal/safehttp` | 96.4% | SSRF 拨号拦截、大小上限、重定向降级、MIME 双重校验各有断言 |
+| `internal/httpx` | 94.3% |  |
+| `internal/sse` | 92.4% |  |
+| `internal/ipprivacy` | 80.0% |  |
+| `protocol/openaifiles` | 92.1% |  |
+| `protocol/openaibatch` | 88.8% | JSONL 编解码含 fuzz |
+| `protocol/anthropic` | 79.9% |  |
+| `protocol/responses` | 71.7% |  |
+| `provider` | 96.1% | 跨全部适配器共享的类型、流策略与守卫 |
+| `provider/compat` | 83.2% | OpenAI 兼容适配器的公共基座：chat/stream 读取、能力裁剪、rerank 方言 |
+| `provider/*` 适配层（区间） | 66.2–100.0% | 迁移自一个跑在生产上的网关，路径被真实流量验证过；这一行是全部适配器的跨度 |
+| `provider/anthropic` | 82.4% |  |
+| `provider/dashscope` | 72.7% |  |
+| `provider/deepseek` | 83.4% |  |
+| `provider/easyrouter` | 71.9% |  |
+| `provider/gemini` | 66.8% |  |
+| `provider/minimax` | 89.7% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
+| `provider/moonshot` | 90.6% |  |
+| `provider/openai` | 76.5% |  |
+| `provider/openrouter` | 81.7% | 媒体资产归一化（把 raw 条目替换成规范化条目）有专门的回归测试 |
+| `provider/vercel` | 98.3% |  |
+| `provider/volcengine` | 66.2% |  |
+| `provider/zhipu` | 90.0% |  |
+| `provider/siliconflow` 等 9 个薄封装 | 100.0% | 只有构造与能力声明，没有自有测试；跨包口径下由 `provider` 包的冒烟测试执行（包内口径会显示 0%） |
+| `cmd/llmkit-probe` | 22.2% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
+| `tools/*`（1 个开发工具） | 11.2% | 覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母 |
+| `examples/*`（15 个示例程序） | 0.0% | 示例只做编译与 `go vet` 检查，不跑真实请求，所以恒为 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母 |
 
-总覆盖率 66%。缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
+**总覆盖率 69.4%**（7818/11260 条语句）。
+<!-- coverage-table:end -->
+
+缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
+
+上面这张表由 `tools/coverage-table` 生成，手改会被 CI 打回；一个新包如果没有对应行，生成器会直接报错而不是让它在文档里消失。性能基线（SSE 帧解析、Batch JSONL、Accumulator、`backoff`）记录在 [docs/benchmarks.md](docs/benchmarks.md) —— 同样是记录用，不设阈值。
 
 ---
 
 ## 贡献
 
-欢迎 issue 和 PR。提 PR 前跑一遍 CI 跑的那套：
+欢迎 issue 和 PR。**但安全问题请不要开公开 issue** —— 凭据处理、SSRF、IP 隐私这类问题的复现细节本身就是可利用的信息，请走 [SECURITY.md](SECURITY.md) 里的私密披露入口。
+
+提 PR 前跑一遍 CI 跑的那套：
 
 ```bash
 make lint        # gofmt + vet + 零依赖校验
 make test-race
+make cover       # 顺带把上面那张覆盖率表重新生成一遍
 ```
+
+改了热点路径的话，再跑一次基准看一眼量级（`make bench BENCHTIME=200x`），数字明显动了就在 PR 里说明。
 
 **保持零依赖**是这个库的设计约束 —— `make lint` 和 CI 都会检查 `go.mod` 是否混入第三方 require。
 

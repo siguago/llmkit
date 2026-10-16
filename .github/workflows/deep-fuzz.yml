@@ -3,8 +3,8 @@ name: Deep fuzz
 on:
   schedule:
     # 02:17 Asia/Shanghai. Fixed-count fuzzing avoids Go issue 75804 until the
-    # toolchain can move to a release carrying the fix — not 1.27, whose rc2 was
-    # cut without it; expect Go 1.28.
+    # toolchain can move to a release carrying the fix — 1.27 does not carry it,
+    # so this stays fixed-count; expect the fix in Go 1.28.
     - cron: '17 18 * * *'
   workflow_dispatch:
 
@@ -16,31 +16,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The package set is discovered from the source tree rather than listed here:
+  # a new fuzz target in a new package must join this scheduled gate by
+  # existing. check-fuzz-targets.sh (in CI) guards the discovery rule.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          cache: false
+      - name: Discover packages with fuzz targets
+        id: matrix
+        run: |
+          packages=$(bash .github/scripts/run-fuzz.sh --discover)
+          if [ -z "$packages" ]; then
+            echo "no packages declared fuzz targets" >&2
+            exit 1
+          fi
+          printf '%s\n' "$packages"
+          # A slash is illegal in job and artifact names, so fold each package
+          # path into a hyphenated name (./provider/compat -> provider-compat).
+          matrix=$(printf '%s\n' "$packages" |
+            jq -R -s -c 'split("\n") | map(select(length > 0))
+              | map({name: (sub("^\\./"; "") | gsub("/"; "-")), package: .})')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   fuzz:
     name: fuzz (${{ matrix.name }})
+    needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: provider-compat
-            package: ./provider/compat/
-          - name: provider
-            package: ./provider/
-          - name: sse
-            package: ./internal/sse/
-          - name: responses
-            package: ./protocol/responses/
-          - name: anthropic
-            package: ./protocol/anthropic/
-          - name: openai-batch
-            package: ./protocol/openaibatch/
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.27'
           cache: false
 
       # 24 targets x 500,000 executions gives this scheduled run a slightly

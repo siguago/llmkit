@@ -77,6 +77,37 @@ func TestRerank_RequestShape(t *testing.T) {
 	}
 }
 
+func TestRerank_FollowsReplacementProviderEndpoint(t *testing.T) {
+	original := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("rerank reached the replaced provider's server")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer original.Close()
+
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/replacement/rerank" {
+			t.Errorf("path = %q, want /replacement/rerank", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer replacement-key" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, `{"results":[{"index":0,"relevance_score":0.9}]}`)
+	}))
+	defer replacement.Close()
+
+	p := NewWithRerank(Config{ProviderName: "original", BaseURL: original.URL + "/initial"})
+	p.Provider = New(Config{ProviderName: "replacement", BaseURL: replacement.URL + "/replacement"})
+	resp, err := p.Rerank(context.Background(), "replacement-key", "m", &provider.RerankRequest{
+		Query: "q", Documents: []string{"a"},
+	})
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if resp.Provider != "replacement" || len(resp.Results) != 1 {
+		t.Fatalf("response = %+v, want the replacement provider's result", resp)
+	}
+}
+
 // The defining property of this endpoint: results are score-sorted, and Index
 // is the only link back to the caller's slice.
 func TestRerank_ResultsAreScoreSortedNotPositional(t *testing.T) {

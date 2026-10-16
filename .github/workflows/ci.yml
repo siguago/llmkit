@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.27'
           # No go.sum: this module has zero third-party dependencies.
           cache: false
 
@@ -72,23 +72,24 @@ jobs:
           go vet -tags=integration ./...
           go test -tags=integration ./... -run '^$'
 
+      # The package list is discovered, never hand-maintained, so a fuzz target
+      # added to a new package joins this gate by existing. This step guards the
+      # discovery rule itself: a broken rule would otherwise shrink the gate
+      # silently instead of failing.
+      - name: Verify fuzz targets are all wired into the gate
+        run: make check-fuzz
+
       # `go test` only runs the seed corpus. Exercise every fuzz target on each
       # PR with a fixed execution budget so this remains a strict, non-flaky
       # gate. Go can spuriously fail when a duration-based -fuzztime expires
-      # (go.dev/issue/75804). The fix is on master but is in no released branch
-      # as of go1.27rc2, so it lands in Go 1.28 — do not restore duration-based
-      # runs when this job moves to 1.27. The scheduled deep-fuzz workflow
-      # carries the larger search budget in the meantime.
+      # (go.dev/issue/75804). The fix is on master but in no released branch as
+      # of go1.27 — and this job now runs 1.27 — so keep fixed-count runs until
+      # the toolchain can move to a release carrying the fix (expected Go 1.28),
+      # and only revisit duration-based runs then. The scheduled deep-fuzz
+      # workflow carries the larger search budget in the meantime.
       - name: Fuzz parsers
         id: fuzz
-        run: |
-          bash .github/scripts/run-fuzz.sh 100000x \
-            ./provider/compat/ \
-            ./provider/ \
-            ./internal/sse/ \
-            ./protocol/responses/ \
-            ./protocol/anthropic/ \
-            ./protocol/openaibatch/
+        run: bash .github/scripts/run-fuzz.sh 100000x --all
 
       # Go writes a newly discovered failure under testdata/fuzz. Stage only
       # untracked files: tracked regression seeds already exist in the tree and
@@ -163,9 +164,32 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.27'
           cache: false
       # apidiff runs through `go run` with a pinned version so it never lands
       # in go.mod and the zero-dependency gate above keeps passing.
       - name: Compare exported API against the last release
         run: bash .github/scripts/check-api-compat.sh
+
+  # README quotes a coverage table. A table nobody regenerates is worse than no
+  # table: it keeps asserting numbers that stopped being true while looking
+  # authoritative. The generator already refuses to emit a table that leaves a
+  # package unclaimed; what it cannot see is a table nobody re-ran. This job
+  # derives a fresh profile under the documented basis and diffs, so a coverage
+  # change without a regenerated table fails here instead of misleading a reader.
+  #
+  # Separate from `test` on purpose: that job already runs the suite twice (race
+  # and fuzz), and this one runs it a third time under -coverpkg. Keeping them
+  # apart keeps the failure message unambiguous and the timeouts independent.
+  coverage-table:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: .github/coverage-go-version
+          # No go.sum: this module has zero third-party dependencies.
+          cache: false
+      - name: Verify the README coverage table is current
+        run: bash .github/scripts/check-coverage-table.sh

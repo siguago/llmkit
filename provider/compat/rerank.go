@@ -26,15 +26,13 @@ import (
 // their own translation rather than bend this one.
 type WithRerank struct {
 	*Provider
-	rerankURL string
 }
 
 // NewWithRerank creates an OpenAI-compatible provider that additionally claims
 // rerank support. Use it only for vendors that actually publish the route —
 // claiming it is what makes llmkit.Client.SupportsRerank answer true.
 func NewWithRerank(cfg Config) *WithRerank {
-	p := New(cfg)
-	return &WithRerank{Provider: p, rerankURL: p.baseURL + "/rerank"}
+	return &WithRerank{Provider: New(cfg)}
 }
 
 // Rerank scores req.Documents against req.Query.
@@ -71,7 +69,9 @@ func (p *WithRerank) Rerank(ctx context.Context, apiKey, model string, req *prov
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.rerankURL, bytes.NewReader(jsonBody))
+	// Derive the route from the current embedded Provider, which callers may
+	// replace through the exported field together with its name and transport.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/rerank", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
 	}

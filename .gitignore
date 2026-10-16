@@ -12,6 +12,11 @@ image-*.png
 .idea/
 .vscode/
 
+# Agent workspaces — local session data, notes and scratch worktrees, never part
+# of the library. WorkBuddy keeps project notes under .workbuddy/memory/.
+.workbuddy/
+.claude/worktrees/
+
 # Secrets — llmkit-probe reads keys from here. Never commit it.
 .env
 .env.*
