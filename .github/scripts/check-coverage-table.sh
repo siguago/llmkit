@@ -32,11 +32,21 @@ fi
 export GOTOOLCHAIN="go$version"
 
 profile=$(mktemp "${TMPDIR:-/tmp}/llmkit-cover.XXXXXX")
-trap 'rm -f "$profile"' EXIT
+test_log=$(mktemp "${TMPDIR:-/tmp}/llmkit-cover-test.XXXXXX")
+trap 'rm -f "$profile" "$test_log"' EXIT
 
 # Cross-package: "did any test execute this statement", not "did this package's
 # own tests". The two bases are not interchangeable, and only this one is used.
-go test ./... -coverpkg=./... -coverprofile="$profile" >/dev/null
+#
+# The test output is kept instead of discarded: when the suite fails this script
+# used to exit non-zero with nothing but "job failed" in CI. Replay the log on
+# failure only, so a passing run stays quiet.
+if ! go test ./... -coverpkg=./... -coverprofile="$profile" >"$test_log" 2>&1; then
+	printf 'go test failed; replaying its output:\n' >&2
+	cat "$test_log" >&2
+	exit 1
+fi
+rm -f "$test_log"
 
 if [[ "$mode" == --write ]]; then
 	cp "$profile" coverage.out

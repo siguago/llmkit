@@ -8,10 +8,15 @@
 make bench                                  # 全部，每项 1s（BENCHTIME 可覆盖）
 make bench BENCHTIME=200x                   # 固定次数，快速冒烟
 
-go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
+# 单包按 docs 里的采集口径复现（每项 3 轮取中位数）
+go test .                          -run '^$' -bench 'BenchmarkRetryConfigBackoff' -benchmem -count=3
+go test ./internal/sse            -run '^$' -bench 'BenchmarkDecoderNext'        -benchmem -count=3
+go test ./protocol/openaibatch    -run '^$' -bench 'BenchmarkOutputReaderNext|BenchmarkEncodeInput' -benchmem -count=3
+go test ./provider/compat         -run '^$' -bench 'BenchmarkStreamReaderRecv'   -benchmem -count=3
+go test ./protocol/responses      -run '^$' -bench 'BenchmarkAccumulatorAdd'     -benchmem -count=3
 ```
 
-`-run '^$'` 是必须的：不加的话普通测试会跟着跑一遍，数字里混进测试的开销。
+`-run '^$'` 是必须的：不加的话普通测试会跟着跑一遍，数字里混进测试的开销。`make bench` 用 `go test ./...` 会**并行**跑各包（Go 默认 `-p=GOMAXPROCS`），适合看量级；要采集可对比的数字时用上面的单包命令，或加 `-p 1`。`-count=3` 取中位数，避免用单轮数字做比较。
 
 ## 记录环境
 
@@ -22,7 +27,7 @@ go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
 | Go | go1.27.1 |
 | 采集 | `-benchmem -count=3`，下表取 3 轮中位数 |
 
-换机器、换 Go 版本都会让数字整体平移，比较时请在同一次采集内比。
+换机器、换 Go 版本都会让数字整体平移，比较时请在同一次采集内比。基准**不固定 Go 版本**（与覆盖率表的固定工具链不同）：补丁版本的编译器优化也会改变绝对值，所以数字只在同一次采集内可比。下表除 `retry.backoff` 于 2026-10-16 重新采集外，其余为同机同 Go 版本的首次基线。
 
 ## 基线
 
@@ -30,7 +35,7 @@ go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
 
 `backoff` 是重试路径上唯一的纯计算 —— 其余部分（attempt 循环、定时器）被运行时调度主导。它每次失败尝试跑一次，且最容易在不经意间长出开销（一次 `time.Parse`、一次格式化、一行日志）。
 
-本节于 2026-10-16 在 macOS 27.0.1（Apple M4、Go 1.27.1）重新采集，仍取 `-benchmem -count=3` 的中位数。HTTP-date 输入设为采集开始后 24 小时，返回等待时间由 `MaxBackoff` 截断为 30 秒；计时结束后断言这一结果，避免日期过期后静默切换到计算退避。
+本节于 2026-10-16 在记录环境那台机器（macOS 26.0.1、Apple M4、Go 1.27.1）重新采集，仍取 `-benchmem -count=3` 的中位数。HTTP-date 输入设为采集开始后 24 小时，返回等待时间由 `MaxBackoff` 截断为 30 秒；计时结束后断言这一结果，避免日期过期后静默切换到计算退避。
 
 | 场景 | ns/op | B/op | allocs/op |
 |---|---|---|---|
@@ -57,7 +62,7 @@ go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
 | 场景 | ns/op | B/op | allocs/op | MB/s |
 |---|---|---|---|---|
 | `OutputReader.Next`，128 行短行（body 64 B） | 189090 | 174032 | 1028 | 238 |
-| `OutputReader.Next`，8 行大 body（256 KiB） | 3518624 | 5319839 | 86 | 600 |
+| `OutputReader.Next`，8 行大 body（256 KiB） | 3518624 | 5319839 | 86 | 596.7 |
 | `EncodeInput`，128 行 | 28073 | 0 | 0 | 670 |
 
 ### OpenAI 兼容流（`provider/compat`）
@@ -67,7 +72,7 @@ go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
 | 场景 | ns/op | ns/chunk | B/op | allocs/op | MB/s |
 |---|---|---|---|---|---|
 | `delta.content` | 499518 | 1936 | 355199 | 3359 | 78.6 |
-| `delta.reasoning` | 498229 | 1931 | 355182 | 3359 | 78.8 |
+| `delta.reasoning` | 498229 | 1931 | 355182 | 3359 | 79.8 |
 
 ### Responses Accumulator（`protocol/responses`）
 
@@ -82,7 +87,7 @@ go test ./internal/sse -run '^$' -bench . -benchmem   # 单包
 
 ## 这些数字说明了什么
 
-- **`backoff` 不是零分配的。** 3 个尊重 `Retry-After` 的场景都是 1 次 / 8 B 分配，来自 `RetryAfter` 里的 `errors.As`；不尊重时是 0 次 / 8.43 ns。绝对值可以忽略，但"纯计算"这个说法不成立。
+- **`backoff` 不是零分配的。** 两个计算退避场景与 delta-seconds 的 `Retry-After` 都是 1 次 / 8 B 分配（来自 `RetryAfter` 里的 `errors.As`），HTTP-date 形态是 3 次 / 88 B（多出来的日期解析），关闭 `RespectRetryAfter` 时才是 0 次 / 8.43 ns。绝对值可以忽略，但"纯计算"这个说法不成立。
 - **HTTP-date 形态的 `Retry-After` 比 delta-seconds 贵约 3 倍**（185 ns / 3 次分配 vs 67 ns / 1 次），日期解析是额外开销的主要来源。只有当厂商真的发日期形态时才会付。
 - **SSE 的读取边界与解析成本无关，但读得碎要加钱。** 每次 8 字节读比整块读慢约 30%，而[分块无关性是有测试钉住的](../internal/sse/decoder_test.go) —— 这条记录的是常量开销，不是正确性。
 - **大的 `data:` 字段按字节增长，churn 远大于载荷。** 单帧 64 KiB 时，4 MiB 的流会产生约 23 MB 分配：`readLine` 逐字节追加行长，`d.data` 再从零长一遍。不是 bug，但意味着放大 `maxEventBytes` 时要按分配量而不是按上限估内存。
