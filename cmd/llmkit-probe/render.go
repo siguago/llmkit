@@ -10,13 +10,16 @@ import (
 )
 
 // Output deliberately avoids color: probe output gets pasted into issues and
-// piped into files, where escape codes are noise. The four outcome markers are
+// piped into files, where escape codes are noise. The five outcome markers are
 // distinguishable in plain text.
 const (
-	markPass = "PASS"
-	markFail = "FAIL"
-	markNA   = " N/A"
-	markSkip = "SKIP"
+	markPass         = "PASS"
+	markFail         = "FAIL"
+	markNA           = " N/A"
+	markSkip         = "SKIP"
+	markIncomplete   = "INCOMPLETE"
+	resultTableWidth = 84
+	grandTotalWidth  = 81
 )
 
 func mark(o outcome) string {
@@ -27,6 +30,8 @@ func mark(o outcome) string {
 		return markFail
 	case notApplicable:
 		return markNA
+	case incomplete:
+		return markIncomplete
 	default:
 		return markSkip
 	}
@@ -34,7 +39,7 @@ func mark(o outcome) string {
 
 func printHeader(r report) {
 	fmt.Printf("llmkit probe · %s · %s\n", r.provider, r.model)
-	fmt.Println(strings.Repeat("─", 78))
+	fmt.Println(strings.Repeat("─", resultTableWidth))
 }
 
 func printSetupError(err error) {
@@ -48,7 +53,7 @@ func printSetupError(err error) {
 // rune is 3 bytes wide but 2 columns wide, so a mixed-script table drifts badly
 // with the stdlib verb.
 func printResult(res result, verbose bool) {
-	fmt.Printf("  %s  %s %s %8s\n",
+	fmt.Printf("  %-10s  %s %s %8s\n",
 		mark(res.outcome),
 		padDisplay(res.name, 20),
 		padDisplay(res.detail, 40),
@@ -88,7 +93,7 @@ func printPreflightFailure(providerName, model string, err error) {
 }
 
 func printSummary(r report) {
-	var passed, failed, na, skip int
+	var passed, failed, na, skip, unfinished int
 	for _, res := range r.results {
 		switch res.outcome {
 		case pass:
@@ -97,15 +102,20 @@ func printSummary(r report) {
 			failed++
 		case notApplicable:
 			na++
+		case incomplete:
+			unfinished++
 		default:
 			skip++
 		}
 	}
 
-	fmt.Println(strings.Repeat("─", 78))
+	fmt.Println(strings.Repeat("─", resultTableWidth))
 	parts := []string{fmt.Sprintf("%d 通过", passed)}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d 失败", failed))
+	}
+	if unfinished > 0 {
+		parts = append(parts, fmt.Sprintf("%d 未完成", unfinished))
 	}
 	if na > 0 {
 		parts = append(parts, fmt.Sprintf("%d 不适用", na))
@@ -131,18 +141,28 @@ func printSummary(r report) {
 		fmt.Println("  提示: 失败可能来自模型本身而非 SDK。换个模型试试:")
 		fmt.Printf("    llmkit-probe %s -model <其他模型> -v\n", r.provider)
 	}
+	if unfinished > 0 {
+		fmt.Println()
+		fmt.Println("  未完成项（不能据此确认能力可用）:")
+		for _, res := range r.results {
+			if res.outcome == incomplete {
+				fmt.Printf("    · %s — %s\n", res.name, res.detail)
+			}
+		}
+	}
 	fmt.Println()
 }
 
 func printGrandTotal(reports []report) {
-	fmt.Println(strings.Repeat("═", 78))
+	fmt.Println(strings.Repeat("═", grandTotalWidth))
 	fmt.Println("汇总")
-	fmt.Println(strings.Repeat("─", 78))
-	fmt.Printf("  %-13s %-26s %6s %6s %6s %10s\n", "PROVIDER", "MODEL", "通过", "失败", "不适用", "TOKENS")
+	fmt.Println(strings.Repeat("─", grandTotalWidth))
+	fmt.Printf("  %s %s %s %s %s %s %s\n", padDisplay("PROVIDER", 13), padDisplay("MODEL", 26),
+		padDisplay("通过", 6), padDisplay("失败", 6), padDisplay("未完成", 6), padDisplay("不适用", 6), padDisplay("TOKENS", 10))
 
 	var totalTokens int
 	for _, r := range reports {
-		var passed, failed, na int
+		var passed, failed, na, unfinished int
 		for _, res := range r.results {
 			switch res.outcome {
 			case pass:
@@ -151,17 +171,19 @@ func printGrandTotal(reports []report) {
 				failed++
 			case notApplicable:
 				na++
+			case incomplete:
+				unfinished++
 			}
 		}
 		totalTokens += r.tokens
-		model := truncateDisplay(r.model, 26)
+		model := padDisplay(r.model, 26)
 		if r.setupErr != nil {
-			fmt.Printf("  %-13s %-26s %s\n", r.provider, model, "初始化失败")
+			fmt.Printf("  %s %s %s\n", padDisplay(r.provider, 13), model, "初始化失败")
 			continue
 		}
-		fmt.Printf("  %-13s %-26s %6d %6d %6d %10d\n", r.provider, model, passed, failed, na, r.tokens)
+		fmt.Printf("  %s %s %6d %6d %6d %6d %10d\n", padDisplay(r.provider, 13), model, passed, failed, unfinished, na, r.tokens)
 	}
-	fmt.Println(strings.Repeat("─", 78))
+	fmt.Println(strings.Repeat("─", grandTotalWidth))
 	fmt.Printf("  %d 个 provider · 约 %d tokens\n\n", len(reports), totalTokens)
 }
 
@@ -245,7 +267,7 @@ var chatModels = map[string]string{
 	llmkit.Gemini:      "gemini-2.5-flash",
 	llmkit.XAI:         "grok-4.3",
 	llmkit.Mistral:     "mistral-large-latest", // vendor-maintained alias
-	llmkit.DeepSeek:    "deepseek-v4-flash",
+	llmkit.DeepSeek:    "deepseek-flash",
 	llmkit.Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	llmkit.Zhipu:       "glm-4.6",
 	llmkit.MiniMax:     "MiniMax-M2",
@@ -331,8 +353,25 @@ func defaultEmbedModel(p string) string  { return envOr("LLMKIT_EMBED_MODEL_", p
 func defaultRerankModel(p string) string { return envOr("LLMKIT_RERANK_MODEL_", p, rerankModels) }
 func defaultImageModel(p string) string  { return envOr("LLMKIT_IMAGE_MODEL_", p, imageModels) }
 
+// defaultVisionModel resolves the model the image-input probe sends. There is no
+// baseline table because most vendors take images on their chat model; only a
+// provider with a separate vision model needs an override. An explicit
+// -vision-model flag wins outside this function.
+func defaultVisionModel(p, chatModel string) string {
+	if model := envOr("LLMKIT_VISION_MODEL_", p, nil); model != "" {
+		return model
+	}
+	return chatModel
+}
+
+// envProviderSuffix maps a provider name to the uppercase suffix its override
+// env var uses: LLMKIT_*_DEEPSEEK, LLMKIT_*_SILICONFLOW, etc.
+func envProviderSuffix(providerName string) string {
+	return strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
+}
+
 func envOr(prefix, providerName string, table map[string]string) string {
-	key := prefix + strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
+	key := prefix + envProviderSuffix(providerName)
 	if v := os.Getenv(key); v != "" {
 		return v
 	}

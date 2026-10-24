@@ -1,6 +1,10 @@
 package llmkit
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // This file deliberately carries no build tag.
 //
@@ -14,6 +18,58 @@ import "testing"
 // The guards themselves need nothing but New + Supports*, so they belong on the
 // default build, where `go test ./...`, the race job and the Go-floor job all
 // run them. The live tests that actually spend money stay behind the tag.
+
+// liveModels is the model used per provider. Override any of them with
+// LLMKIT_TEST_MODEL_<PROVIDER>, e.g. LLMKIT_TEST_MODEL_DEEPSEEK=deepseek-flash.
+//
+// Vendor catalogs churn: models get retired and IDs get renamed. A "model not
+// found" here means the entry went stale, not that the SDK broke — re-run with
+// LLMKIT_TEST_MODEL_<PROVIDER>. TestLiveModelsCoverAllProviders keeps the table
+// from falling behind the provider list.
+var liveModels = map[string]string{
+	OpenAI:      "gpt-5",
+	Anthropic:   "claude-sonnet-4-5-20250929",
+	Gemini:      "gemini-2.5-flash",
+	XAI:         "grok-4.3",
+	Mistral:     "mistral-large-latest", // vendor-maintained alias
+	DeepSeek:    "deepseek-flash",
+	Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
+	Zhipu:       "glm-4.6",
+	MiniMax:     "MiniMax-M2",
+	SiliconFlow: "Qwen/Qwen3-8B",
+	DashScope:   "qwen-plus",
+	Volcengine:  "doubao-seed-1-6-250615",
+	Groq:        "openai/gpt-oss-120b",
+	Together:    "openai/gpt-oss-120b",
+	Fireworks:   "accounts/fireworks/models/gpt-oss-120b",
+	Cerebras:    "gpt-oss-120b",
+	// Local runtimes serve whatever you pulled or launched, so these are a
+	// plausible first guess rather than a catalog entry.
+	Ollama:     "llama3.2",
+	VLLM:       "Qwen/Qwen3-8B",
+	OpenRouter: "openai/gpt-5",
+	EasyRouter: "gpt-5",
+	Vercel:     "openai/gpt-5",
+}
+
+func liveModel(providerName string) string {
+	env := "LLMKIT_TEST_MODEL_" + strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	return liveModels[providerName]
+}
+
+// A provider with no liveModels entry would otherwise be tested with Model: "",
+// which every vendor rejects — reported as a chat failure rather than as the
+// missing table entry it is. Fail once, up front, naming the gap.
+func TestLiveModelsCoverAllProviders(t *testing.T) {
+	for _, name := range Providers() {
+		if liveModels[name] == "" {
+			t.Errorf("liveModels has no entry for %q — add one so TestLive/%s tests something", name, name)
+		}
+	}
+}
 
 // liveEmbedModels and liveRerankModels are the same idea as liveModels for the
 // non-chat routes, and need their own guard for the same reason: TestLiveEmbeddings

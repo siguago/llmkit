@@ -1,11 +1,16 @@
 // Command vision sends an image alongside text.
 //
 //	GEMINI_API_KEY=... go run ./examples/vision https://example.com/photo.jpg
-//	GEMINI_API_KEY=... go run ./examples/vision ./local/photo.png
+//	DEEPSEEK_API_KEY=... go run ./examples/vision -provider deepseek ./local/photo.png
+//	MISTRAL_API_KEY=... go run ./examples/vision -provider mistral -model pixtral-large-latest ./photo.png
+//
+// The model default is derived from -provider for the two providers this
+// example ships defaults for; any other provider needs an explicit -model.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -16,12 +21,23 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("usage: vision <image-url-or-path>")
+	providerName := flag.String("provider", llmkit.Gemini, "provider name")
+	model := flag.String("model", "", "model ID (default: gemini-2.5-flash for gemini, deepseek-flash for deepseek; required for other providers)")
+	flag.Parse()
+	if flag.NArg() != 1 {
+		log.Fatal("usage: vision [-provider name] [-model id] <image-url-or-path>")
 	}
-	src := os.Args[1]
+	src := flag.Arg(0)
 
-	client, err := llmkit.New(llmkit.Gemini)
+	if *model == "" {
+		defaultModel, err := defaultVisionModel(*providerName)
+		if err != nil {
+			log.Fatal(err)
+		}
+		*model = defaultModel
+	}
+
+	client, err := llmkit.New(*providerName)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,7 +55,7 @@ func main() {
 	}
 
 	resp, err := client.Chat(context.Background(), &llmkit.ChatRequest{
-		Model: "gemini-2.5-flash",
+		Model: *model,
 		Messages: []llmkit.Message{
 			llmkit.UserWith(
 				llmkit.Text("这张图里有什么？用中文简要描述。"),
@@ -51,6 +67,20 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println(llmkit.ResponseText(resp))
+}
+
+// defaultVisionModel derives the model from the provider. Hardcoding Gemini's
+// model ID made `-provider deepseek` send the wrong model and fail with a 404;
+// a provider without a known vision model must name one explicitly.
+func defaultVisionModel(providerName string) (string, error) {
+	switch providerName {
+	case llmkit.Gemini:
+		return "gemini-2.5-flash", nil
+	case llmkit.DeepSeek:
+		return "deepseek-flash", nil
+	default:
+		return "", fmt.Errorf("provider %q has no default vision model; pass -model <id> (see README for model names)", providerName)
+	}
 }
 
 func mimeFor(path string) string {

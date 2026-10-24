@@ -50,7 +50,7 @@ func main() {
 	const maxTurns = 5
 	for turn := range maxTurns {
 		resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-			Model:    "deepseek-v4-flash",
+			Model:    "deepseek-flash",
 			Messages: messages,
 			Tools:    tools,
 		})

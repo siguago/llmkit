@@ -29,7 +29,7 @@ func main() {
 
 	// Style 1: callback. The stream is drained and closed for you.
 	fmt.Println("--- StreamText ---")
-	_, usage, err := client.StreamText(ctx, "deepseek-v4-flash", "数到五，每个数字一行。",
+	_, usage, err := client.StreamText(ctx, "deepseek-flash", "数到五，每个数字一行。",
 		func(delta string) { fmt.Print(delta) })
 	if err != nil {
 		log.Fatal(err)

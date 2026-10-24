@@ -1,7 +1,7 @@
 // Command llmkit-probe checks what a provider can actually do with your key.
 //
-// It makes real API calls and costs real (but tiny) money — every probe caps
-// output tokens, and the total is reported when it finishes.
+// It makes real API calls and costs money. Chat probes cap output tokens,
+// and the reported token usage is totaled when the run finishes.
 //
 //	# one provider, key from the environment or a .env file
 //	DEEPSEEK_API_KEY=sk-... llmkit-probe deepseek
@@ -15,12 +15,17 @@
 //	# include image/video generation (noticeably more expensive)
 //	llmkit-probe openai -media
 //
-// A probe reports one of four outcomes:
+// A probe reports one of five outcomes:
 //
-//	PASS   the capability works
-//	FAIL   the capability should work but didn't — the reason is printed
-//	N/A    the provider or model doesn't offer it (not a defect)
-//	SKIP   not attempted (no key, or needs -media)
+//	PASS         the capability works
+//	FAIL         the capability should work but didn't — the reason is printed
+//	N/A          the provider or model doesn't offer it (not a defect); a model
+//	             that refuses an image input also lands here, with detail kept
+//	SKIP         not attempted (no key, or needs -media/-files/-batch)
+//	INCOMPLETE   finish_reason=length — the output budget ran out; unverified
+//
+// Exit status is 1 for any failure (including setup), 2 when the run only has
+// incomplete probes or the CLI usage is wrong, and 0 when neither occurred.
 package main
 
 import (
@@ -39,16 +44,17 @@ import (
 
 func main() {
 	var (
-		key      = flag.String("key", "", "API key (default: env var, or .env file)")
-		baseURL  = flag.String("base-url", "", "override the API endpoint (relay / private deployment)")
-		model    = flag.String("model", "", "chat model to probe (default: a sensible per-provider choice)")
-		media    = flag.Bool("media", false, "also probe image/video generation (slower, more expensive)")
-		files    = flag.Bool("files", false, "also probe the Files API (uploads then deletes a tiny file)")
-		batch    = flag.Bool("batch", false, "also probe the Batch API (creates then cancels a one-request batch)")
-		verbose  = flag.Bool("v", false, "print full model responses")
-		timeout  = flag.Duration("timeout", 2*time.Minute, "per-probe timeout")
-		envFile  = flag.String("env", ".env", "file to read API keys from")
-		listOnly = flag.Bool("list", false, "list supported providers and their env vars, then exit")
+		key         = flag.String("key", "", "API key (default: env var, or .env file)")
+		baseURL     = flag.String("base-url", "", "override the API endpoint (relay / private deployment)")
+		model       = flag.String("model", "", "chat model to probe (default: a sensible per-provider choice)")
+		visionModel = flag.String("vision-model", "", "model for the image-input probe (default: LLMKIT_VISION_MODEL_<PROVIDER>, then -model)")
+		media       = flag.Bool("media", false, "also probe image/video generation (slower, more expensive)")
+		files       = flag.Bool("files", false, "also probe the Files API (uploads then deletes a tiny file)")
+		batch       = flag.Bool("batch", false, "also probe the Batch API (creates then cancels a one-request batch)")
+		verbose     = flag.Bool("v", false, "print full model responses")
+		timeout     = flag.Duration("timeout", 2*time.Minute, "流式探测从建立到读完的超时")
+		envFile     = flag.String("env", ".env", "file to read API keys from")
+		listOnly    = flag.Bool("list", false, "list supported providers and their env vars, then exit")
 	)
 	flag.Usage = usage
 	// Go's flag package stops parsing at the first non-flag argument, so the
@@ -56,9 +62,9 @@ func main() {
 	// flags. Lift a leading provider name out before parsing so both orderings
 	// work.
 	providerArgs, flagArgs := splitLeadingArgs(os.Args[1:])
-	if err := flag.CommandLine.Parse(flagArgs); err != nil {
-		os.Exit(2) // flag already printed the error and usage
-	}
+	// flag.CommandLine uses flag.ExitOnError: a bad flag exits 2 after printing
+	// the error and usage, and -h exits 0, so Parse has no returning error path.
+	_ = flag.CommandLine.Parse(flagArgs)
 	providerArgs = append(providerArgs, flag.Args()...)
 
 	if *listOnly {
@@ -77,13 +83,14 @@ func main() {
 	}
 
 	opts := probeOptions{
-		model:   *model,
-		baseURL: *baseURL,
-		media:   *media,
-		files:   *files,
-		batch:   *batch,
-		verbose: *verbose,
-		timeout: *timeout,
+		model:       *model,
+		visionModel: *visionModel,
+		baseURL:     *baseURL,
+		media:       *media,
+		files:       *files,
+		batch:       *batch,
+		verbose:     *verbose,
+		timeout:     *timeout,
 	}
 
 	ctx := context.Background()
@@ -95,10 +102,8 @@ func main() {
 	if len(reports) > 1 {
 		printGrandTotal(reports)
 	}
-	for _, r := range reports {
-		if r.failed() > 0 {
-			os.Exit(1)
-		}
+	if code := reportsExitCode(reports); code != 0 {
+		os.Exit(code)
 	}
 }
 
@@ -132,8 +137,9 @@ FLAGS
 	flag.PrintDefaults()
 	fmt.Fprintf(os.Stderr, `
 COST
-  Every probe caps output tokens; a full run is a fraction of a cent per
-  provider. -media generates real images/video and costs noticeably more.
+  Chat probes cap output tokens. Cost depends on the provider and model;
+  reported token usage is totaled at the end. -media generates real
+  images/video and costs noticeably more.
 `)
 }
 
