@@ -48,7 +48,9 @@ type Provider struct {
 // speaks Cohere's dialect — the response carries meta.billed_units.search_units
 // rather than the top-level "tokens" object SiliconFlow uses. Both halves of the
 // compat usage mapping are therefore reachable by a real vendor, which is what
-// the second implementation is for.
+// the second implementation is for. The search units land on
+// Usage.BilledSearchUnits (one unit covers up to 100 documents), not on the
+// per-call Usage.RequestCount.
 func New(baseURL string) *Provider {
 	baseURL = normalizeBaseURL(baseURL)
 	outboundTransport := httpx.NewOutbound()

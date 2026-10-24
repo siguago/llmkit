@@ -4,9 +4,10 @@
 //	PROVIDER=vercel VERCEL_AI_GATEWAY_KEY=... go run ./examples/rerank
 //
 // Two providers implement this route, and they are not interchangeable by
-// accident: siliconflow reports usage as token counts, the Vercel AI Gateway
-// serves Cohere's dialect and reports it as search units. Both land in the same
-// llmkit.Usage fields.
+// accident: siliconflow reports usage as token counts, while the Vercel AI
+// Gateway serves Cohere's dialect and reports billed search units. The two
+// dimensions stay separate in llmkit.Usage: token counters vs BilledSearchUnits
+// (one search unit covers up to 100 documents).
 package main
 
 import (
@@ -71,9 +72,14 @@ func main() {
 		fmt.Printf("%d. %.4f  %s\n", rank+1, r.RelevanceScore, docs[r.Index])
 	}
 	if resp.Usage != nil {
-		fmt.Printf("\nusage: prompt=%d total=%d requests=%d (provider %s)\n",
-			resp.Usage.PromptTokens, resp.Usage.TotalTokens,
-			resp.Usage.RequestCount, resp.Provider)
+		fmt.Printf("\nusage: prompt=%d total=%d requests=%d", resp.Usage.PromptTokens,
+			resp.Usage.TotalTokens, resp.Usage.RequestCount)
+		if resp.Usage.BilledSearchUnits > 0 {
+			// Cohere-dialect vendors bill per search unit, not per token; the
+			// unit count is not a request count (100 docs still cost 1 request).
+			fmt.Printf(" billed_search_units=%d", resp.Usage.BilledSearchUnits)
+		}
+		fmt.Printf(" (provider %s)\n", resp.Provider)
 	}
 
 	// The point of the call is the reordering, so check it rather than trusting

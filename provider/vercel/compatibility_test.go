@@ -108,7 +108,8 @@ func TestProvider_CompatFieldSourceCompatibility(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Rerank: %v", err)
 			}
-			if rerank.Provider != "replacement" || len(rerank.Results) != 1 || rerank.Usage == nil || rerank.Usage.RequestCount != 1 {
+			if rerank.Provider != "replacement" || len(rerank.Results) != 1 || rerank.Usage == nil ||
+				rerank.Usage.RequestCount != 1 || rerank.Usage.BilledSearchUnits != 1 {
 				t.Fatalf("rerank response = %+v", rerank)
 			}
 		})

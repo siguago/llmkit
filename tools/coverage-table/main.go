@@ -196,6 +196,15 @@ func readProfile(profilePath, modulePath string) (map[string]stats, error) {
 			blocks[key] = blockState{pkg: pkg, numStmt: numStmt, covered: count > 0}
 			continue
 		}
+		// The same block must carry the same statement count in every copy:
+		// the copies come from identical compiler output, so a disagreement
+		// means the profile was assembled from different builds and the
+		// denominator would be arbitrary. `go tool cover` rejects this too.
+		if numStmt != state.numStmt {
+			return nil, fmt.Errorf(
+				"%s:%d: inconsistent NumStmt for %s: saw %d, an earlier sample had %d",
+				profilePath, line, name, numStmt, state.numStmt)
+		}
 		if count > 0 && !state.covered {
 			state.covered = true
 			blocks[key] = state
@@ -266,11 +275,19 @@ func packageOf(file, modulePath string) (string, error) {
 // function of the profile. The function-level `go tool cover -func` total can
 // use a different denominator: this table includes every profile block, even
 // those outside function declarations.
+//
+// The rounding is done in integers on purpose. Scaling in float64 first loses
+// the exact half at some boundaries: 1001/2000 is exactly 50.05%, but
+// float64(1001)/float64(2000)*1000 comes out just under 500.5 and used to round
+// down to 50.0 instead of half-up to 50.1.
 func percent(covered, total int) float64 {
 	if total <= 0 {
 		return 0
 	}
-	return math.Floor(float64(covered)/float64(total)*1000+0.5) / 10
+	// floor((covered*1000 + total/2) / total), with the division done once:
+	// (2*covered*1000 + total) / (2*total) rounds the tenths half-up exactly.
+	tenths := (2*int64(covered)*1000 + int64(total)) / (2 * int64(total))
+	return float64(tenths) / 10
 }
 
 type rowKind int
@@ -294,22 +311,14 @@ type row struct {
 	match func(pkg string) bool
 }
 
-// The two package sets the rows are written against.
+// isAdapter reports whether pkg is a provider adapter: a direct child of
+// provider/ other than the shared compat library. compat is the base the
+// compatible adapters build on (chat/stream readers, capability trimming,
+// rerank dialects), not an adapter itself, so the adapter spread row must not
+// include it — doing so would let the shared base widen the "adapters" interval.
 func isAdapter(pkg string) bool {
 	rest, ok := strings.CutPrefix(pkg, "provider/")
-	return ok && !strings.Contains(rest, "/")
-}
-
-// adapterPackages returns every direct child of provider/, sorted.
-func adapterPackages(packages []string) []string {
-	var out []string
-	for _, pkg := range packages {
-		if isAdapter(pkg) {
-			out = append(out, pkg)
-		}
-	}
-	sort.Strings(out)
-	return out
+	return ok && !strings.Contains(rest, "/") && rest != "compat"
 }
 
 // adapterRows names the adapters that get a row of their own. Everything else
@@ -369,10 +378,10 @@ func rows(thin map[string]bool) []row {
 	out = append(out,
 		row{
 			label: "`provider/siliconflow` 等 %d 个薄封装",
-			note:  "只有构造与能力声明，没有自有测试；跨包口径下由 `provider` 包的冒烟测试执行（包内口径会显示 0%）",
+			note:  "没有自有测试文件；跨包口径下由 `provider` 包的冒烟测试执行（这些包没有测试文件，包内口径不会单独统计）",
 			match: func(pkg string) bool { return thin[pkg] },
 		},
-		pkgRow("cmd/llmkit-probe", "参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到"),
+		pkgRow("cmd/llmkit-probe", "参数解析 / .env / 排版及探测逻辑有离线回归；真实厂商行为仍需 key 探测"),
 		row{
 			label: "`tools/*`（%d 个开发工具）",
 			note:  "覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母",
@@ -380,7 +389,7 @@ func rows(thin map[string]bool) []row {
 		},
 		row{
 			label: "`examples/*`（%d 个示例程序）",
-			note:  "示例只做编译与 `go vet` 检查，不跑真实请求，所以恒为 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母",
+			note:  "示例只做编译与 `go vet` 检查，不跑真实请求；个别纯本地逻辑有单测，所以略高于 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母",
 			match: func(pkg string) bool { return pkg == "examples" || strings.HasPrefix(pkg, "examples/") },
 		},
 	)
@@ -425,14 +434,16 @@ func render(counts map[string]stats, moduleRoot string) (string, error) {
 			}
 			members = append(members, pkg)
 		}
-		if len(members) == 0 {
-			return "", fmt.Errorf("row %q matches no package: delete it or re-scope it", current.label)
-		}
-
+		// Expand the placeholder even for an empty match, so the error below
+		// names the row as it would appear instead of dumping a raw "%d".
 		label := current.label
 		if strings.Contains(label, "%d") {
 			label = fmt.Sprintf(label, len(members))
 		}
+		if len(members) == 0 {
+			return "", fmt.Errorf("row %q matches no package: delete it or re-scope it", label)
+		}
+
 		fmt.Fprintf(&body, "| %s | %s | %s |\n", label, value(members, counts, current.kind), current.note)
 	}
 
@@ -534,10 +545,12 @@ func value(members []string, counts map[string]stats, kind rowKind) string {
 	return fmt.Sprintf("%.1f–%.1f%%", low, high)
 }
 
-// thinAdapters is the set of adapters with no test files of their own. They are
-// the ones the old table collapsed into a single "0%" row, and the rule is
-// derived rather than listed: adding a test to one of them moves it out of the
+// thinAdapters is the set of adapters with neither test files of their own nor
+// a dedicated row; the table collapses them into one aggregate row. The rule is
+// derived rather than listed: adding tests to one of them moves it out of the
 // aggregate and into the unclaimed check, which is the prompt to give it a row.
+// "Thin" therefore states exactly one thing here — no own test files — not that
+// the adapter carries no logic; the row's note must not claim more than that.
 func thinAdapters(moduleRoot string, packages []string) (map[string]bool, error) {
 	thin := make(map[string]bool)
 	for _, pkg := range packages {
@@ -580,21 +593,38 @@ func pkgDisplay(pkg string) string {
 	return pkg
 }
 
+// markerSpan returns the byte span from the start marker through the end
+// marker, inclusive. The document must hold exactly one of each: a second pair
+// would be stale text that neither --check nor --write could ever reach, so the
+// README would keep asserting two different readings while looking current.
+func markerSpan(document string) (start, end int, err error) {
+	if count := strings.Count(document, startMarker); count != 1 {
+		if count == 0 {
+			return 0, 0, fmt.Errorf("missing %s", startMarker)
+		}
+		return 0, 0, fmt.Errorf("found %d %s markers, want exactly 1", count, startMarker)
+	}
+	if count := strings.Count(document, endMarker); count != 1 {
+		if count == 0 {
+			return 0, 0, fmt.Errorf("missing %s", endMarker)
+		}
+		return 0, 0, fmt.Errorf("found %d %s markers, want exactly 1", count, endMarker)
+	}
+	start = strings.Index(document, startMarker)
+	end = strings.Index(document, endMarker)
+	if end < start {
+		return 0, 0, errors.New("the coverage-table markers are in the wrong order")
+	}
+	return start, end + len(endMarker), nil
+}
+
 // replaceBlock swaps the text between the two markers for block, keeping the
 // markers themselves in place.
 func replaceBlock(document, block string) (string, error) {
-	start := strings.Index(document, startMarker)
-	if start < 0 {
-		return "", fmt.Errorf("missing %s", startMarker)
+	start, end, err := markerSpan(document)
+	if err != nil {
+		return "", err
 	}
-	end := strings.Index(document, endMarker)
-	if end < 0 {
-		return "", fmt.Errorf("missing %s", endMarker)
-	}
-	if end < start {
-		return "", errors.New("the coverage-table markers are in the wrong order")
-	}
-	end += len(endMarker)
 	return document[:start] + block + document[end:], nil
 }
 
@@ -635,15 +665,11 @@ func diffBlocks(committed, want string) string {
 }
 
 func blockOf(document string) (string, error) {
-	start := strings.Index(document, startMarker)
-	if start < 0 {
-		return "", errors.New("missing " + startMarker)
+	start, end, err := markerSpan(document)
+	if err != nil {
+		return "", err
 	}
-	end := strings.Index(document, endMarker)
-	if end < 0 {
-		return "", errors.New("missing " + endMarker)
-	}
-	return document[start : end+len(endMarker)], nil
+	return document[start:end], nil
 }
 
 func orNone(line string) string {

@@ -29,7 +29,16 @@ const (
 	fail
 	notApplicable
 	skipped
+	incomplete
 )
+
+// Default reasoning can consume the whole output budget before text starts.
+// Keep every chat probe bounded, with enough room for a short final answer.
+const probeMaxTokens = 512
+
+// Visual reasoning needs more room than the short text prompts, even for the
+// solid-color image. Keep a separate finite cap instead of retrying the call.
+const probeVisionMaxTokens = 2048
 
 type result struct {
 	name    string
@@ -58,14 +67,32 @@ func (r report) failed() int {
 	return n
 }
 
+// Failures take priority over inconclusive probes, including setup failures
+// that prevented the capability probes from running at all.
+func reportsExitCode(reports []report) int {
+	code := 0
+	for _, r := range reports {
+		if r.setupErr != nil || r.failed() > 0 {
+			return 1
+		}
+		for _, res := range r.results {
+			if res.outcome == incomplete {
+				code = 2
+			}
+		}
+	}
+	return code
+}
+
 type probeOptions struct {
-	model   string
-	baseURL string
-	media   bool
-	files   bool
-	batch   bool
-	verbose bool
-	timeout time.Duration
+	model       string
+	visionModel string // explicit -vision-model; env LLMKIT_VISION_MODEL_<PROVIDER> applies when empty
+	baseURL     string
+	media       bool
+	files       bool
+	batch       bool
+	verbose     bool
+	timeout     time.Duration
 }
 
 // tokenMeter accumulates usage across probes so the run can report what it cost.
@@ -161,7 +188,30 @@ type probe struct {
 	run  func(context.Context) result
 }
 
+// The SDK's WithTimeout intentionally leaves streams to their caller's
+// context. The CLI's stream probe owns Recv, so bound its complete lifetime.
+// Resource probes keep their original contexts for deferred cleanup.
+func probeContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+func runProbe(ctx context.Context, timeout time.Duration, p probe) result {
+	probeCtx, cancel := probeContext(ctx, timeout)
+	defer cancel()
+	return p.run(probeCtx)
+}
+
 func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []probe {
+	streamProbe := probe{"流式对话", func(ctx context.Context) result { return probeStream(ctx, c, model) }}
+	// -vision-model is the most specific choice; otherwise the per-provider env
+	// override applies, then the chat model the rest of the probes use.
+	visionModel := opts.visionModel
+	if visionModel == "" {
+		visionModel = defaultVisionModel(t.provider, model)
+	}
 	return []probe{
 		{"模型列表", func(ctx context.Context) result { return probeModels(ctx, c) }},
 		{"模型任务", func(ctx context.Context) result { return probeModelTaskTypes(ctx, c) }},
@@ -170,19 +220,19 @@ func buildProbes(c *llmkit.Client, model string, t target, opts probeOptions) []
 		{"Files", func(ctx context.Context) result { return probeFiles(ctx, c, opts.files) }},
 		{"Batch", func(ctx context.Context) result { return probeBatch(ctx, c, t.provider, model, opts.batch) }},
 		{"非流式对话", func(ctx context.Context) result { return probeChat(ctx, c, model) }},
-		{"流式对话", func(ctx context.Context) result { return probeStream(ctx, c, model) }},
+		{streamProbe.name, func(ctx context.Context) result { return runProbe(ctx, opts.timeout, streamProbe) }},
 		{"多轮上下文", func(ctx context.Context) result { return probeMultiTurn(ctx, c, model) }},
 		{"工具调用", func(ctx context.Context) result { return probeTools(ctx, c, model) }},
 		{"结构化输出", func(ctx context.Context) result { return probeStructured(ctx, c, model) }},
 		{"推理 / thinking", func(ctx context.Context) result { return probeThinking(ctx, c, model) }},
-		{"多模态图像输入", func(ctx context.Context) result { return probeVision(ctx, c, model) }},
+		{"多模态图像输入", func(ctx context.Context) result { return probeVision(ctx, c, model, visionModel) }},
 		{"Embeddings", func(ctx context.Context) result { return probeEmbeddings(ctx, c, t.provider) }},
 		{"Rerank", func(ctx context.Context) result { return probeRerank(ctx, c, t.provider) }},
 		{"图像生成", func(ctx context.Context) result { return probeImage(ctx, c, t.provider, opts.media) }},
 		{"图像编辑", func(context.Context) result { return probeImageEdit(c) }},
 		{"视频生成", func(ctx context.Context) result { return probeVideo(ctx, c, opts.media) }},
 		{"视频取消", func(context.Context) result { return probeVideoCancel(c) }},
-		{"错误分类", func(ctx context.Context) result { return probeErrors(ctx, t.provider, model) }},
+		{"错误分类", func(ctx context.Context) result { return probeErrors(ctx, t.provider, model, opts) }},
 	}
 }
 
@@ -540,7 +590,7 @@ func probeChat(ctx context.Context, c *llmkit.Client, model string) result {
 	if !c.SupportsChat() {
 		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
 	}
-	maxTokens := 64
+	maxTokens := probeMaxTokens
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
 		Messages:  []llmkit.Message{llmkit.User("用一句话说明什么是幂等性。")},
@@ -549,10 +599,10 @@ func probeChat(ctx context.Context, c *llmkit.Client, model string) result {
 	if err != nil {
 		return result{outcome: fail, detail: describeErr(err)}
 	}
-	text := llmkit.ResponseText(resp)
-	if strings.TrimSpace(text) == "" {
-		return result{outcome: fail, detail: "回复为空", usage: resp.Usage}
+	if issue, ok := chatResponseIssue(resp, true); ok {
+		return issue
 	}
+	text := llmkit.ResponseText(resp)
 	detail := fmt.Sprintf("%d 字", len([]rune(text)))
 	if resp.Usage != nil {
 		detail += fmt.Sprintf(" · %d tokens", resp.Usage.TotalTokens)
@@ -570,31 +620,75 @@ func probeStream(ctx context.Context, c *llmkit.Client, model string) result {
 	var firstChunk time.Duration
 	start := time.Now()
 
-	text, usage, err := c.StreamText(ctx, model, "从 1 数到 5，用中文数字。", func(string) {
-		chunks++
-		if chunks == 1 {
-			firstChunk = time.Since(start)
-		}
+	maxTokens := probeMaxTokens
+	stream, err := c.ChatStream(ctx, &llmkit.ChatRequest{
+		Model:     model,
+		Messages:  []llmkit.Message{llmkit.User("从 1 数到 5，用中文数字。")},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
-		return result{outcome: fail, detail: describeErr(err), usage: usage}
+		return result{outcome: fail, detail: describeErr(err)}
+	}
+	defer stream.Close()
+	var textBuilder strings.Builder
+	var hasReasoning bool
+	var finishReason string
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return result{outcome: fail, detail: describeErr(err), body: textBuilder.String(), usage: stream.GetUsage()}
+		}
+		if llmkit.ChunkReasoning(chunk) != "" {
+			hasReasoning = true
+		}
+		if chunk != nil && len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil && *chunk.Choices[0].FinishReason != "" && finishReason != "length" {
+			finishReason = *chunk.Choices[0].FinishReason
+		}
+		if delta := llmkit.ChunkText(chunk); delta != "" {
+			textBuilder.WriteString(delta)
+			chunks++
+			if chunks == 1 {
+				firstChunk = time.Since(start)
+			}
+		}
+	}
+	text, usage := textBuilder.String(), stream.GetUsage()
+	// finish_reason=length means the output budget ran out. That stays
+	// INCOMPLETE whether or not some text made it out first: a truncated answer
+	// is budget exhaustion, not a genuinely empty response. Only a clean "stop"
+	// followed by no content is a failure.
+	if finishReason == "length" {
+		if hasReasoning || usage != nil && usage.ReasoningTokens > 0 {
+			return result{outcome: incomplete, detail: reasoningBudgetDetail, body: text, usage: usage}
+		}
+		return result{outcome: incomplete, detail: outputBudgetDetail, body: text, usage: usage}
+	}
+	if finishReason == "" {
+		return result{outcome: fail, detail: "流在 finish_reason 前结束，无法确认响应完整", body: text, usage: usage}
+	}
+	if finishReason != "stop" {
+		return result{outcome: fail, detail: "流未正常完成：finish_reason=" + finishReason, body: text, usage: usage}
 	}
 	if chunks == 0 {
-		return result{outcome: fail, detail: "没有收到任何 chunk（响应可能不是流式）", usage: usage}
+		return result{outcome: fail, detail: "没有收到任何正文 delta（响应可能不是流式）", usage: usage}
 	}
-	// A single chunk carrying the whole answer means the vendor buffered it —
-	// technically a valid response, but not streaming.
+	if strings.TrimSpace(text) == "" {
+		return result{outcome: fail, detail: "回复为空", usage: usage}
+	}
+	// A short answer may legitimately occupy one text delta, including after
+	// several reasoning deltas. Chunk count alone cannot prove buffering, so a
+	// single-frame answer passes but the detail keeps the buffering signal: a
+	// vendor that buffers everything looks exactly like this.
+	detail := fmt.Sprintf("%d chunks · 首字 %s", chunks, firstChunk.Round(time.Millisecond))
 	if chunks == 1 {
-		return result{
-			outcome: fail,
-			detail:  "只有 1 个 chunk，上游疑似缓冲后一次性返回",
-			body:    text,
-			usage:   usage,
-		}
+		detail += " · 单帧正文（上游可能缓冲）"
 	}
 	return result{
 		outcome: pass,
-		detail:  fmt.Sprintf("%d chunks · 首字 %s", chunks, firstChunk.Round(time.Millisecond)),
+		detail:  detail,
 		body:    text,
 		usage:   usage,
 	}
@@ -604,7 +698,7 @@ func probeMultiTurn(ctx context.Context, c *llmkit.Client, model string) result 
 	if !c.SupportsChat() {
 		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
 	}
-	maxTokens := 64
+	maxTokens := probeMaxTokens
 	first, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
 		Messages:  []llmkit.Message{llmkit.User("记住这个数字：42。简短确认即可。")},
@@ -612,6 +706,10 @@ func probeMultiTurn(ctx context.Context, c *llmkit.Client, model string) result 
 	})
 	if err != nil {
 		return result{outcome: fail, detail: "第 1 轮：" + describeErr(err)}
+	}
+	if issue, ok := chatResponseIssue(first, true); ok {
+		issue.detail = "第 1 轮：" + issue.detail
+		return issue
 	}
 
 	// Echoing the assistant turn back verbatim is where provider-specific
@@ -629,8 +727,13 @@ func probeMultiTurn(ctx context.Context, c *llmkit.Client, model string) result 
 		return result{outcome: fail, detail: "第 2 轮：" + describeErr(err), usage: first.Usage}
 	}
 
+	usage := sumUsage(first.Usage, responseUsage(second))
+	if issue, ok := chatResponseIssue(second, true); ok {
+		issue.detail = "第 2 轮：" + issue.detail
+		issue.usage = usage
+		return issue
+	}
 	answer := llmkit.ResponseText(second)
-	usage := sumUsage(first.Usage, second.Usage)
 	if !strings.Contains(answer, "42") {
 		return result{outcome: fail, detail: "未记住上下文，回答：" + oneLine(answer), body: answer, usage: usage}
 	}
@@ -648,12 +751,19 @@ func probeTools(ctx context.Context, c *llmkit.Client, model string) result {
 	})}
 	msgs := []llmkit.Message{llmkit.User("杭州现在多少度？请使用工具查询。")}
 
-	first, err := c.Chat(ctx, &llmkit.ChatRequest{Model: model, Messages: msgs, Tools: tools})
+	maxTokens := probeMaxTokens
+	first, err := c.Chat(ctx, &llmkit.ChatRequest{Model: model, Messages: msgs, Tools: tools, MaxTokens: &maxTokens})
 	if err != nil {
 		return result{outcome: fail, detail: describeErr(err)}
 	}
+	if issue, ok := chatResponseIssue(first, false); ok {
+		return issue
+	}
 	calls := llmkit.ResponseToolCalls(first)
 	if len(calls) == 0 {
+		if issue, ok := chatResponseIssue(first, true); ok {
+			return issue
+		}
 		return result{
 			outcome: notApplicable,
 			detail:  "模型未发起工具调用（可能不支持，或选择直接作答）",
@@ -667,7 +777,7 @@ func probeTools(ctx context.Context, c *llmkit.Client, model string) result {
 	for _, call := range calls {
 		msgs = append(msgs, llmkit.ToolResultJSON(call.ID, map[string]any{"celsius": 26}))
 	}
-	second, err := c.Chat(ctx, &llmkit.ChatRequest{Model: model, Messages: msgs, Tools: tools})
+	second, err := c.Chat(ctx, &llmkit.ChatRequest{Model: model, Messages: msgs, Tools: tools, MaxTokens: &maxTokens})
 	if err != nil {
 		return result{
 			outcome: fail,
@@ -676,8 +786,13 @@ func probeTools(ctx context.Context, c *llmkit.Client, model string) result {
 		}
 	}
 
+	usage := sumUsage(first.Usage, responseUsage(second))
+	if issue, ok := chatResponseIssue(second, true); ok {
+		issue.detail = "回传工具结果后：" + issue.detail
+		issue.usage = usage
+		return issue
+	}
 	answer := llmkit.ResponseText(second)
-	usage := sumUsage(first.Usage, second.Usage)
 	if !strings.Contains(answer, "26") {
 		return result{
 			outcome: fail,
@@ -707,10 +822,12 @@ func probeStructured(ctx context.Context, c *llmkit.Client, model string) result
 		"required":             []string{"city", "celsius"},
 		"additionalProperties": false,
 	}
+	maxTokens := probeMaxTokens
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:          model,
 		Messages:       []llmkit.Message{llmkit.User("杭州今天 26 度。按 schema 输出。")},
 		ResponseFormat: llmkit.JSONSchemaFormat("weather", schema),
+		MaxTokens:      &maxTokens,
 	})
 
 	// Structured output has two tiers. A vendor that refuses the strict
@@ -724,6 +841,7 @@ func probeStructured(ctx context.Context, c *llmkit.Client, model string) result
 				llmkit.User(`杭州今天 26 度。用 JSON 输出，字段 city（字符串）和 celsius（整数）。`),
 			},
 			ResponseFormat: llmkit.JSONFormat(),
+			MaxTokens:      &maxTokens,
 		})
 		tier = "json_object"
 		if err != nil {
@@ -735,6 +853,9 @@ func probeStructured(ctx context.Context, c *llmkit.Client, model string) result
 	}
 	if err != nil {
 		return result{outcome: fail, detail: describeErr(err)}
+	}
+	if issue, ok := chatResponseIssue(resp, true); ok {
+		return issue
 	}
 
 	text := llmkit.ResponseText(resp)
@@ -764,7 +885,7 @@ func probeThinking(ctx context.Context, c *llmkit.Client, model string) result {
 	if !c.SupportsChat() {
 		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
 	}
-	maxTokens := 512
+	maxTokens := probeMaxTokens
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
 		Model:     model,
 		Messages:  []llmkit.Message{llmkit.User("13 和 17，哪个更接近 15？只回答数字。")},
@@ -780,6 +901,13 @@ func probeThinking(ctx context.Context, c *llmkit.Client, model string) result {
 
 	reasoning := llmkit.ResponseReasoning(resp)
 	if reasoning == "" {
+		// A trace that never appeared because the budget ran out before the
+		// model started thinking is not the same as a model that ignored the
+		// parameter: the capability is unverified, not absent.
+		if resp != nil && len(resp.Choices) > 0 && resp.Choices[0].FinishReason != nil &&
+			*resp.Choices[0].FinishReason == "length" {
+			return result{outcome: incomplete, detail: reasoningBudgetDetail, usage: resp.Usage}
+		}
 		// Accepting the parameter without producing a trace is normal for
 		// non-reasoning models — the request succeeded, the feature is absent.
 		return result{
@@ -795,9 +923,12 @@ func probeThinking(ctx context.Context, c *llmkit.Client, model string) result {
 	return result{outcome: pass, detail: detail, body: oneLine(reasoning), usage: resp.Usage}
 }
 
-func probeVision(ctx context.Context, c *llmkit.Client, model string) result {
+func probeVision(ctx context.Context, c *llmkit.Client, chatModel, visionModel string) result {
 	if !c.SupportsChat() {
 		return result{outcome: notApplicable, detail: "该 provider 无对话接口"}
+	}
+	if visionModel == "" {
+		visionModel = chatModel
 	}
 	// Generated rather than embedded: a real PNG every time, no base64 blob in
 	// the source, and no dependency on an external URL being reachable.
@@ -806,9 +937,9 @@ func probeVision(ctx context.Context, c *llmkit.Client, model string) result {
 		return result{outcome: fail, detail: "构造测试图失败：" + err.Error()}
 	}
 
-	maxTokens := 64
+	maxTokens := probeVisionMaxTokens
 	resp, err := c.Chat(ctx, &llmkit.ChatRequest{
-		Model: model,
+		Model: visionModel,
 		Messages: []llmkit.Message{llmkit.UserWith(
 			llmkit.Text("这张图是什么颜色？只回答颜色名。"),
 			llmkit.ImageBytes("image/png", img),
@@ -816,15 +947,35 @@ func probeVision(ctx context.Context, c *llmkit.Client, model string) result {
 		MaxTokens: &maxTokens,
 	})
 	if err != nil {
-		if llmkit.IsInvalidRequest(err) || llmkit.IsNotFound(err) {
-			return result{outcome: notApplicable, detail: "该模型不接受图像输入"}
+		// "This model does not take images" surfaces as a rejection, not as a
+		// protocol error. Treating every 4xx as a probe failure made the default
+		// run red for the many vendors whose default chat model is text-only —
+		// the tool's core use is finding out which capabilities exist, and a
+		// refusal is an answer (N/A), not a defect. Auth, rate-limit, 5xx and
+		// transport failures still mean the probe could not establish anything.
+		if visionErrorIsRefusal(err) {
+			// Keep the upstream text in the detail too: a 404 classification says
+			// only "model not found", while the vendor's message is what tells
+			// the reader whether images are the problem.
+			reason := describeErr(err)
+			if raw := oneLine(err.Error()); !strings.Contains(reason, raw) {
+				reason += "；" + raw
+			}
+			return result{
+				outcome: notApplicable,
+				detail: "该模型可能不支持图像输入（" + reason +
+					"）；可用 -vision-model 或 LLMKIT_VISION_MODEL_" + envProviderSuffix(c.Provider()) + " 指定视觉模型",
+				body: err.Error(),
+			}
 		}
-		return result{outcome: fail, detail: describeErr(err)}
+		return result{outcome: fail, detail: describeErr(err), body: err.Error()}
+	}
+	if issue, ok := chatResponseIssue(resp, true); ok {
+		return issue
 	}
 
 	answer := llmkit.ResponseText(resp)
-	lower := strings.ToLower(answer)
-	if strings.Contains(answer, "红") || strings.Contains(lower, "red") {
+	if isRedAnswer(answer) {
 		return result{outcome: pass, detail: "正确识别为红色", body: answer, usage: resp.Usage}
 	}
 	return result{
@@ -833,6 +984,21 @@ func probeVision(ctx context.Context, c *llmkit.Client, model string) result {
 		body:    answer,
 		usage:   resp.Usage,
 	}
+}
+
+// visionErrorIsRefusal reports whether an image-probe error means "this model
+// does not take images" rather than "the probe could not reach a verdict".
+//
+// A local rejection of an invalid request is the adapter refusing the image
+// before sending it. A 400/404/422 is how a text-only model or a route without
+// image support answers — unmarked errors carrying those statuses come from the
+// vendor's response, so they count the same as upstream ones. Everything else
+// (401, 403, 429, 5xx, deadlines, transport) stays a probe failure.
+func visionErrorIsRefusal(err error) bool {
+	if llmkit.ErrorOriginOf(err) == llmkit.ErrorOriginLocal {
+		return llmkit.IsInvalidRequest(err)
+	}
+	return llmkit.IsInvalidRequest(err) || llmkit.IsNotFound(err)
 }
 
 func probeEmbeddings(ctx context.Context, c *llmkit.Client, providerName string) result {
@@ -986,12 +1152,29 @@ func probeVideoCancel(c *llmkit.Client) result {
 
 // probeErrors deliberately uses an invalid credential, so it costs nothing and
 // verifies the SDK classifies a real upstream rejection correctly.
-func probeErrors(ctx context.Context, providerName, model string) result {
-	c, err := llmkit.New(providerName,
+//
+// It builds its own client because the probe client carries a valid key; the
+// base URL and timeout come from the run options so a relay/private deployment
+// or an offline fake upstream is probed instead of the vendor's public host.
+// Providers that need no credential (Ollama, vLLM) cannot produce an auth
+// rejection at all, so the check is not applicable there.
+func probeErrors(ctx context.Context, providerName, model string, opts probeOptions) result {
+	if llmkit.KeyOptional(providerName) {
+		return result{outcome: notApplicable, detail: "该 provider 无需 key，无法验证无效凭据分类"}
+	}
+	timeout := opts.timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	clientOpts := []llmkit.Option{
 		llmkit.WithAPIKey("sk-invalid-key-for-probing"),
 		llmkit.WithRetry(llmkit.NoRetry()),
-		llmkit.WithTimeout(30*time.Second),
-	)
+		llmkit.WithTimeout(timeout),
+	}
+	if opts.baseURL != "" {
+		clientOpts = append(clientOpts, llmkit.WithBaseURL(opts.baseURL))
+	}
+	c, err := llmkit.New(providerName, clientOpts...)
 	if err != nil {
 		return result{outcome: fail, detail: err.Error()}
 	}
@@ -1024,6 +1207,113 @@ func probeErrors(ctx context.Context, providerName, model string) result {
 }
 
 // ---------------------------------------------------------------- helpers
+
+const reasoningBudgetDetail = "思考响应达到输出预算（finish_reason=length）"
+const outputBudgetDetail = "响应达到输出预算（finish_reason=length）"
+
+func responseUsage(resp *llmkit.ChatResponse) *llmkit.Usage {
+	if resp == nil {
+		return nil
+	}
+	return resp.Usage
+}
+
+// chatResponseIssue does not count a reasoning trace as proof that a probe
+// requiring a final answer completed. Malformed responses remain failures, and
+// a clean "stop" with no text is a genuinely empty response.
+//
+// finish_reason=length is different: it means the output budget ran out before
+// a visible answer was produced. That is INCOMPLETE (capability unverified), not
+// a failure — a probe that spends its whole budget reasoning has not shown the
+// capability is broken, only that this prompt cannot verify it at this budget.
+func chatResponseIssue(resp *llmkit.ChatResponse, needText bool) (result, bool) {
+	res := result{outcome: fail, usage: responseUsage(resp)}
+	if resp == nil {
+		res.detail = "响应为空"
+		return res, true
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		res.detail = "响应缺少 choice 或 message"
+		return res, true
+	}
+	res.body = llmkit.ResponseText(resp)
+	choice := resp.Choices[0]
+	if choice.FinishReason != nil && *choice.FinishReason == "length" {
+		if strings.TrimSpace(llmkit.ResponseReasoning(resp)) != "" || resp.Usage != nil && resp.Usage.ReasoningTokens > 0 {
+			res.outcome = incomplete
+			res.detail = reasoningBudgetDetail
+			return res, true
+		}
+		res.outcome = incomplete
+		res.detail = outputBudgetDetail
+		return res, true
+	}
+	if needText && strings.TrimSpace(res.body) == "" {
+		res.detail = "回复为空"
+		return res, true
+	}
+	return result{}, false
+}
+
+// otherColorWords are checked before the red match: a sentence that names
+// another color does not prove the model saw red, however often it says red.
+var (
+	otherColorWordsZH = []string{"蓝", "绿", "黄", "黑", "白", "橙", "紫", "粉", "棕", "灰", "青"}
+	otherColorWordsEN = []string{
+		"green", "blue", "yellow", "black", "white",
+		"orange", "purple", "pink", "brown", "gray", "grey", "cyan", "magenta",
+	}
+)
+
+// isRedAnswer accepts a correct color identification in the wording the model
+// actually uses. The prompt asks for a color name, but models answer with full
+// sentences ("这张图片是红色的。"), and a strict equality check marked those
+// correct answers FAIL. The match still has to reject the ways a wrong answer
+// can mention red: "not red", "不是红色", "green, not red", or "hundred" (which
+// contains "red").
+func isRedAnswer(answer string) bool {
+	normalized := strings.ToLower(answer)
+	// 非常 ("very") contains 非 but is an intensifier, not a negation.
+	normalized = strings.ReplaceAll(normalized, "非常", "")
+	if strings.Contains(normalized, "不") || strings.Contains(normalized, "非") ||
+		containsWord(normalized, "not") {
+		return false
+	}
+	for _, word := range otherColorWordsZH {
+		if strings.Contains(normalized, word) {
+			return false
+		}
+	}
+	for _, word := range otherColorWordsEN {
+		if containsWord(normalized, word) {
+			return false
+		}
+	}
+	return strings.Contains(normalized, "红") || containsWord(normalized, "red")
+}
+
+// containsWord reports whether s contains token as a whole ASCII word, so that
+// "hundred" and "colored" do not read as "red", and "nothing" not as "not".
+func containsWord(s, token string) bool {
+	for offset := 0; ; {
+		i := strings.Index(s[offset:], token)
+		if i < 0 {
+			return false
+		}
+		i += offset
+		end := i + len(token)
+		beforeOK := i == 0 || !isASCIILetter(s[i-1])
+		afterOK := end == len(s) || !isASCIILetter(s[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = i + 1
+	}
+}
+
+func isASCIILetter(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
 
 // solidPNG renders a single-color square as PNG bytes.
 func solidPNG(c color.Color, size int) ([]byte, error) {
@@ -1081,7 +1371,23 @@ func sumUsage(a, b *llmkit.Usage) *llmkit.Usage {
 }
 
 // describeErr turns an SDK error into something actionable in one line.
+//
+// Only an established origin gets a prefix. "来源未知：" told the reader nothing
+// they could act on and made every unmarked error wordier than before the
+// origin work; unmarked errors simply print the classification.
 func describeErr(err error) string {
+	detail := describeErrDetail(err)
+	switch llmkit.ErrorOriginOf(err) {
+	case llmkit.ErrorOriginLocal:
+		return "本地拒绝：" + detail
+	case llmkit.ErrorOriginUpstream:
+		return "上游返回：" + detail
+	default:
+		return detail
+	}
+}
+
+func describeErrDetail(err error) string {
 	switch {
 	case llmkit.IsAuthError(err):
 		return "认证失败（key 无效或无权限）"
@@ -1097,7 +1403,7 @@ func describeErr(err error) string {
 	case llmkit.IsInvalidRequest(err):
 		return "请求被拒绝：" + oneLine(err.Error())
 	case llmkit.IsServerError(err):
-		return fmt.Sprintf("上游 %d 错误", llmkit.StatusCode(err))
+		return fmt.Sprintf("%d 错误", llmkit.StatusCode(err))
 	case errors.Is(err, context.DeadlineExceeded):
 		return "超时（可用 -timeout 调大）"
 	default:

@@ -59,7 +59,9 @@ func (p *Provider) GenerateImage(ctx context.Context, apiKey, model string, req 
 		Provider: "openrouter",
 		Usage:    resp.Usage,
 	}
-	// 收集所有 choice.message.images[]——extractMediaAssets 已经在 ChatCompletion 路径里挂好。
+	// 收集所有 choice.message.images[]。ChatCompletion 已经把归一化资产按 choice 归属
+	// 装好并清掉了原始解码条目，所以这里按 choice 顺序拼接即可：n>1 时每个 choice 贡献
+	// 自己那几张，Data 不会混入空 URL 的原始垃圾条目。
 	for _, c := range resp.Choices {
 		if c.Message != nil {
 			out.Data = append(out.Data, c.Message.Images...)

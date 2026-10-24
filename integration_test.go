@@ -33,61 +33,14 @@ import (
 
 var runMedia = flag.Bool("media", false, "also run image/video tests (slower and more expensive)")
 
-// liveModels is the model used per provider. Override any of them with
-// LLMKIT_TEST_MODEL_<PROVIDER>, e.g. LLMKIT_TEST_MODEL_DEEPSEEK=deepseek-v4-flash.
+// liveModels, liveModel, and the guards that keep every live-model table honest
+// (TestLiveModelsCoverAllProviders, TestLiveEmbedModelsCoverEmbedders,
+// TestLiveRerankModelsCoverRerankers) live in live_models_test.go, untagged:
+// they need no network, and behind this tag CI only compiles them.
 //
-// Vendor catalogs churn: models get retired and IDs get renamed. A "model not
-// found" here means the entry went stale, not that the SDK broke — re-run with
-// LLMKIT_TEST_MODEL_<PROVIDER>. TestLiveModelsCoverAllProviders keeps the table
-// from falling behind the provider list.
-var liveModels = map[string]string{
-	OpenAI:      "gpt-5",
-	Anthropic:   "claude-sonnet-4-5-20250929",
-	Gemini:      "gemini-2.5-flash",
-	XAI:         "grok-4.3",
-	Mistral:     "mistral-large-latest", // vendor-maintained alias
-	DeepSeek:    "deepseek-v4-flash",
-	Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
-	Zhipu:       "glm-4.6",
-	MiniMax:     "MiniMax-M2",
-	SiliconFlow: "Qwen/Qwen3-8B",
-	DashScope:   "qwen-plus",
-	Volcengine:  "doubao-seed-1-6-250615",
-	Groq:        "openai/gpt-oss-120b",
-	Together:    "openai/gpt-oss-120b",
-	Fireworks:   "accounts/fireworks/models/gpt-oss-120b",
-	Cerebras:    "gpt-oss-120b",
-	// Local runtimes serve whatever you pulled or launched, so these are a
-	// plausible first guess rather than a catalog entry.
-	Ollama:     "llama3.2",
-	VLLM:       "Qwen/Qwen3-8B",
-	OpenRouter: "openai/gpt-5",
-	EasyRouter: "gpt-5",
-	Vercel:     "openai/gpt-5",
-}
-
-func liveModel(providerName string) string {
-	env := "LLMKIT_TEST_MODEL_" + strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
-	if v := os.Getenv(env); v != "" {
-		return v
-	}
-	return liveModels[providerName]
-}
-
-// A provider with no liveModels entry would otherwise be tested with Model: "",
-// which every vendor rejects — reported as a chat failure rather than as the
-// missing table entry it is. Fail once, up front, naming the gap.
-func TestLiveModelsCoverAllProviders(t *testing.T) {
-	for _, name := range Providers() {
-		if liveModels[name] == "" {
-			t.Errorf("liveModels has no entry for %q — add one so TestLive/%s tests something", name, name)
-		}
-	}
-}
-
-// liveEmbedModels / liveRerankModels and the guards that keep them honest live
-// in live_models_test.go, untagged: they need no network, and behind this tag
-// CI only compiles them.
+// The helpers that validate live responses and streams — liveResponseText and
+// liveStreamText, plus their offline validation tests — live in
+// live_checks_test.go, also untagged, so `go test ./...` exercises them.
 
 // liveClient skips the test when the provider isn't configured to be reached.
 //
@@ -112,6 +65,17 @@ func liveClient(t *testing.T, providerName string, opts ...Option) *Client {
 	return c
 }
 
+// requireLiveText keeps a reasoning-only, budget-limited response from being
+// mistaken for a completed capability check or dereferenced as a missing turn.
+func requireLiveText(t *testing.T, resp *ChatResponse) string {
+	t.Helper()
+	text, err := liveResponseText(resp, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text
+}
+
 // TestLive exercises the core path — non-streaming chat, streaming chat, and
 // usage accounting — against every provider whose key is present.
 func TestLive(t *testing.T) {
@@ -120,7 +84,7 @@ func TestLive(t *testing.T) {
 			c := liveClient(t, name, WithTimeout(90*time.Second))
 			model := liveModel(name)
 			ctx := context.Background()
-			maxTokens := 32
+			maxTokens := 512
 
 			t.Run("chat", func(t *testing.T) {
 				resp, err := c.Chat(ctx, &ChatRequest{
@@ -131,10 +95,7 @@ func TestLive(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Chat: %v", err)
 				}
-				text := ResponseText(resp)
-				if text == "" {
-					t.Errorf("empty response: %+v", resp)
-				}
+				text := requireLiveText(t, resp)
 				t.Logf("reply: %q", text)
 
 				if resp.Usage == nil {
@@ -149,16 +110,11 @@ func TestLive(t *testing.T) {
 			})
 
 			t.Run("stream", func(t *testing.T) {
-				var chunks int
-				text, usage, err := c.StreamText(ctx, model, "Count: 1 2 3", func(string) { chunks++ })
+				text, usage, chunks, err := liveStreamText(ctx, c, &ChatRequest{
+					Model: model, Messages: []Message{User("Count: 1 2 3")}, MaxTokens: &maxTokens,
+				})
 				if err != nil {
-					t.Fatalf("StreamText: %v", err)
-				}
-				if text == "" {
-					t.Error("stream produced no text")
-				}
-				if chunks == 0 {
-					t.Error("callback never fired; the response did not actually stream")
+					t.Fatalf("ChatStream: %v", err)
 				}
 				t.Logf("streamed %d chunks, %d chars, usage=%+v", chunks, len(text), usage)
 			})
@@ -174,6 +130,7 @@ func TestLive(t *testing.T) {
 				if err != nil {
 					t.Fatalf("turn 1: %v", err)
 				}
+				requireLiveText(t, first)
 				second, err := c.Chat(ctx, &ChatRequest{
 					Model: model,
 					Messages: []Message{
@@ -186,7 +143,7 @@ func TestLive(t *testing.T) {
 				if err != nil {
 					t.Fatalf("turn 2: %v", err)
 				}
-				answer := ResponseText(second)
+				answer := requireLiveText(t, second)
 				t.Logf("recalled: %q", answer)
 				if !strings.Contains(answer, "7") {
 					t.Errorf("model lost context across turns: %q", answer)
@@ -211,13 +168,18 @@ func TestLiveTools(t *testing.T) {
 				"required":   []string{"city"},
 			})}
 			msgs := []Message{User("What's the temperature in Hangzhou? Use the tool.")}
+			maxTokens := 512
 
-			first, err := c.Chat(ctx, &ChatRequest{Model: model, Messages: msgs, Tools: tools})
+			first, err := c.Chat(ctx, &ChatRequest{Model: model, Messages: msgs, Tools: tools, MaxTokens: &maxTokens})
 			if err != nil {
+				t.Fatalf("turn 1: %v", err)
+			}
+			if _, err := liveResponseText(first, false); err != nil {
 				t.Fatalf("turn 1: %v", err)
 			}
 			calls := ResponseToolCalls(first)
 			if len(calls) == 0 {
+				requireLiveText(t, first)
 				t.Skipf("model chose not to call the tool: %q", ResponseText(first))
 			}
 			t.Logf("tool call: %s(%s)", calls[0].Function.Name, calls[0].Function.Arguments)
@@ -226,11 +188,11 @@ func TestLiveTools(t *testing.T) {
 			for _, call := range calls {
 				msgs = append(msgs, ToolResultJSON(call.ID, map[string]any{"celsius": 26}))
 			}
-			second, err := c.Chat(ctx, &ChatRequest{Model: model, Messages: msgs, Tools: tools})
+			second, err := c.Chat(ctx, &ChatRequest{Model: model, Messages: msgs, Tools: tools, MaxTokens: &maxTokens})
 			if err != nil {
 				t.Fatalf("turn 2: %v", err)
 			}
-			answer := ResponseText(second)
+			answer := requireLiveText(t, second)
 			t.Logf("final: %q", answer)
 			if !strings.Contains(answer, "26") {
 				t.Errorf("tool result not reflected in the answer: %q", answer)

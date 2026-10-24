@@ -9,7 +9,7 @@
 
 ```go
 client, _ := llmkit.New(llmkit.DeepSeek)          // key 取自 DEEPSEEK_API_KEY
-answer, _ := client.Say(ctx, "deepseek-v4-flash", "用一句话解释 CAP 定理。")
+answer, _ := client.Say(ctx, "deepseek-flash", "用一句话解释 CAP 定理。")
 ```
 
 统一 Chat 接口里，换一家厂商只改一个常量，请求结构、响应结构、错误处理、流式读法全都不变。原生协议面不会按模型名自动启用，也不与 Chat DTO 混用。
@@ -105,7 +105,9 @@ for _, model := range models {
 }
 ```
 
-`Models` 仍保留原来的上游请求和过滤结果；混合媒体目录的扩展只发生在 `ModelsWithTaskTypes`。不实现 `ModelTaskLister` 的 adapter 会由 `ModelsWithTaskTypes` 返回普通列表和 `nil` task map。Anthropic 与 DeepSeek 的目录都没有逐模型能力字段，只能按 ID 判断，但两家的目录形状不同：Anthropic 至今只出对话模型，按 `claude-` 前缀分类即可，非 `claude-` 条目保持未知；DeepSeek 的目录里混着退役别名和非对话型号，因此走白名单，只认当前官方 Chat ID，退役和未来 ID 保持未知。OpenRouter 中显式属于 SDK 未实现端点的目录项会被过滤；纯 `image` 输出型号虽然保留在目录中，但在专用 `/images` 路由实现前不会声明图片生成，只有可走现有 chat/completions 的 `text+image` 型号才会声明。Gemini 的 `generateContent` 也用于图片、TTS、Live/native-audio 和音乐，不能单凭方法名或 `gemini-*` 前缀推断为 chat；只有逐个核验过的当前 model code 会分类，其他条目保持未知。
+`Models` 仍保留原来的上游请求和过滤结果；混合媒体目录的扩展只发生在 `ModelsWithTaskTypes`。不实现 `ModelTaskLister` 的 adapter 会由 `ModelsWithTaskTypes` 返回普通列表和 `nil` task map。Anthropic 的目录至今只出对话模型，按 `claude-` 前缀分类，非 `claude-` 条目保持未知。DeepSeek 的目录已提供模态、上下文和 effort 等元数据，SDK 将 `name` / `context_window` 映射到 `DisplayName` / `ContextWindow`；这些元数据不足以证明模型支持 Chat Completions，因此任务分类仍使用已核验的 ID 白名单：`deepseek-flash`、`deepseek-v4-pro`，以及兼容请求名 `deepseek-v4-flash`。退役的 `deepseek-chat` / `deepseek-reasoner`、其他非对话型号和未来 ID 保持未知。
+
+OpenRouter 中显式属于 SDK 未实现端点的目录项会被过滤；纯 `image` 输出型号虽然保留在目录中，但在专用 `/images` 路由实现前不会声明图片生成，只有可走现有 chat/completions 的 `text+image` 型号才会声明。Gemini 的 `generateContent` 也用于图片、TTS、Live/native-audio 和音乐，不能单凭方法名或 `gemini-*` 前缀推断为 chat；只有逐个核验过的当前 model code 会分类，其他条目保持未知。
 
 ### 原生协议能力矩阵
 
@@ -219,6 +221,8 @@ for _, r := range resp.Results {
 
 目前只有 **siliconflow** 和 **vercel** 两家实现，这两家是刻意选的：rerank 的 usage 在不同厂商那里落在不同字段，siliconflow 报 token 计数（顶层 `tokens`），Vercel 网关走的是 Cohere 那套方言、报 `meta.billed_units.search_units`（计费单位，不是 token）—— 两家合起来才把 `Usage` 的映射跑全。选两家而不是一家，也是为了排序验收：单家只能证明"这条路由能通"，两家才能说明它不是把某家的偶发行为写进了统一语义。
 
+`Usage` 对两个方言分开记账：token 计数落在 `PromptTokens` / `CompletionTokens`；Cohere 方言的 search unit 落在 **`BilledSearchUnits`**，不写进 `RequestCount`。原因是两者量纲不同 —— 官方定义里 **1 个 search unit 最多覆盖 100 篇文档**，一次 250 篇的请求是 1 次调用 / 3 个 search unit，`RequestCount` 仍是 per-call 次数（`NormalizeUsage` 兜底为 1）。按次计费请用 `RequestCount`，按 search unit 计价请用 `BilledSearchUnits`，不要互相换算。
+
 rerank 不属于 OpenAI API，所以 compat 层默认不带它，得由 adapter 显式使用 `compat.WithRerank`（通常通过 `compat.NewWithRerank` 构造）—— 否则 21 家 compat 厂商会集体声称支持一条大多数都没有的路由。厂商特有参数（比如硅基流动的 `max_chunks_per_doc`）走 `ProviderOptions["siliconflow"]`。可运行示例见 [examples/rerank](examples/rerank/main.go)。
 
 ---
@@ -231,12 +235,12 @@ rerank 不属于 OpenAI API，所以 compat 层默认不带它，得由 adapter 
 client, err := llmkit.New(llmkit.DeepSeek, llmkit.WithAPIKey(key))
 
 // 一行版
-answer, err := client.Say(ctx, "deepseek-v4-flash", "你好")
+answer, err := client.Say(ctx, "deepseek-flash", "你好")
 
 // 完整版
 temp := 0.3
 resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-    Model: "deepseek-v4-flash",
+    Model: "deepseek-flash",
     Messages: []llmkit.Message{
         llmkit.System("你是一个简洁的技术助手。"),
         llmkit.User("Go 的 channel 和 mutex 该怎么选？"),
@@ -246,13 +250,13 @@ resp, err := client.Chat(ctx, &llmkit.ChatRequest{
 text := llmkit.ResponseText(resp)
 ```
 
-> DeepSeek 当前公开 API 模型是 `deepseek-v4-flash` / `deepseek-v4-pro`；旧 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 停用（[官方变更记录](https://api-docs.deepseek.com/updates/)）。
+> DeepSeek 当前公开 API 模型是 `deepseek-flash` / `deepseek-v4-pro`；`deepseek-v4-flash` 仅保留为兼容请求名，示例和探测默认使用 `deepseek-flash`。旧 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 停用（[官方变更记录](https://api-docs.deepseek.com/updates/)）。
 
 ### 流式
 
 ```go
 // 回调版：流会自动 drain + close
-text, usage, err := client.StreamText(ctx, "deepseek-v4-flash", "数到五", func(delta string) {
+text, usage, err := client.StreamText(ctx, "deepseek-flash", "数到五", func(delta string) {
     fmt.Print(delta)
 })
 
@@ -405,8 +409,10 @@ for _, call := range llmkit.ResponseToolCalls(resp) {
 ### 多模态
 
 ```go
-resp, _ := client.Chat(ctx, &llmkit.ChatRequest{
-    Model: "gemini-2.5-flash",
+client, err := llmkit.New(llmkit.DeepSeek)
+if err != nil { return err }
+resp, err := client.Chat(ctx, &llmkit.ChatRequest{
+    Model: "deepseek-flash",
     Messages: []llmkit.Message{
         llmkit.UserWith(
             llmkit.Text("这张图里有什么？"),
@@ -416,6 +422,8 @@ resp, _ := client.Chat(ctx, &llmkit.ChatRequest{
     },
 })
 ```
+
+DeepSeek 图像输入对 `deepseek-flash` 以及官方仍可调用的 legacy 名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 的 `user` 消息开放（legacy 名由支持视觉的 Flash 承接），使用 `image_url` 内容块，外链 URL 与 `ImageBytes` 生成的 base64 data URL 都会保留为图文数组；流式调用使用同样的请求。`deepseek-v4-pro` 与未知模型仍在本地拒绝图片，SDK 也会在本地拒绝其他角色的图片和畸形内容块。官方 Vision 的第三种输入 `file` 块（Files API 的 `file_id` / `file_data`）尚未实现，会得到明确的本地拒绝而不是静默降级。SDK 不下载图片；图片格式、尺寸、数量和请求体上限由上游按[官方 Vision 规则](https://api-docs.deepseek.com/guides/vision/)校验。Gemini 等其他视觉模型同样使用这些消息 helper，可运行示例见 [examples/vision](examples/vision/main.go)。
 
 ### 结构化输出
 
@@ -583,7 +591,7 @@ case errors.Is(err, llmkit.ErrUnsupported):  // 该厂商没有这个能力
 }
 
 log.Printf("status=%d retry_after=%s",
-    llmkit.StatusCode(err), // 上游 HTTP 状态码，非 API 错误返回 0
+    llmkit.StatusCode(err), // API 状态码；本地校验也可能返回 422，非 API 错误返回 0
     llmkit.RetryAfter(err), // 上游要求的退避时长
 )
 
@@ -591,11 +599,14 @@ var apiErr *llmkit.APIError
 if errors.As(err, &apiErr) {
     log.Printf("vendor_request_id=%s", apiErr.RequestID)
 }
-log.Printf("vendor_code=%s category=%s",
+log.Printf("vendor_code=%s category=%s origin=%s",
     llmkit.ProviderCode(err),    // 例如 MiniMax base_resp.status_code
     llmkit.ErrorCategoryOf(err), // auth / rate_limit / invalid_request / not_found / server
+    llmkit.ErrorOriginOf(err),   // ErrorOriginLocal / ErrorOriginUpstream / ErrorOriginUnknown
 )
 ```
+
+`ErrorOriginOf` 读取错误链中显式附加的来源，区分 SDK 本地拒绝与上游 API 拒绝，不根据 HTTP 状态码猜测。DeepSeek 标记本地校验与上游 HTTP 拒绝，共享 compat SSE 读取器在解析到明确错误消息时标记上游来源；其余未标记路径返回 `ErrorOriginUnknown`。它不改变 `StatusCode`、错误分类或重试语义，`errors.As` 仍可取得原始 `APIError`。
 
 ---
 
@@ -717,6 +728,7 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/chat
 DEEPSEEK_API_KEY=sk-... go run ./examples/stream
 DEEPSEEK_API_KEY=sk-... go run ./examples/tools
 GEMINI_API_KEY=...     go run ./examples/vision ./photo.png
+DEEPSEEK_API_KEY=sk-... go run ./examples/vision -provider deepseek -model deepseek-flash ./photo.png
 OPENAI_API_KEY=sk-...  go run ./examples/structured
 SILICONFLOW_API_KEY=sk-... go run ./examples/embeddings
 SILICONFLOW_API_KEY=sk-... go run ./examples/rerank          # 换 PROVIDER=vercel 试第二家
@@ -787,24 +799,46 @@ DEEPSEEK_API_KEY=sk-... go run ./examples/production   # 生产配置全家桶
 DEEPSEEK_API_KEY=sk-... go run ./cmd/llmkit-probe deepseek
 ```
 
+以下是示意输出（能力探测项是固定的；耗时与 token 用量随模型和账号变化）：
+
 ```
-llmkit probe · deepseek · deepseek-v4-flash
-──────────────────────────────────────────────────────────────────────────────
-  PASS  模型列表              2 个模型                                    412ms
-  PASS  模型任务             2/2 已分类 · 0 未知                          301ms
-  PASS  非流式对话           38 字 · 96 tokens                             1.2s
-  PASS  流式对话             47 chunks · 首字 340ms                        2.1s
-  PASS  多轮上下文           正确记住 42                                   1.8s
-  PASS  工具调用             get_temperature({"city":"杭州"}) → 结果被采用  2.4s
-  PASS  结构化输出           仅支持 json_object（不支持 json_schema）       1.9s
-   N/A  多模态图像输入       该模型不接受图像输入                             0s
-   N/A  Embeddings           该 provider 无 embeddings 接口                  0s
-  PASS  错误分类             401 → IsAuthError                            380ms
-──────────────────────────────────────────────────────────────────────────────
-  7 通过 · 2 不适用  ·  约 480 tokens
+llmkit probe · deepseek · deepseek-flash
+────────────────────────────────────────────────────────────────────────────────────
+  PASS        模型列表             2 个模型                                    412ms
+  PASS        模型任务             2/2 已分类 · 0 未知                         301ms
+   N/A        OpenAI Responses     无原生 Responses transport                     0s
+   N/A        Anthropic Messages   无原生 Messages transport                      0s
+   N/A        Files                无 Files transport                             0s
+   N/A        Batch                无 Batch transport                             0s
+  PASS        非流式对话           38 字 · 96 tokens                            1.2s
+  PASS        流式对话             47 chunks · 首字 340ms                       2.1s
+  PASS        多轮上下文           正确记住 42                                  1.8s
+  PASS        工具调用             get_temperature({"city":"杭州"}) → 结果…     2.4s
+  PASS        结构化输出           仅支持 json_object（不支持 json_schema）     1.9s
+  PASS        推理 / thinking      486 reasoning tokens                         2.6s
+  PASS        多模态图像输入       正确识别为红色                               1.8s
+   N/A        Embeddings           该 provider 无 embeddings 接口                 0s
+   N/A        Rerank               该 provider 无 rerank 接口                     0s
+   N/A        图像生成             该 provider 无图像生成接口                     0s
+   N/A        图像编辑             该 provider 无图像编辑接口                     0s
+   N/A        视频生成             该 provider 无视频生成接口                     0s
+   N/A        视频取消             该 provider 无视频生成接口                     0s
+  PASS        错误分类             401 → IsAuthError                           380ms
+────────────────────────────────────────────────────────────────────────────────────
+  10 通过 · 10 不适用  ·  约 1180 tokens
 ```
 
-四种结果：`PASS` 能用 · `FAIL` 该能用但没用成（打印原因）· `N/A` 这家/这个模型没有该能力 · `SKIP` 未尝试。
+五种结果：`PASS` 能用 · `FAIL` 该能用但没用成（打印原因）· `INCOMPLETE` 未完成（停止原因是 `length`，能力未验证）· `N/A` 不适用（这家/这个模型没有该能力，或模型拒绝图像输入等「无法据此确认」的情形，detail 会说明）· `SKIP` 未尝试（需 `-media` / `-files` / `-batch` 才启用）。
+
+`finish_reason=length` 一律归入 `INCOMPLETE`：思考耗尽输出预算、或截断在部分正文/工具调用上，都算「未完成」而不是「能用」；`stop` 且正文为空才是 `FAIL`。思考截断即使已有部分正文也仍视为未完成。独立的 thinking 探测只验证思考能力，不要求最终正文。
+
+统一 Chat 路径的视觉探测输出预算为 2048 token，其余对话、流式、多轮、工具和结构化探测为 512 token；每次调用均有上限，不会因预算不足自动追加请求。
+
+视觉探测在模型不接受图像时报告 `N/A` 并附上游原文，而不是 `FAIL`：SDK 本地拒绝与上游 400/404/422 都只说明「这个模型不支持图像」，不能据此判定能力；detail 会提示用 `-vision-model` 或 `LLMKIT_VISION_MODEL_<PROVIDER>` 指定真正支持视觉的模型。401/403/429/5xx 与网络错误仍判 `FAIL`。
+
+退出码：失败 `1`、仅有未完成项 `2`、无失败和未完成项 `0`；同时存在时失败优先。用法错误（未知厂商、缺 key、坏参数）也退出 `2`。
+
+`-timeout` 只约束流式探测从建立连接到读取结束的全过程，超时会取消请求并关闭流；其它探测沿用默认上下文（错误分类探测复用同一个值）。流式探测要求正常终态；缺少 `finish_reason` 的 EOF 会失败；合法的单帧正文可通过，但 detail 会标注「单帧正文（上游可能缓冲）」以保留提示。
 
 **key 从哪来**（按优先级）：`-key` 参数 → 环境变量 → `.env` 文件。所以也可以：
 
@@ -820,6 +854,7 @@ go run ./cmd/llmkit-probe                          # 所有配了 key 的厂商�
 go run ./cmd/llmkit-probe -list                    # 支持的厂商与对应环境变量
 go run ./cmd/llmkit-probe deepseek -v              # 打印模型的完整回复
 go run ./cmd/llmkit-probe deepseek -model deepseek-v4-pro
+go run ./cmd/llmkit-probe mistral -vision-model pixtral-large-latest   # 默认模型无视觉时指定视觉模型
 go run ./cmd/llmkit-probe openai -media            # 额外测图像生成（更贵）
 go run ./cmd/llmkit-probe openai -files            # 额外测 Files 全生命周期（上传后即删，零费用）
 go run ./cmd/llmkit-probe openai -batch            # 额外测 Batch（建单请求 batch 后立即取消）
@@ -830,7 +865,7 @@ go run ./cmd/llmkit-probe deepseek -base-url https://my-relay.example/v1
 
 **先做连通性预检**：key 无效或模型不存在时立即中止并说明原因 —— 凭据不通时的能力探测结果没有意义，不会给你一屏误导性的 N/A。
 
-模型可用环境变量覆盖，不必改代码：`LLMKIT_MODEL_<PROVIDER>` / `LLMKIT_EMBED_MODEL_<PROVIDER>` / `LLMKIT_IMAGE_MODEL_<PROVIDER>`。
+模型可用环境变量覆盖，不必改代码：`LLMKIT_MODEL_<PROVIDER>` / `LLMKIT_EMBED_MODEL_<PROVIDER>` / `LLMKIT_IMAGE_MODEL_<PROVIDER>` / `LLMKIT_VISION_MODEL_<PROVIDER>` / `LLMKIT_RERANK_MODEL_<PROVIDER>`。视觉与 rerank 默认走各家的首选模型；默认模型不支持视觉时，视觉探测会给出 `N/A` 并提示用 `LLMKIT_VISION_MODEL_<PROVIDER>` 指定真正支持视觉的模型。
 
 ---
 
@@ -856,12 +891,11 @@ HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 go test ./...
 解析器直接吃厂商发来的原始字节，是 SDK 最大的不可信输入面。SSE 帧解析、错误响应解析、多模态内容转换都有 fuzz 目标。CI 每次 PR 对全部目标各跑 100,000 次，另有每日和手动触发的深度任务各跑 500,000 次：
 
 ```bash
-bash .github/scripts/run-fuzz.sh 100000x \
-  ./provider/compat/ ./provider/ ./internal/sse/ \
-  ./protocol/responses/ ./protocol/anthropic/
+# 包清单由脚本从源码自动发现（`go test -list '^Fuzz'`），新增 fuzz 目标不用改这里
+bash .github/scripts/run-fuzz.sh 100000x --all
 ```
 
-这里暂时使用固定次数，是为了绕开 `-fuzztime=<时长>` 到期时偶发误报 `context deadline exceeded` 的[官方问题](https://go.dev/issue/75804)。修复目前只在 Go 的 master 上，截至 `go1.27rc2` 尚未进入任何发布分支，预计随 Go 1.28 发布——**升级到 1.27 不要切回按时长运行**。任何 fuzz 非零退出仍会让门禁失败，CI 只把本次新生成的 crasher 作为 artifact 上传。
+这里暂时使用固定次数，是为了绕开 `-fuzztime=<时长>` 到期时偶发误报 `context deadline exceeded` 的[官方问题](https://go.dev/issue/75804)。修复目前只在 Go 的 master 上，`go1.27` 尚未携带（预计随 Go 1.28 发布）——**在 CI 升到携带该修复的工具链之前，不要切回按时长运行**。任何 fuzz 非零退出仍会让门禁失败，CI 只把本次新生成的 crasher 作为 artifact 上传。
 
 它们断言的不只是「不 panic」，还有各自的不变量：容错模式下解析错误一定被跳过而不会漏出、任意网络分片不能改变 SSE 帧、未知原生 union/event 必须 Raw 保真、batch JSONL 的坏行一定报错且失败是粘性的、`ParseDataURI` 接受的输入一定能还原回原串、token 计数一定非负。
 
@@ -910,32 +944,32 @@ make cover-check   # 同一口径重新测量，只校验下表是否过期
 | `protocol/openaibatch` | 88.8% | JSONL 编解码含 fuzz |
 | `protocol/anthropic` | 79.9% |  |
 | `protocol/responses` | 71.7% |  |
-| `provider` | 96.1% | 跨全部适配器共享的类型、流策略与守卫 |
+| `provider` | 97.5% | 跨全部适配器共享的类型、流策略与守卫 |
 | `provider/compat` | 83.2% | OpenAI 兼容适配器的公共基座：chat/stream 读取、能力裁剪、rerank 方言 |
 | `provider/*` 适配层（区间） | 66.2–100.0% | 迁移自一个跑在生产上的网关，路径被真实流量验证过；这一行是全部适配器的跨度 |
 | `provider/anthropic` | 82.4% |  |
 | `provider/dashscope` | 72.7% |  |
-| `provider/deepseek` | 83.4% |  |
+| `provider/deepseek` | 91.5% |  |
 | `provider/easyrouter` | 71.9% |  |
 | `provider/gemini` | 66.8% |  |
 | `provider/minimax` | 89.7% | 手写的 embeddings 翻译层有自己的测试；chat 路径仍走冒烟测试 |
 | `provider/moonshot` | 90.6% |  |
 | `provider/openai` | 76.5% |  |
-| `provider/openrouter` | 81.7% | 媒体资产归一化（把 raw 条目替换成规范化条目）有专门的回归测试 |
+| `provider/openrouter` | 82.5% | 媒体资产归一化（把 raw 条目替换成规范化条目）有专门的回归测试 |
 | `provider/vercel` | 98.3% |  |
 | `provider/volcengine` | 66.2% |  |
 | `provider/zhipu` | 90.0% |  |
-| `provider/siliconflow` 等 9 个薄封装 | 100.0% | 只有构造与能力声明，没有自有测试；跨包口径下由 `provider` 包的冒烟测试执行（包内口径会显示 0%） |
-| `cmd/llmkit-probe` | 22.2% | 参数解析 / .env / 排版有测试；探测逻辑本身要真实 key 才跑得到 |
-| `tools/*`（1 个开发工具） | 11.2% | 覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母 |
-| `examples/*`（15 个示例程序） | 0.0% | 示例只做编译与 `go vet` 检查，不跑真实请求，所以恒为 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母 |
+| `provider/siliconflow` 等 9 个薄封装 | 100.0% | 没有自有测试文件；跨包口径下由 `provider` 包的冒烟测试执行（这些包没有测试文件，包内口径不会单独统计） |
+| `cmd/llmkit-probe` | 55.2% | 参数解析 / .env / 排版及探测逻辑有离线回归；真实厂商行为仍需 key 探测 |
+| `tools/*`（1 个开发工具） | 96.3% | 覆盖率表生成器及固定工具链入口有离线回归；开发工具同样计入分母 |
+| `examples/*`（15 个示例程序） | 0.6% | 示例只做编译与 `go vet` 检查，不跑真实请求；个别纯本地逻辑有单测，所以略高于 0% —— 它们是文档，不是被测代码，但计入 `-coverpkg=./...` 的分母 |
 
-**总覆盖率 69.4%**（7818/11260 条语句）。
+**总覆盖率 73.6%**（8481/11517 条语句）。
 <!-- coverage-table:end -->
 
 缺口集中在真实网络、媒体和 CLI 路径 —— 这些要么需要真实 key（见 `-tags=integration`），要么会产生费用。
 
-上面这张表由 `tools/coverage-table` 生成，手改会被 CI 打回；一个新包如果没有对应行，生成器会直接报错而不是让它在文档里消失。性能基线（SSE 帧解析、Batch JSONL、Accumulator、`backoff`）记录在 [docs/benchmarks.md](docs/benchmarks.md) —— 同样是记录用，不设阈值。
+上面这张表由 `tools/coverage-table` 生成，手改会被 CI 打回；一个新包如果没有对应行，生成器会直接报错而不是让它在文档里消失。性能基线（SSE 帧解析、Batch JSONL、OpenAI 兼容流、Accumulator、`backoff`）记录在 [docs/benchmarks.md](docs/benchmarks.md) —— 同样是记录用，不设阈值。
 
 ---
 
@@ -948,8 +982,12 @@ make cover-check   # 同一口径重新测量，只校验下表是否过期
 ```bash
 make lint        # gofmt + vet + 零依赖校验
 make test-race
+make check-fuzz  # fuzz 包级自动发现与源码对账 + 脚本自测
 make cover       # 顺带把上面那张覆盖率表重新生成一遍
+make cover-check # 只校验表格是否过期（CI 同款）
 ```
+
+`make cover` / `make cover-check` 会按 `.github/coverage-go-version` 指定的固定 Go 版本运行；本机没装那个 patch 版本时，GOTOOLCHAIN 会自动下载一次（需要网络），之后离线可用。
 
 改了热点路径的话，再跑一次基准看一眼量级（`make bench BENCHTIME=200x`），数字明显动了就在 PR 里说明。
 

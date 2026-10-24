@@ -21,6 +21,3 @@ image-*.png
 .env
 .env.*
 !.env.example
-
-# Coverage
-coverage.out

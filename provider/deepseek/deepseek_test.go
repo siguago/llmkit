@@ -63,13 +63,14 @@ func TestListModels_ClassifiesOnlyDocumentedChatIDs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[
+			{"id":"deepseek-flash","name":"DeepSeek-V4.1-Flash","context_window":1048576},
 			{"id":"deepseek-v4-flash"},
 			{"id":"deepseek-v4-pro"},
 			{"id":"deepseek-chat"},
 			{"id":"deepseek-reasoner"},
 			{"id":"deepseek-coder"},
 			{"id":"deepseek-ocr"},
-			{"id":"future-model"}
+			{"id":"future-model","input_modalities":["text","image"],"output_modalities":["text"],"context_window":1048576,"effort":{"default_level":"high"}}
 		]}`))
 	}))
 	defer srv.Close()
@@ -78,10 +79,16 @@ func TestListModels_ClassifiesOnlyDocumentedChatIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-	if len(models) != 7 {
+	if len(models) != 8 {
 		t.Fatalf("models = %+v, want every catalog entry preserved", models)
 	}
-	for _, modelID := range []string{"deepseek-v4-flash", "deepseek-v4-pro"} {
+	if got := models[0]; got.ModelID != "deepseek-flash" || got.DisplayName != "DeepSeek-V4.1-Flash" || got.ContextWindow != 1048576 {
+		t.Errorf("catalog metadata = %+v, want upstream name and context window", got)
+	}
+	if got := models[1]; got.DisplayName != got.ModelID || got.ContextWindow != 0 {
+		t.Errorf("missing catalog metadata = %+v, want ID fallback and unknown context", got)
+	}
+	for _, modelID := range []string{"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"} {
 		if got := strings.Join(taskTypes[modelID], ","); got != provider.RemoteModelTaskChat {
 			t.Errorf("%s task_types = %q, want %q", modelID, got, provider.RemoteModelTaskChat)
 		}
@@ -231,8 +238,9 @@ func TestBuildRequest_ParamRejections_Use422(t *testing.T) {
 }
 
 func TestBuildRequest_RejectsUnknownContentParts(t *testing.T) {
-	// image_url is explicit; other unknown types (audio_url, input_audio, file, …) used
-	// to be silently dropped by ContentToString. Reject them instead.
+	// text and image_url are explicit; other unknown types (audio_url,
+	// input_audio, file, …) used to be silently dropped by ContentToString.
+	// Reject them instead.
 	cases := []struct {
 		name    string
 		content any
@@ -252,7 +260,10 @@ func TestBuildRequest_RejectsUnknownContentParts(t *testing.T) {
 			},
 		},
 		{
-			name: "image_url still rejected (same path)",
+			// image_url is not an unknown part — it is model-gated. deepseek-chat
+			// is not in the vision allowlist, so the model check rejects it;
+			// allowed/rejected image models are covered in vision_test.go.
+			name: "image_url on a non-vision model",
 			content: []provider.ContentPart{
 				{Type: "image_url", ImageURL: &provider.ImageURL{URL: "x"}},
 			},
@@ -329,7 +340,7 @@ func TestBuildRequest_RejectsMalformedTextParts(t *testing.T) {
 }
 
 func TestBuildMessages_PreservesAssistantNullContentForToolCalls(t *testing.T) {
-	msgs, _, err := buildMessages([]provider.Message{{
+	msgs, _, err := buildMessages("deepseek-flash", []provider.Message{{
 		Role: "assistant",
 		ToolCalls: []provider.ToolCall{{
 			ID:   "call_1",

@@ -9,13 +9,13 @@
 //	if err != nil {
 //		return err
 //	}
-//	text, err := client.Say(ctx, "deepseek-v4-flash", "Explain CAP theorem in one paragraph.")
+//	text, err := client.Say(ctx, "deepseek-flash", "Explain CAP theorem in one paragraph.")
 //
 // The unified Chat surface is OpenAI-compatible, so anything you already know
 // about chat completions applies:
 //
 //	resp, err := client.Chat(ctx, &llmkit.ChatRequest{
-//		Model:    "deepseek-v4-flash",
+//		Model:    "deepseek-flash",
 //		Messages: []llmkit.Message{llmkit.User("Hello")},
 //	})
 //
@@ -87,7 +87,8 @@
 //	go run github.com/siguago/llmkit/cmd/llmkit-probe@latest deepseek
 //
 // It reports chat, streaming, multi-turn, tool calling, structured output,
-// reasoning, vision, embeddings and error classification as PASS / FAIL / N/A,
+// reasoning, vision, embeddings and error classification as
+// PASS / FAIL / INCOMPLETE / N/A / SKIP,
 // using your own key. In code, ask before calling:
 //
 //	if client.SupportsEmbeddings() { ... }

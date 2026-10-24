@@ -417,6 +417,16 @@ type Usage struct {
 	ImageCount   int `json:"image_count,omitempty"`
 	DurationMs   int `json:"duration_ms,omitempty"`
 	RequestCount int `json:"request_count,omitempty"`
+	// BilledSearchUnits is the rerank billing quantity reported by
+	// Cohere-dialect vendors as meta.billed_units.search_units. One search unit
+	// covers up to 100 documents, so it is a per-search dimension, not a
+	// per-call one: a single 250-document rerank request bills 3 search units
+	// while RequestCount stays 1. Populated by rerank adapters that receive the
+	// dimension; zero elsewhere. Callers pricing a rerank call should multiply
+	// this field when it is non-zero and fall back to RequestCount otherwise —
+	// substituting one for the other overbills per-call routes and underbills
+	// large-result routes.
+	BilledSearchUnits int `json:"billed_search_units,omitempty"`
 	// MediaCount 是输出资产总数（跨 image/video/audio），由媒体端点和 chat 解析
 	// 路径填充。它与 ImageCount 是同一批资产的两种口径，不要相加。
 	MediaCount int `json:"media_count,omitempty"`

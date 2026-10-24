@@ -320,6 +320,24 @@ func TestModelDefaults_EnvOverride(t *testing.T) {
 	if got := defaultImageModel("openai"); got != "my-image" {
 		t.Errorf("defaultImageModel = %q", got)
 	}
+	t.Setenv("LLMKIT_RERANK_MODEL_SILICONFLOW", "my-rerank")
+	if got := defaultRerankModel("siliconflow"); got != "my-rerank" {
+		t.Errorf("defaultRerankModel = %q", got)
+	}
+	t.Setenv("LLMKIT_VISION_MODEL_DEEPSEEK", "my-vision")
+	if got := defaultVisionModel("deepseek", "deepseek-flash"); got != "my-vision" {
+		t.Errorf("defaultVisionModel = %q, want the env override", got)
+	}
+}
+
+// Without an override the image probe inherits the chat model: most vendors
+// serve vision on the same model, and the ones that do not are named through
+// LLMKIT_VISION_MODEL_<PROVIDER>.
+func TestDefaultVisionModelFallsBackToChatModel(t *testing.T) {
+	t.Setenv("LLMKIT_VISION_MODEL_DEEPSEEK", "")
+	if got := defaultVisionModel("deepseek", "deepseek-flash"); got != "deepseek-flash" {
+		t.Errorf("defaultVisionModel = %q, want the chat model fallback", got)
+	}
 }
 
 // The table must stay aligned when detail strings mix CJK and ASCII — the

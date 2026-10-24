@@ -1,5 +1,7 @@
 // Command multiprovider runs the same prompt across every provider whose API
-// key is present in the environment — the point of a unified SDK.
+// key is present in the environment — the point of a unified SDK. Providers
+// that need no key (the local Ollama / vLLM runtimes) are not part of the sweep:
+// this example keys off configured credentials.
 //
 //	DEEPSEEK_API_KEY=... ZHIPU_API_KEY=... go run ./examples/multiprovider
 package main
@@ -21,8 +23,8 @@ var models = map[string]string{
 	llmkit.OpenAI:      "gpt-5",
 	llmkit.Anthropic:   "claude-sonnet-4-5-20250929",
 	llmkit.Gemini:      "gemini-2.5-flash",
-	llmkit.DeepSeek:    "deepseek-v4-flash",
-	llmkit.Moonshot:    "kimi-k2-turbo-preview",
+	llmkit.DeepSeek:    "deepseek-flash",
+	llmkit.Moonshot:    "kimi-k2.6", // the k2-*-preview family retired 2026-05-25
 	llmkit.Zhipu:       "glm-4.6",
 	llmkit.MiniMax:     "MiniMax-M2",
 	llmkit.SiliconFlow: "Qwen/Qwen3-8B",

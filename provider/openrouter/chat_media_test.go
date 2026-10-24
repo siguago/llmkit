@@ -372,12 +372,12 @@ func TestGetUsage_MergesAccumulatedMediaCounters(t *testing.T) {
 }
 
 func TestAttachAssetsToChunk_EdgeCases(t *testing.T) {
-	assets := []provider.MediaAsset{{URL: "https://cdn.example/a.png"}}
+	assets := mediaAssets{byChoice: [][]provider.MediaAsset{{{URL: "https://cdn.example/a.png"}}}}
 
 	// None of these may panic or attach.
 	attachAssetsToChunk(nil, assets)
 	attachAssetsToChunk(&provider.ChatCompletionChunk{}, assets)
-	attachAssetsToChunk(&provider.ChatCompletionChunk{}, nil)
+	attachAssetsToChunk(&provider.ChatCompletionChunk{}, mediaAssets{})
 	attachAssetsToChunk(
 		&provider.ChatCompletionChunk{Choices: []provider.Choice{{}}},
 		assets,
@@ -405,6 +405,19 @@ func TestAttachAssetsToChunk_EdgeCases(t *testing.T) {
 	}
 	if len(viaDelta.Choices[0].Message.Images) != 0 {
 		t.Error("message must stay untouched when delta is present")
+	}
+
+	// Loose top-level assets have no attribution; they land on the first choice
+	// with a carrier instead of being dropped.
+	loose := &provider.ChatCompletionChunk{
+		Choices: []provider.Choice{{Delta: &provider.Message{}}, {Delta: &provider.Message{}}},
+	}
+	attachAssetsToChunk(loose, mediaAssets{loose: []provider.MediaAsset{{URL: "https://cdn.example/top.png"}}})
+	if got := loose.Choices[0].Delta.Images; len(got) != 1 || got[0].URL != "https://cdn.example/top.png" {
+		t.Errorf("loose asset = %+v, want it on the first choice", loose.Choices[0].Delta.Images)
+	}
+	if len(loose.Choices[1].Delta.Images) != 0 {
+		t.Errorf("loose asset duplicated onto a later choice: %+v", loose.Choices[1].Delta.Images)
 	}
 }
 
@@ -575,7 +588,7 @@ func TestChatCompletion_ReplacesRawImageEntries(t *testing.T) {
 }
 
 func TestAttachAssetsToChoices_EdgeCases(t *testing.T) {
-	assets := []provider.MediaAsset{{URL: "https://cdn.example/a.png"}}
+	assets := mediaAssets{byChoice: [][]provider.MediaAsset{{{URL: "https://cdn.example/a.png"}}}}
 	raw := []provider.MediaAsset{{Type: "image_url"}}
 
 	// Neither of these may panic or attach.
@@ -585,22 +598,53 @@ func TestAttachAssetsToChoices_EdgeCases(t *testing.T) {
 	// Message wins, and the raw entry decoding left behind is cleared first.
 	viaMessage := []provider.Choice{{Message: &provider.Message{Images: raw}}}
 	attachAssetsToChoices(viaMessage, assets)
-	if got := viaMessage[0].Message.Images; len(got) != 1 || got[0].URL != assets[0].URL {
+	if got := viaMessage[0].Message.Images; len(got) != 1 || got[0].URL != "https://cdn.example/a.png" {
 		t.Errorf("Images = %+v", got)
 	}
 
 	// Delta is the fallback when a response carries no message.
 	viaDelta := []provider.Choice{{Delta: &provider.Message{Images: raw}}}
 	attachAssetsToChoices(viaDelta, assets)
-	if got := viaDelta[0].Delta.Images; len(got) != 1 || got[0].URL != assets[0].URL {
+	if got := viaDelta[0].Delta.Images; len(got) != 1 || got[0].URL != "https://cdn.example/a.png" {
 		t.Errorf("Delta.Images = %+v", got)
 	}
 
 	// Nothing to install still clears a stale raw entry.
 	stale := []provider.Choice{{Message: &provider.Message{Images: raw}}}
-	attachAssetsToChoices(stale, nil)
+	attachAssetsToChoices(stale, mediaAssets{})
 	if got := stale[0].Message.Images; len(got) != 0 {
 		t.Errorf("stale raw entry survived: %+v", got)
+	}
+
+	// Each asset lands on the choice that emitted it, and every choice's raw
+	// entry is cleared — including choices[1..], which the old choice[0]-only
+	// implementation left as payload-less garbage.
+	multi := []provider.Choice{
+		{Message: &provider.Message{Images: raw}},
+		{Message: &provider.Message{Images: raw}},
+	}
+	attachAssetsToChoices(multi, mediaAssets{byChoice: [][]provider.MediaAsset{
+		{{URL: "https://cdn.example/first.png"}},
+		{{URL: "https://cdn.example/second.png"}},
+	}})
+	if got := multi[0].Message.Images; len(got) != 1 || got[0].URL != "https://cdn.example/first.png" {
+		t.Errorf("choice 0 Images = %+v, want its own asset", got)
+	}
+	if got := multi[1].Message.Images; len(got) != 1 || got[0].URL != "https://cdn.example/second.png" {
+		t.Errorf("choice 1 Images = %+v, want its own asset", got)
+	}
+
+	// Loose top-level assets have no attribution: first choice with a carrier wins.
+	loose := []provider.Choice{
+		{Delta: &provider.Message{}},
+		{Message: &provider.Message{}},
+	}
+	attachAssetsToChoices(loose, mediaAssets{loose: []provider.MediaAsset{{URL: "https://cdn.example/top.png"}}})
+	if got := loose[0].Delta.Images; len(got) != 1 || got[0].URL != "https://cdn.example/top.png" {
+		t.Errorf("loose asset = %+v, want it on the first carrier choice", got)
+	}
+	if len(loose[1].Message.Images) != 0 {
+		t.Errorf("loose asset duplicated: %+v", loose[1].Message.Images)
 	}
 }
 
@@ -633,5 +677,161 @@ func TestStreamReader_ReplacesRawImageEntries(t *testing.T) {
 	}
 	if _, err := stream.Recv(); err != io.EOF {
 		t.Errorf("second Recv error = %v, want io.EOF", err)
+	}
+}
+
+// assertNormalizedImageAssets pins the MediaAsset payload invariant: every
+// attached entry must carry at least one of URL / B64JSON / DataURL / FileID
+// and be typed as a normalized image. A raw OpenRouter entry decoded into the
+// shared Images field fails both checks.
+func assertNormalizedImageAssets(t *testing.T, assets []provider.MediaAsset) {
+	t.Helper()
+	for i, asset := range assets {
+		if asset.URL == "" && asset.B64JSON == "" && asset.DataURL == "" && asset.FileID == "" {
+			t.Errorf("asset %d carries no payload: %+v", i, asset)
+		}
+		if asset.Type != "image" {
+			t.Errorf("asset %d Type = %q, want the normalized image type", i, asset.Type)
+		}
+	}
+}
+
+// n=2 chat regression for P2-C1: assets used to be funneled onto choices[0]
+// while choices[1..] kept their payload-less raw decoded entries, so
+// GenerateImage recorded garbage in Data. Here choice 0 emits one valid asset
+// plus a non-normalizable raw entry and choice 1 emits its own asset. After the
+// fix choice 0 carries only its asset, choice 1 carries only its asset, and no
+// payload-less raw entry survives anywhere.
+func TestChatCompletion_MultiChoiceKeepsAssetAttribution(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"gen-n2","created":1700000002,"model":"m",
+			"choices":[
+				{"index":0,"message":{"role":"assistant","content":"one","images":[
+					{"type":"image_url","image_url":{"url":"https://cdn.example/first.png"}},
+					{"type":"image_url"}
+				]},"finish_reason":"stop"},
+				{"index":1,"message":{"role":"assistant","content":"two","images":[
+					{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}
+				]},"finish_reason":"stop"}
+			],
+			"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+		}`)
+	}))
+	defer srv.Close()
+
+	n := 2
+	resp, err := NewWithBaseURL(srv.URL).ChatCompletion(context.Background(), "k", "m",
+		&provider.ChatCompletionRequest{
+			Messages: []provider.Message{{Role: "user", Content: "draw two"}},
+			N:        &n,
+		})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if len(resp.Choices) != 2 {
+		t.Fatalf("choices = %d, want 2", len(resp.Choices))
+	}
+	if msg := resp.Choices[0].Message; msg == nil {
+		t.Fatal("choice 0 message missing")
+	} else if len(msg.Images) != 1 || msg.Images[0].URL != "https://cdn.example/first.png" {
+		t.Errorf("choice 0 Images = %+v, want only the asset it emitted", msg.Images)
+	}
+	if msg := resp.Choices[1].Message; msg == nil {
+		t.Fatal("choice 1 message missing")
+	} else if len(msg.Images) != 1 || msg.Images[0].B64JSON != "QUJD" || msg.Images[0].MimeType != "image/png" {
+		t.Errorf("choice 1 Images = %+v, want only the asset it emitted", msg.Images)
+	}
+	for _, choice := range resp.Choices {
+		if choice.Message != nil {
+			assertNormalizedImageAssets(t, choice.Message.Images)
+		}
+	}
+	if resp.Usage == nil || resp.Usage.MediaCount != 2 {
+		t.Errorf("usage = %+v, want MediaCount 2 (one normalized asset per choice)", resp.Usage)
+	}
+}
+
+// The streaming twin of the n=2 regression: one frame carrying both choices.
+// attachAssetsToChunk must install each choice's own asset and clear every
+// choice's raw entry — not just choices[0]'s.
+func TestStreamReader_MultiChoiceKeepsAssetAttribution(t *testing.T) {
+	body := `data: {"id":"c-n2","choices":[` +
+		`{"index":0,"delta":{"role":"assistant","images":[` +
+		`{"type":"image_url","image_url":{"url":"https://cdn.example/first.png"}},{"type":"image_url"}]}},` +
+		`{"index":1,"delta":{"role":"assistant","images":[` +
+		`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,Zm9v"}}]}}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	stream := NewStreamReader(context.Background(), io.NopCloser(strings.NewReader(body)), false)
+	defer stream.Close()
+
+	chunk, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if len(chunk.Choices) != 2 {
+		t.Fatalf("choices = %d, want 2", len(chunk.Choices))
+	}
+	if delta := chunk.Choices[0].Delta; delta == nil {
+		t.Fatal("choice 0 delta missing")
+	} else if len(delta.Images) != 1 || delta.Images[0].URL != "https://cdn.example/first.png" {
+		t.Errorf("choice 0 Delta.Images = %+v, want only the asset it emitted", delta.Images)
+	}
+	if delta := chunk.Choices[1].Delta; delta == nil {
+		t.Fatal("choice 1 delta missing")
+	} else if len(delta.Images) != 1 || delta.Images[0].B64JSON != "Zm9v" || delta.Images[0].MimeType != "image/jpeg" {
+		t.Errorf("choice 1 Delta.Images = %+v, want only the asset it emitted", delta.Images)
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta != nil {
+			assertNormalizedImageAssets(t, choice.Delta.Images)
+		}
+	}
+	if usage := stream.GetUsage(); usage == nil || usage.MediaCount != 2 {
+		t.Errorf("usage = %+v, want MediaCount 2", usage)
+	}
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Errorf("second Recv error = %v, want io.EOF", err)
+	}
+}
+
+// GenerateImage reads its Data from every choice. With n=2 the pre-fix code
+// produced three entries for two images: choice 0's two normalized assets plus
+// choice 1's payload-less raw entry (Type=image_url, URL=""). Data must contain
+// exactly the two valid assets, in choice order.
+func TestGenerateImage_MultiChoiceDataHasNoRawGarbage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"gen-img-n2","created":1700000003,"model":"m",
+			"choices":[
+				{"index":0,"message":{"role":"assistant","images":[
+					{"type":"image_url","image_url":{"url":"https://cdn.example/first.png"}}
+				]},"finish_reason":"stop"},
+				{"index":1,"message":{"role":"assistant","images":[
+					{"type":"image_url","image_url":{"url":"https://cdn.example/second.png"}}
+				]},"finish_reason":"stop"}
+			]
+		}`)
+	}))
+	defer srv.Close()
+
+	n := 2
+	resp, err := NewWithBaseURL(srv.URL).GenerateImage(context.Background(), "k", "m",
+		&provider.ImageGenerationRequest{Model: "m", Prompt: "two cats", N: &n})
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("Data = %d entries %+v, want exactly the two normalized assets", len(resp.Data), resp.Data)
+	}
+	if resp.Data[0].URL != "https://cdn.example/first.png" || resp.Data[1].URL != "https://cdn.example/second.png" {
+		t.Errorf("Data order = %q, %q; want choice order first, second", resp.Data[0].URL, resp.Data[1].URL)
+	}
+	assertNormalizedImageAssets(t, resp.Data)
+	if resp.Usage == nil || resp.Usage.MediaCount != 2 || resp.Usage.ImageCount != 2 {
+		t.Errorf("usage = %+v, want 2 images / 2 media", resp.Usage)
 	}
 }

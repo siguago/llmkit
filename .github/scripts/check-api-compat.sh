@@ -10,6 +10,10 @@
 # breaks intentionally, and a gate that has to be muted for every planned
 # break is a gate nobody trusts by the time it matters.
 #
+# A missing baseline is an error (exit 2), not a pass: a shallow clone without
+# tags used to make this gate disappear silently. Pass --allow-missing-baseline
+# to skip the comparison deliberately in such a checkout.
+#
 # apidiff runs via `go run` with a pinned version so the tool never enters
 # go.mod: this module has zero third-party dependencies and the CI gate that
 # enforces that must keep passing.
@@ -19,13 +23,47 @@ set -euo pipefail
 APIDIFF_VERSION="golang.org/x/exp/cmd/apidiff@v0.0.0-20260813180055-c1d0aacb2297"
 MODULE_PATH="github.com/siguago/llmkit"
 
-baseline_tag=${1:-}
+allow_missing_baseline=false
+baseline_tag=
+for argument in "$@"; do
+	case "$argument" in
+	--allow-missing-baseline)
+		allow_missing_baseline=true
+		;;
+	-*)
+		printf 'unknown option %s\n' "$argument" >&2
+		printf 'usage: %s [--allow-missing-baseline] [tag]\n' "$0" >&2
+		exit 2
+		;;
+	*)
+		if [[ -n "$baseline_tag" ]]; then
+			printf 'usage: %s [--allow-missing-baseline] [tag]\n' "$0" >&2
+			exit 2
+		fi
+		baseline_tag=$argument
+		;;
+	esac
+done
+
 if [[ -z "$baseline_tag" ]]; then
-	baseline_tag=$(git tag --list 'v[0-9]*' --sort=-version:refname | head -n 1)
+	# Latest final release, not a prerelease: v1.0.0-rc.1 is not a baseline
+	# users could have been on, and a prerelease sorts above its own release,
+	# which would move the freeze to the wrong commit.
+	while IFS= read -r tag; do
+		if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+			baseline_tag=$tag
+			break
+		fi
+	done < <(git tag --list 'v[0-9]*' --sort=-version:refname)
 fi
 if [[ -z "$baseline_tag" ]]; then
-	printf 'no release tag found; nothing to compare against\n'
-	exit 0
+	if [[ "$allow_missing_baseline" == true ]]; then
+		printf 'no final release tag found; skipping the API comparison (--allow-missing-baseline)\n'
+		exit 0
+	fi
+	printf 'no final release tag found; the API-freeze gate cannot run.\n' >&2
+	printf 'fetch the tags with `git fetch --tags`, or pass --allow-missing-baseline to skip this check deliberately.\n' >&2
+	exit 2
 fi
 if ! git rev-parse -q --verify "refs/tags/${baseline_tag}" >/dev/null; then
 	printf 'baseline tag %s does not exist\n' "$baseline_tag" >&2

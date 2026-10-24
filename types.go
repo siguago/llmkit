@@ -110,6 +110,16 @@ type (
 	// ErrorCategory is a provider-independent classification for vendors whose
 	// API reports failures inside an HTTP 200 response body.
 	ErrorCategory = provider.ErrorCategory
+	// ErrorOrigin describes the explicitly recorded source of a failure.
+	ErrorOrigin = provider.ErrorOrigin
+)
+
+// Error origins are diagnostic metadata; unknown is the default for unmarked
+// errors. They do not alter classification, status or replay behavior.
+const (
+	ErrorOriginUnknown  = provider.ErrorOriginUnknown
+	ErrorOriginLocal    = provider.ErrorOriginLocal
+	ErrorOriginUpstream = provider.ErrorOriginUpstream
 )
 
 // Remote-model task names returned by ModelTaskLister. Callers should ignore

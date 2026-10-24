@@ -78,7 +78,7 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		// previously filtered by isEmptyChunk because they have no choices,
 		// leaving the client with a silent truncation.
 		if errPayload, ok := detectStreamError([]byte(data), s.providerName); ok {
-			return nil, errPayload
+			return nil, provider.WithErrorOrigin(errPayload, provider.ErrorOriginUpstream)
 		}
 
 		var chunk provider.ChatCompletionChunk

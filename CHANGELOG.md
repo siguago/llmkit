@@ -2,6 +2,63 @@
 
 自 v1.0.0 起遵循[语义化版本](https://semver.org/lang/zh-CN/)，冻结范围与「破坏」的确切定义见 [STABILITY.md](STABILITY.md)。1.0 之前的破坏性变更在下面逐条列出，并说明为什么值得破坏。
 
+## v1.1.0 — 2026-10-25
+
+纯加法与修复，**升级不需要改任何代码**；Go 下限仍为 1.22。导出 API 与文档化行为无破坏性变更，`make api-compat` 对 v1.0.1 只报告新增。
+
+### 新增
+
+- **rerank 第二家：Vercel AI Gateway**（Cohere 方言 `POST /v1/rerank`）。能力矩阵、`TestLiveRerank` 的 live 模型表、README 与 `examples/rerank` 同步。两家刻意成对，是为了让 compat 的两种 usage 方言都被真实厂商路径覆盖；线上验收仍需各厂商 key（见「已知问题」）。
+- **`Usage.BilledSearchUnits`**：rerank 的非 token 计费维度。Cohere 方言的 `meta.billed_units.search_units` 落在这里，`RequestCount` 保持 per-call 语义（1 个 search unit 最多覆盖 100 篇文档；250 篇文档 = 1 次调用 / 3 units）。
+- **`examples/rerank`** 可运行示例：断言排序结果（相关文档被放到最后一条、必须回到第一），而不只是"有没有返回"。
+- **`SECURITY.md`**：私密披露入口、四类安全问题范围（凭据处理 / SSRF / IP 隐私 / 解析资源耗尽）、维护者处理流程；README 增加指路。
+- **DeepSeek 模型任务白名单**加入当前公开请求名 `deepseek-flash`，保留 `deepseek-v4-pro` 和兼容请求名 `deepseek-v4-flash`；目录中的 `name` / `context_window` 映射到已有的 `DisplayName` / `ContextWindow`。模态和 effort 元数据不直接证明 chat 能力，未知或退役 ID 仍不分类。
+- **DeepSeek 图像输入**：`deepseek-flash` 与官方仍可调用的 legacy 名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 的 `user` 消息支持 `image_url`，流式与非流式共用同一路径，保留图文数组、内容顺序、URL 和 detail；`deepseek-v4-pro`、未知模型、其他角色及畸形图片块继续在本地拒绝；官方第三种 `file` 视觉块尚未实现，会得到明确的本地拒绝而不是静默降级。SDK 不下载图片，上游尺寸等限制由官方 API 校验。
+- **`ErrorOrigin`** / `ErrorOriginLocal` / `ErrorOriginUpstream` / `ErrorOriginUnknown` 与 `ErrorOriginOf`：通过可解包的错误标记区分本地与上游拒绝，不改变 `APIError` / `ProviderError` 结构、状态码、分类或重试语义。DeepSeek 标记本地校验与上游 HTTP 拒绝，共享 compat SSE 读取器标记明确错误消息；未标记错误保持未知，不能仅凭 422 推断来源。
+- **live 模型守卫移入默认构建**：embeddings / rerank 的 live 模型表放在 `live_models_test.go`（无 build tag）—— 声明了能力却没有 live 模型，`go test ./...` 就会失败，而不是在 `-tags=integration` 里静默 Skip。
+- **`llmkit-probe` 的视觉 / rerank 模型覆盖**：新增 `LLMKIT_VISION_MODEL_<PROVIDER>` / `LLMKIT_RERANK_MODEL_<PROVIDER>` 环境变量，默认模型不支持视觉时不必改代码就能指定真正支持视觉的模型。
+
+### 修复
+
+- **OpenRouter 媒体资产归一化**（可观察行为修复，按 STABILITY 单列）：原始 `images[]` 条目与归一化 `MediaAsset` 曾同时留在 `Message.Images` / `GenerateImage.Data` 里（单 choice 也会重复）；现改为"先清空 raw 条目，再装归一化资产"。多 choice（`n>1`）时资产按 choice 归属，不再残留无载荷条目或把资产全堆到第一个 choice。
+- **rerank 的 Cohere 方言 usage**：此前把 `search_units` 写进 `Usage.RequestCount`，一次 250 篇文档的调用会被报告成 3 次调用；现在落 `Usage.BilledSearchUnits`，`RequestCount` 仍是 1（新增字段是纯加法，见 STABILITY「给导出 struct 增加字段不算破坏」）。
+- **DeepSeek legacy 视觉模型名**：`deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方承接且支持图像，不再被本地误拒；`deepseek-v4-pro` 与未知模型保持拒绝。
+- **`llmkit-probe` 视觉探测不再误红**：模型不支持图像（SDK 本地拒绝，或上游 400/422/404）时报告 `N/A`，保留错误文本与"可用 `-vision-model` / `LLMKIT_VISION_MODEL_<PROVIDER>` 指定视觉模型"提示；401/429/5xx/网络错误仍是 `FAIL`。旧实现要么把上游拒绝一律判 FAIL（默认 chat 模型无视觉的厂商会假红退出 1），要么丢失错误详情。
+- **`llmkit-probe` 视觉回答判定**：接受"这张图片是红色的。"这类正确但啰嗦的回答（含颜色名且无否定、无其他颜色词），不再只认纯颜色名。
+- **`llmkit-probe` 的 `length` 一律算未完成**：`finish_reason=length` 且没有可见输出时也归 `INCOMPLETE`（流式与非流式一致）；`stop` 且空才是 FAIL。README/CHANGELOG 口径同步。
+- **`llmkit-probe` 的 `-timeout`** 只约束流式探测从建立连接到读完结束（参考 `WithTimeout` 不约束流的设计）；`probeErrors` 现在继承 `-base-url`，私有 relay / 离线环境不再直连官方域名；免 key 的 Ollama / vLLM 该探测报 `N/A`。
+- **`llmkit-probe` 流式探测**：单帧正文仍可 PASS 但 detail 会标注"单帧正文"（不再误判为上游缓冲失败，也不再丢失提示）；EOF 缺少 `finish_reason` 判失败；`describeErr` 对 unknown 来源不再加含混前缀。
+- **`llmkit-probe` 输出表**：新增 `INCOMPLETE` 列与汇总行，退出码为失败 `1`、仅有未完成项 `2`、无 `0`（用法错误也退出 `2`，README 已写明）。
+- **DeepSeek 流式 usage**：最终 choice 携带的 usage 也遵守 `include_usage`：未开启时只去掉 usage 字段、保留正文与终态，`GetUsage()` 仍返回完整统计。HTTP 200 流中的明确错误消息在共享 compat 解析位置标记为上游来源，同样覆盖复用该读取器的 adapter；网络、解析与取消错误保持未知。
+- **集成测试的离线验证进入默认构建**：`liveResponseText` / `liveStreamText` 的校验用例从 `integration` build tag 移到默认测试（此前 CI 只编译不执行）；流式读取显式 90 秒 deadline，`MaxTokens` 从 32 提高到 512，避免推理模型被截断后误红。
+- **`examples/vision` / `examples/multiprovider`**：视觉示例按 `-provider` 派生默认模型（不再固定 gemini）；多厂商示例改用未退役的 `kimi-k2.6`，并修正"every provider"的表述。
+
+### 工程与门禁
+
+- **覆盖率表机械化**：`tools/coverage-table` 从 `coverprofile` 生成 README 表格（拒绝留下未归属包），`make cover` / `make cover-check`，CI 新增 `coverage-table` job；测量工具链固定在 `.github/coverage-go-version`（当前 Go 1.27.2），生成与校验同口径。补了生成器核心逻辑单测；重复 marker 对、重复样本 NumStmt 不一致、百分比半进位边界都会被拒绝或测试覆盖；CI 脚本失败时输出 `go test` 诊断而不是静默。
+- **fuzz 包清单机械化**：`run-fuzz.sh --discover` 自动发现含 fuzz 目标的包，`check-fuzz-targets.sh` 与源码对账（`make check-fuzz`），CI 与每日 deep-fuzz 都从 `--all` / 动态 matrix 取包清单；新增包新增目标不会再静默漏出。README 的 fuzz 命令同步改为 `--all`。
+- **基准测试基线**：7 个 benchmark（retry backoff、SSE 帧解析、Batch JSONL、OpenAI 兼容流、Responses Accumulator），`docs/benchmarks.md` 记录机器、复现命令与解读；按政策只记录、不设阈值。
+- CI 主工具链 Go 1.25 → 1.27（`min-go-version` job 仍守 1.22 下限）；CI workflow 增加最小权限 `contents: read`；`check-api-compat.sh` 无 tag 时 fail-closed（新增 `--allow-missing-baseline` 逃生门），默认基线排除预发布 tag；新增脚本补可执行位。
+
+### 文档
+
+- README：覆盖率表改为生成物并标注口径 / 固定工具链；probe 五态、退出码、`-timeout`、视觉 N/A 语义更新，输出示例按新渲染格式重写；fuzz 命令改为 `--all`；rerank 小节补充两种方言与 `BilledSearchUnits`；DeepSeek 多模态补充 legacy 名与 `file` 块限制；贡献清单补 `make check-fuzz` / `make cover-check`；性能基线补 compat 流。
+- `docs/benchmarks.md`：修正环境描述与两处 MB/s 数字，复现命令精确到 benchmark 名称与 `-count=3`，并说明 `make bench` 并行跑包。
+- `NEXT_ITERATION_REVIEW.md`：加历史存档说明，追加 v1.1 落地情况表（含明确延后项）；`provider/doc.go` 的 "pre-1.0 未冻结" 措辞改为 v1.0 冻结并指向 STABILITY.md。
+
+### 已知问题与未完成（不阻塞 v1.1.0）
+
+- **`Client.Close()` 未实现**：连接池只能等 `IdleConnTimeout` 自然回收。这是新增导出 API 面（可选能力接口 + 各 adapter 的 idle 连接释放），需要单独设计，列入 v1.2 候选。
+- **三处 waiter 的 404 策略仍不一致**：`WaitBatch` 有限次吸收，`WaitResponse` / `WaitVideo` 容忍到预算耗尽。统一会改变已在用的文档化行为，暂缓；上一轮评审中「`WaitVideo` 404 即终态」的建议经复核与既有语义冲突，已撤回该子项。
+- **`protocol/responses` 覆盖率 71.7%**，未达上一轮 75% 的目标，记入下一轮测试补齐。
+- **线上真机验收缺口**：Vercel rerank 与 DeepSeek Vision 的线上行为仍需各厂商 key 验证；本版只有 DeepSeek `deepseek-flash` 的 2026-10-16 实测记录（见下）。
+- **compat SSE envelope 错误多包一层来源标记**：`errors.Is` / `errors.As` / `StatusCode` / 分类 / 重试语义不变，但直接类型断言 `*provider.ProviderError` 的调用方会拿到外层错误（不属于 STABILITY 承诺的用法）。
+
+### 实测记录（2026-10-16）
+
+- 使用真实 Key 运行本地未发布版本：`make probe PROVIDER=deepseek ARGS='-model deepseek-flash'` → 10 通过、10 不适用；`deepseek-v4-pro` → 9 通过、11 不适用，两者均正常退出。Flash 图像正确识别为红色，Pro 图像在本地拒绝并标明来源；目录两个当前模型均分类为 chat。
+- 首轮 Flash 图像探测在 512 token 下达到思考预算，正确返回 `INCOMPLETE`；将视觉预算独立提高到 2048 后通过。其余正文探测保持 512，无预算不足自动重试。
+
 ## v1.0.1 — 2026-08-18
 
 发布后自审揪出的四处问题，全是修复，**升级不需要改任何代码**。没有 API 变化。

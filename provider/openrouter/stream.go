@@ -89,14 +89,14 @@ func (s *StreamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		// 或 delta.images[] 里挂载图像数据。累加每 chunk 的增量；最终 GetUsage 时 merge。
 		s.imageCount += countImagesInChunk([]byte(data))
 
-		// 结构化资产：把每个增量 chunk 中的 image entry 解析成 MediaAsset，
-		// 直接挂到 chunk 的第一个 choice 上，客户端能在流式响应里拿到完整 URL/base64。
+		// 结构化资产：把每个增量 chunk 中的 image entry 解析成 MediaAsset，按 choice
+		// 归属挂回对应 choice，客户端能在流式响应里拿到完整 URL/base64。
 		//
 		// 无条件调用：归一化资产必须**覆盖**（而不是追加到）解码阶段落进 Images 的
-		// 原始条目，理由见 attachAssetsToChunk。
+		// 原始条目，且每个 choice 都要处理，理由见 attachAssetsToChunk。
 		assets := extractMediaAssets([]byte(data))
 		attachAssetsToChunk(&chunk, assets)
-		s.mediaCount += len(assets)
+		s.mediaCount += assets.total()
 
 		if chunk.Usage != nil {
 			provider.NormalizeUsage(chunk.Usage)
@@ -239,19 +239,52 @@ func countImagesInChunk(raw []byte) int {
 	return total
 }
 
-// extractMediaAssets parses OpenRouter chat-shape image output into the unified
-// MediaAsset list. Walks the same three JSON paths as countImagesInChunk
+// mediaAssets groups the normalized assets from one response or chunk by the
+// slice position of the choice that emitted them. Assets found under a
+// top-level images[] carry no choice attribution and land in loose instead.
+type mediaAssets struct {
+	byChoice [][]provider.MediaAsset
+	loose    []provider.MediaAsset
+}
+
+// total is the number of normalized assets across every choice plus loose.
+func (m mediaAssets) total() int {
+	total := len(m.loose)
+	for _, assets := range m.byChoice {
+		total += len(assets)
+	}
+	return total
+}
+
+// flatten returns every normalized asset in choice order, loose assets last.
+// It exists for callers and tests that only need the combined list; the
+// attachment paths use byChoice so attribution survives.
+func (m mediaAssets) flatten() []provider.MediaAsset {
+	if m.total() == 0 {
+		return nil
+	}
+	out := make([]provider.MediaAsset, 0, m.total())
+	for _, assets := range m.byChoice {
+		out = append(out, assets...)
+	}
+	return append(out, m.loose...)
+}
+
+// extractMediaAssets parses OpenRouter chat-shape image output into normalized
+// MediaAsset lists, keeping each asset attributed to the slice position of the
+// choice that emitted it. Walks the same three JSON paths as countImagesInChunk
 // (delta.images, message.images, top-level images) and normalizes each entry
 // into a structured asset.
 //
-// OpenRouter's documented shape is:
+// OpenRouter's documented per-choice shape is:
 //
 //	{"type": "image_url", "image_url": {"url": "data:image/png;base64,...."}}
 //
 // where the `url` value may be either a data URL or an external HTTPS URL.
 // Data URLs are split into MimeType + B64JSON + DataURL; non-data URLs are
 // stored on URL alone (no SSRF download here — that's a downstream decision).
-func extractMediaAssets(raw []byte) []provider.MediaAsset {
+// Entries that normalize to an asset with no payload are dropped, not returned.
+func extractMediaAssets(raw []byte) mediaAssets {
 	var aux struct {
 		Choices []struct {
 			Delta *struct {
@@ -264,31 +297,31 @@ func extractMediaAssets(raw []byte) []provider.MediaAsset {
 		Images []json.RawMessage `json:"images"`
 	}
 	if err := json.Unmarshal(raw, &aux); err != nil {
-		return nil
+		return mediaAssets{}
 	}
-	var assets []provider.MediaAsset
-	for _, c := range aux.Choices {
+	out := mediaAssets{byChoice: make([][]provider.MediaAsset, len(aux.Choices))}
+	for i, c := range aux.Choices {
 		if c.Delta != nil {
 			for _, img := range c.Delta.Images {
 				if a, ok := normalizeChatImageEntry(img); ok {
-					assets = append(assets, a)
+					out.byChoice[i] = append(out.byChoice[i], a)
 				}
 			}
 		}
 		if c.Message != nil {
 			for _, img := range c.Message.Images {
 				if a, ok := normalizeChatImageEntry(img); ok {
-					assets = append(assets, a)
+					out.byChoice[i] = append(out.byChoice[i], a)
 				}
 			}
 		}
 	}
 	for _, img := range aux.Images {
 		if a, ok := normalizeChatImageEntry(img); ok {
-			assets = append(assets, a)
+			out.loose = append(out.loose, a)
 		}
 	}
-	return assets
+	return out
 }
 
 func normalizeChatImageEntry(raw json.RawMessage) (provider.MediaAsset, bool) {
@@ -347,29 +380,50 @@ func normalizeChatImageEntry(raw json.RawMessage) (provider.MediaAsset, bool) {
 	return asset, true
 }
 
-// attachAssetsToChunk 把流式 chunk 中提取到的 MediaAsset 列表装到第一个 choice 上。
-// 该字段在 SSE 序列化时会出 JSON，让客户端在流式响应里直接看到结构化资产。
+// attachAssetsToChunk 把流式 chunk 中提取到的 MediaAsset 按 choice 归属装回对应
+// choice。该字段在 SSE 序列化时会出 JSON，让客户端在流式响应里直接看到结构化资产。
 //
 // 与 attachAssetsToChoices 同理：统一 Message 的 Images 绑定了 `json:"images"`，原始
 // OpenRouter 条目在解码时就已经进了这个切片，所以这里是替换 + 先清空，而不是追加。
-// 两个载体（delta 与 message）都要清，因为 chunk 可能同时带着它们。
-func attachAssetsToChunk(chunk *provider.ChatCompletionChunk, assets []provider.MediaAsset) {
+// **所有** choice 都要清空（多 choice 时 choices[1..] 同样会残留原始条目），并且每个
+// choice 只拿到自己产出的资产——不能像旧实现那样全塞进 choices[0]。两个载体（delta 与
+// message）都要清，因为 chunk 可能同时带着它们。
+//
+// 顶层 images[] 没有 choice 归属，装到第一个有载体的 choice 上。
+func attachAssetsToChunk(chunk *provider.ChatCompletionChunk, assets mediaAssets) {
 	if chunk == nil || len(chunk.Choices) == 0 {
 		return
 	}
-	choice := &chunk.Choices[0]
-	clearRawMediaEntries(choice)
-	if len(assets) == 0 {
+	for i := range chunk.Choices {
+		clearRawMediaEntries(&chunk.Choices[i])
+	}
+	for i, own := range assets.byChoice {
+		if i >= len(chunk.Choices) || len(own) == 0 {
+			continue
+		}
+		choice := &chunk.Choices[i]
+		target := choice.Delta
+		if target == nil {
+			target = choice.Message
+		}
+		if target != nil {
+			target.Images = own
+		}
+	}
+	if len(assets.loose) == 0 {
 		return
 	}
-	target := choice.Delta
-	if target == nil {
-		target = choice.Message
+	for i := range chunk.Choices {
+		choice := &chunk.Choices[i]
+		target := choice.Delta
+		if target == nil {
+			target = choice.Message
+		}
+		if target != nil {
+			target.Images = append(target.Images, assets.loose...)
+			return
+		}
 	}
-	if target == nil {
-		return
-	}
-	target.Images = assets
 }
 
 func fillURLOrDataURL(asset *provider.MediaAsset, raw string) {
