@@ -139,7 +139,9 @@ func TestRerank_CohereDialectAtDerivedPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// A bare host root must still land on <root>/v1/rerank.
+	// A bare host root must still land on <root>/v1/rerank. Three documents is
+	// below one search unit's 100-document coverage, so 1 unit is the true
+	// vendor ratio here.
 	p := New(srv.URL)
 	resp, err := p.Rerank(context.Background(), "sk-test", "cohere/rerank-v3.5",
 		&provider.RerankRequest{
@@ -165,8 +167,11 @@ func TestRerank_CohereDialectAtDerivedPath(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("usage dropped from a Cohere-shaped response")
 	}
+	if resp.Usage.BilledSearchUnits != 1 {
+		t.Errorf("BilledSearchUnits = %d, want the vendor's 1 search unit", resp.Usage.BilledSearchUnits)
+	}
 	if resp.Usage.RequestCount != 1 {
-		t.Errorf("RequestCount = %d, want 1 (one search unit)", resp.Usage.RequestCount)
+		t.Errorf("RequestCount = %d, want 1: the search unit is a separate billing dimension", resp.Usage.RequestCount)
 	}
 	// Search units are a billing dimension, not tokens. Inventing token counts
 	// from them would put a fabricated number on someone's bill.

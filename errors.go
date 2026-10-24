@@ -40,9 +40,9 @@ func (e *unsupportedError) Error() string {
 
 func (e *unsupportedError) Is(target error) bool { return target == ErrUnsupported }
 
-// StatusCode returns the upstream HTTP status carried by err, or 0 when err did
-// not originate from an API response (network failures, context cancellation,
-// local validation).
+// StatusCode returns the HTTP status carried by err, or 0 when none is attached.
+// Local adapter validation can also carry a status (for example DeepSeek's 422).
+// Use ErrorOriginOf when the distinction from an upstream response matters.
 func StatusCode(err error) int {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
@@ -62,6 +62,12 @@ func ProviderCode(err error) string { return provider.ProviderCode(err) }
 // ErrorCategoryOf returns a provider-independent classification attached to an
 // in-body vendor error, or "" when HTTP status is the classification source.
 func ErrorCategoryOf(err error) ErrorCategory { return provider.ErrorCategoryOf(err) }
+
+// ErrorOriginOf returns the source explicitly recorded by the adapter, or
+// ErrorOriginUnknown for nil and unmarked errors. DeepSeek annotates local
+// validation and upstream HTTP failures; the shared compat SSE reader annotates
+// explicit error envelopes. Other paths may return unmarked errors.
+func ErrorOriginOf(err error) ErrorOrigin { return provider.ErrorOriginOf(err) }
 
 // IsRateLimited reports whether the upstream rejected the request for exceeding
 // a quota or rate limit (HTTP 429 or a provider body error with the same

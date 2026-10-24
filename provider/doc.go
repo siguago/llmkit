@@ -38,8 +38,10 @@
 //
 // # API stability
 //
-// This module is pre-1.0 and the API is not frozen. Within that, the parts here
-// differ in how settled they are:
+// The exported API is frozen at v1.0 and follows semantic versioning; see
+// STABILITY.md at the repository root for the exact definition of a breaking
+// change. Everything below is compatible with that promise. Within it, the
+// parts here differ in how settled they are:
 //
 //   - Stable in shape. [Provider], the mature unified capability interfaces,
 //     [ProviderError], [ChatCompletionRequest]/[ChatCompletionResponse] core
@@ -71,5 +73,5 @@
 //     nothing on these staying JSON-compatible across a vendor's own changes.
 //
 // Fields marked Deprecated in their doc comment will be removed in a future
-// pre-1.0 release, not merely discouraged.
+// major release, not merely discouraged.
 package provider

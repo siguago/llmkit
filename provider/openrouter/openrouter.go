@@ -111,23 +111,24 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 		}
 	}
 
-	// 结构化资产提取：让客户端在 message.images 上拿到 MediaAsset 列表。
-	// 与 countImagesInChunk 互补——后者只负责轻量计数（用于 usage），
-	// 这里负责把 URL/data URL/base64 拆出来。
+	// 结构化资产提取：让客户端在 message.images 上拿到 MediaAsset 列表，并且每个
+	// asset 归到产出它的那个 choice。与 countImagesInChunk 互补——后者只负责轻量
+	// 计数（用于 usage），这里负责把 URL/data URL/base64 拆出来。
 	//
 	// 无条件调用：没有可归一化的资产时也要清掉解码留下的原始条目，见
 	// attachAssetsToChoices 的说明。
 	assets := extractMediaAssets(respBody)
 	attachAssetsToChoices(result.Choices, assets)
-	if len(assets) > 0 && result.Usage != nil && result.Usage.MediaCount == 0 {
-		result.Usage.MediaCount = len(assets)
+	if n := assets.total(); n > 0 && result.Usage != nil && result.Usage.MediaCount == 0 {
+		result.Usage.MediaCount = n
 	}
 
 	return &result, nil
 }
 
-// attachAssetsToChoices 把归一化后的 MediaAsset 列表装到第一个 assistant choice 的
-// Message.Images 上，并**先清空**解码遗留在同一字段里的原始条目。
+// attachAssetsToChoices 把归一化后的 MediaAsset 按 choice 归属装到对应 assistant
+// choice 的 Message.Images（或 Delta.Images）上，并**先清空所有 choice** 里解码遗留的
+// 原始条目。
 //
 // 统一 Message 的 Images 字段绑定了 `json:"images"`，所以 OpenRouter 响应里的原始条目
 // （`{"type":"image_url","image_url":{"url":…}}`）在 json.Unmarshal 阶段就已经落进这个
@@ -135,19 +136,39 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 // 载荷的原始垃圾条目和它的归一化孪生体（已实测：len(Images) == 2）。这里是"替换"而不是
 // "追加"，并且在没有资产可装时也要清空——否则一条无法归一化的原始条目会留在结果里。
 //
-// 流式/非流式都用同一种"放在 choice[0]"的简化——OpenRouter 实际只会输出一个 assistant
-// choice；多 choice 情景由调用方按需扩展。
-func attachAssetsToChoices(choices []provider.Choice, assets []provider.MediaAsset) {
+// 多 choice 有两个必须同时满足的约束：每个资产装回产出它的 choice（choices[i] 的
+// assets.byChoice[i]），而不是全塞进 choice[0]；并且 choices[1..] 的原始条目同样要清空
+// ——旧实现只清 choice[0]，导致 n>1 时后续 choice 残留无载荷垃圾（GenerateImage 会把
+// 它们拼进 Data）。顶层 images[] 没有归属，装到第一个有载体的 choice 上。
+func attachAssetsToChoices(choices []provider.Choice, assets mediaAssets) {
 	if len(choices) == 0 {
 		return
 	}
-	clearRawMediaEntries(&choices[0])
-	if choices[0].Message != nil {
-		choices[0].Message.Images = assets
+	for i := range choices {
+		clearRawMediaEntries(&choices[i])
+	}
+	for i, own := range assets.byChoice {
+		if i >= len(choices) || len(own) == 0 {
+			continue
+		}
+		if choices[i].Message != nil {
+			choices[i].Message.Images = own
+		} else if choices[i].Delta != nil {
+			choices[i].Delta.Images = own
+		}
+	}
+	if len(assets.loose) == 0 {
 		return
 	}
-	if choices[0].Delta != nil {
-		choices[0].Delta.Images = assets
+	for i := range choices {
+		if choices[i].Message != nil {
+			choices[i].Message.Images = append(choices[i].Message.Images, assets.loose...)
+			return
+		}
+		if choices[i].Delta != nil {
+			choices[i].Delta.Images = append(choices[i].Delta.Images, assets.loose...)
+			return
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -239,20 +240,30 @@ func TestRerank_UsageFromTokens(t *testing.T) {
 	if resp.Usage.RequestCount != 1 {
 		t.Errorf("RequestCount = %d, want 1", resp.Usage.RequestCount)
 	}
+	if resp.Usage.BilledSearchUnits != 0 {
+		t.Errorf("BilledSearchUnits = %d, want 0 for a token-billed vendor", resp.Usage.BilledSearchUnits)
+	}
 }
 
 // Cohere-derived vendors bill per search unit, not per token, and report it
-// under meta.billed_units. Without this the wire struct declares the field and
-// nothing reads it, so a Cohere-shaped response yields an all-zero Usage and
-// per-call pricing silently has nothing to multiply.
+// under meta.billed_units. One search unit covers up to 100 documents, so a
+// realistic shape has more documents than units: 250 documents bill 3 units.
+// The units land on BilledSearchUnits while RequestCount stays per-call (1) —
+// folding 3 into RequestCount would overbill a per-call strategy 3x, and the
+// old 1-document/3-unit fixture encoded a ratio the vendor never produces.
 func TestRerank_UsageFromCohereMeta(t *testing.T) {
+	const docCount = 250 // 250 documents = ceil(250/100) = 3 search units
+	documents := make([]string, docCount)
+	for i := range documents {
+		documents[i] = fmt.Sprintf("document-%d", i)
+	}
 	p, _, _, _ := rerankServer(t, http.StatusOK, `{
 		"results":[{"index":0,"relevance_score":0.9}],
 		"meta":{"billed_units":{"search_units":3}}
 	}`)
 
 	resp, err := p.Rerank(context.Background(), "k", "m", &provider.RerankRequest{
-		Query: "q", Documents: []string{"a"},
+		Query: "q", Documents: documents,
 	})
 	if err != nil {
 		t.Fatalf("Rerank: %v", err)
@@ -260,8 +271,11 @@ func TestRerank_UsageFromCohereMeta(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("Usage must not be nil")
 	}
-	if resp.Usage.RequestCount != 3 {
-		t.Errorf("RequestCount = %d, want the vendor's 3 search units", resp.Usage.RequestCount)
+	if resp.Usage.BilledSearchUnits != 3 {
+		t.Errorf("BilledSearchUnits = %d, want the vendor's 3 search units", resp.Usage.BilledSearchUnits)
+	}
+	if resp.Usage.RequestCount != 1 {
+		t.Errorf("RequestCount = %d, want 1: one HTTP request, separate from its 3 search units", resp.Usage.RequestCount)
 	}
 	// Search units are not tokens; inventing token counts from them would be a
 	// fabricated number on someone's bill.
@@ -283,6 +297,9 @@ func TestRerank_UsageWithoutTokens(t *testing.T) {
 	}
 	if resp.Usage == nil || resp.Usage.RequestCount != 1 {
 		t.Fatalf("Usage must exist with RequestCount floored at 1: %+v", resp.Usage)
+	}
+	if resp.Usage.BilledSearchUnits != 0 {
+		t.Errorf("BilledSearchUnits = %d, want 0 when the vendor reports no billed units", resp.Usage.BilledSearchUnits)
 	}
 	if resp.Usage.TotalTokens != 0 {
 		t.Errorf("no token block should mean zero, not an invented number: %+v", resp.Usage)

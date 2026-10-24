@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/siguago/llmkit/internal/httpx"
@@ -51,17 +52,17 @@ func (p *Provider) Name() string {
 func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
 	body, url, _, err := buildRequest(p.baseURL, model, req, false)
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -74,7 +75,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, name, respBody)
+		return nil, provider.WithErrorOrigin(provider.NewProviderErrorFromResponse(resp, name, respBody), provider.ErrorOriginUpstream)
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -94,17 +95,17 @@ func (p *Provider) ChatCompletion(ctx context.Context, apiKey, model string, req
 func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model string, req *provider.ChatCompletionRequest) (provider.StreamReader, error) {
 	body, url, emitUsageChunk, err := buildRequest(p.baseURL, model, req, true)
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, err
+		return nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 	provider.SetBearer(httpReq.Header, apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -117,13 +118,12 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, apiKey, model strin
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, provider.NewProviderErrorFromResponse(resp, name, respBody)
+		return nil, provider.WithErrorOrigin(provider.NewProviderErrorFromResponse(resp, name, respBody), provider.ErrorOriginUpstream)
 	}
 
-	// compat already gates the terminal usage chunk on emitUsageChunk; the
-	// outer wrapper still applies its own gating for parity with the original
-	// behavior, but with both pointing at the same flag we never accidentally
-	// drop a chunk the client asked for.
+	// compat captures usage and gates usage-only chunks. DeepSeek also puts
+	// usage on the final choice, so the wrapper gates that field while retaining
+	// the terminal choice and the accounting exposed by GetUsage.
 	return &streamReader{
 		inner:          compat.NewStreamReader(ctx, resp.Body, name, emitUsageChunk),
 		emitUsageChunk: emitUsageChunk,
@@ -147,7 +147,7 @@ func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) (
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/models", nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, provider.WithErrorOrigin(err, provider.ErrorOriginLocal)
 	}
 	provider.SetBearer(httpReq.Header, apiKey)
 
@@ -159,12 +159,14 @@ func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) (
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
-		return nil, nil, provider.NewProviderErrorFromResponse(resp, name, respBody)
+		return nil, nil, provider.WithErrorOrigin(provider.NewProviderErrorFromResponse(resp, name, respBody), provider.ErrorOriginUpstream)
 	}
 
 	var result struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			ContextWindow int    `json:"context_window"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -174,9 +176,14 @@ func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) (
 	models := make([]provider.RemoteModel, 0, len(result.Data))
 	taskTypes := make(map[string][]string, len(result.Data))
 	for _, m := range result.Data {
+		displayName := m.Name
+		if displayName == "" {
+			displayName = m.ID
+		}
 		models = append(models, provider.RemoteModel{
-			ModelID:     m.ID,
-			DisplayName: m.ID,
+			ModelID:       m.ID,
+			DisplayName:   displayName,
+			ContextWindow: m.ContextWindow,
 		})
 		if tasks := deepSeekModelTaskTypes(m.ID); len(tasks) > 0 {
 			taskTypes[m.ID] = tasks
@@ -185,13 +192,13 @@ func (p *Provider) listModelsWithTaskTypes(ctx context.Context, apiKey string) (
 	return models, taskTypes, nil
 }
 
-// deepSeekModelTaskTypes is intentionally an allowlist because /v1/models
-// exposes only IDs, not capability metadata. Only the current documented V4
-// IDs are classified. Retired aliases and future IDs remain visible in the
-// catalog but unknown until DeepSeek documents current endpoint semantics.
+// deepSeekModelTaskTypes is intentionally an allowlist: catalog modalities,
+// context limits and reasoning settings do not prove chat endpoint semantics.
+// The documented chat IDs and the already-supported V4 Flash alias are classified;
+// other retired aliases and future IDs remain visible but unknown.
 func deepSeekModelTaskTypes(modelID string) []string {
 	switch modelID {
-	case "deepseek-v4-flash", "deepseek-v4-pro":
+	case "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro":
 		return []string{provider.RemoteModelTaskChat}
 	default:
 		return nil
@@ -211,8 +218,13 @@ func (s *streamReader) Recv() (*provider.ChatCompletionChunk, error) {
 		if err != nil {
 			return nil, err
 		}
-		if chunk.Usage != nil && len(chunk.Choices) == 0 && !s.emitUsageChunk {
-			continue
+		if chunk.Usage != nil && !s.emitUsageChunk {
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			visible := *chunk
+			visible.Usage = nil
+			chunk = &visible
 		}
 		return chunk, nil
 	}
@@ -243,7 +255,7 @@ func buildRequest(host, model string, req *provider.ChatCompletionRequest, strea
 		}
 	}
 
-	msgs, needsBeta, err := buildMessages(req.Messages)
+	msgs, needsBeta, err := buildMessages(model, req.Messages)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -328,11 +340,11 @@ func buildRequest(host, model string, req *provider.ChatCompletionRequest, strea
 	return body, baseURL + "/chat/completions", emitUsageChunk, nil
 }
 
-func buildMessages(messages []provider.Message) ([]map[string]any, bool, error) {
+func buildMessages(model string, messages []provider.Message) ([]map[string]any, bool, error) {
 	msgs := make([]map[string]any, len(messages))
 	needsBeta := false
 	for i, msg := range messages {
-		content, err := normalizeContent(msg.Content)
+		content, err := normalizeContent(model, msg.Role, msg.Content)
 		if err != nil {
 			return nil, false, err
 		}
@@ -350,19 +362,44 @@ func buildMessages(messages []provider.Message) ([]map[string]any, bool, error) 
 	return msgs, needsBeta, nil
 }
 
-func normalizeContent(content any) (any, error) {
+func normalizeContent(model, role string, content any) (any, error) {
 	if content == nil {
 		return nil, nil
 	}
-	// DeepSeek /chat/completions only accepts text. Reject any non-text part instead of
-	// silently dropping it via ContentToString — silent downgrade hides bugs in clients
-	// that were expecting multimodal dispatch.
+	// Preserve image-bearing arrays rather than flattening away their image parts.
+	// Text-only arrays retain their historical string normalization.
+	hasImage := false
 	switch v := content.(type) {
 	case []provider.ContentPart:
 		for _, part := range v {
-			if part.Type != "text" {
+			switch part.Type {
+			case "text":
+			case "image_url":
+				if err := validateImageRole(model, role); err != nil {
+					return nil, err
+				}
+				if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
+					return nil, invalidImageError("image_url must contain a non-empty string 'url'")
+				}
+				hasImage = true
+			default:
 				return nil, unsupportedPartError(part.Type)
 			}
+		}
+		if hasImage {
+			// ContentPart.Text uses omitempty on the shared type. DeepSeek still
+			// requires a text member for an intentionally empty text block.
+			parts := make([]any, len(v))
+			for i, part := range v {
+				parts[i] = part
+				if part.Type == "text" && part.Text == "" {
+					parts[i] = struct {
+						provider.ContentPart
+						Text string `json:"text"`
+					}{ContentPart: part, Text: ""}
+				}
+			}
+			return parts, nil
 		}
 		return provider.ContentToString(content), nil
 	case []any:
@@ -375,7 +412,28 @@ func normalizeContent(content any) (any, error) {
 				}
 			}
 			t, _ := m["type"].(string)
-			if t != "text" {
+			switch t {
+			case "image_url":
+				if err := validateImageRole(model, role); err != nil {
+					return nil, err
+				}
+				image, ok := m["image_url"].(map[string]any)
+				if !ok || image == nil {
+					return nil, invalidImageError("image_url must be an object")
+				}
+				url, ok := image["url"].(string)
+				if !ok || strings.TrimSpace(url) == "" {
+					return nil, invalidImageError("image_url must contain a non-empty string 'url'")
+				}
+				if detail, exists := image["detail"]; exists {
+					if _, ok := detail.(string); !ok {
+						return nil, invalidImageError("image_url 'detail' must be a string")
+					}
+				}
+				hasImage = true
+				continue
+			case "text":
+			default:
 				return nil, unsupportedPartError(t)
 			}
 			// Require `text` to be present and a string. Missing / non-string text would
@@ -394,18 +452,53 @@ func normalizeContent(content any) (any, error) {
 				}
 			}
 		}
+		if hasImage {
+			return content, nil
+		}
 		return provider.ContentToString(content), nil
 	}
 	return content, nil
+}
+
+func validateImageRole(model, role string) error {
+	// DeepSeek still routes the legacy Flash names to a vision-capable Flash
+	// model, so rejecting them locally would block calls the upstream accepts.
+	// deepseek-v4-pro and unknown IDs stay rejected: name compatibility is not
+	// proof of image support, and the adapter cannot infer it.
+	switch model {
+	case "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp":
+	default:
+		return invalidImageError("model " + model + " does not support image_url input")
+	}
+	if role != "user" {
+		return invalidImageError("image_url content parts are only allowed in user messages")
+	}
+	return nil
+}
+
+func invalidImageError(message string) error {
+	return &provider.ProviderError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Message:    "deepseek /chat/completions: " + message,
+	}
 }
 
 func unsupportedPartError(partType string) error {
 	if partType == "" {
 		partType = "<empty>"
 	}
+	if partType == "file" {
+		// DeepSeek's documented image inputs are text and image_url parts only;
+		// the file block (file_id / file_data) is not implemented here. Keep
+		// rejecting it locally, but say which type is unsupported and why.
+		return &provider.ProviderError{
+			StatusCode: http.StatusUnprocessableEntity,
+			Message:    "deepseek /chat/completions does not support file content parts; only text and image_url are implemented",
+		}
+	}
 	return &provider.ProviderError{
 		StatusCode: http.StatusUnprocessableEntity,
-		Message:    "deepseek /chat/completions only accepts text content parts; got type=" + partType,
+		Message:    "deepseek /chat/completions only accepts text and image_url content parts; got type=" + partType,
 	}
 }
 

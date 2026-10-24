@@ -1,10 +1,77 @@
 package compat
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/siguago/llmkit/provider"
 )
+
+func TestStreamReader_ErrorOriginIsEstablishedAtEnvelope(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusBadGateway} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			payload := fmt.Sprintf(`{"error":{"code":%d,"message":"upstream failed","retry_after":7}}`, status)
+			stream := NewStreamReader(context.Background(), io.NopCloser(strings.NewReader("data: "+payload+"\n\n")), "test-provider", false)
+			defer stream.Close()
+			_, err := stream.Recv()
+			var pe *provider.ProviderError
+			if !errors.As(err, &pe) || pe.StatusCode != status || pe.RetryAfter != "7" || !strings.Contains(pe.Message, payload) {
+				t.Fatalf("error = %v (%+v), want unchanged provider metadata", err, pe)
+			}
+			if provider.ErrorOriginOf(err) != provider.ErrorOriginUpstream {
+				t.Errorf("origin = %s, want upstream for an explicit SSE error envelope", provider.ErrorOriginOf(err))
+			}
+		})
+	}
+}
+
+func TestStreamReader_NonEnvelopeFailuresAreNotMarkedAsUpstream(t *testing.T) {
+	direct := &provider.ProviderError{StatusCode: http.StatusBadGateway, Message: "body read failure"}
+	wrapped := fmt.Errorf("transport: %w", direct)
+	for _, tc := range []struct {
+		name   string
+		reader io.ReadCloser
+		cause  error
+	}{
+		{"direct_provider_error", errorReadCloser{direct}, direct},
+		{"wrapped_provider_error", errorReadCloser{wrapped}, wrapped},
+		{"canceled", errorReadCloser{context.Canceled}, context.Canceled},
+		{"deadline", errorReadCloser{context.DeadlineExceeded}, context.DeadlineExceeded},
+		{"network", errorReadCloser{io.ErrUnexpectedEOF}, io.ErrUnexpectedEOF},
+		{"eof", io.NopCloser(strings.NewReader("")), io.EOF},
+		{"done", io.NopCloser(strings.NewReader("data: [DONE]\n\n")), io.EOF},
+		{"malformed", io.NopCloser(strings.NewReader("data: {broken}\n\n")), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := NewStreamReader(context.Background(), tc.reader, "test-provider", false)
+			defer stream.Close()
+			_, err := stream.Recv()
+			if err == nil || provider.ErrorOriginOf(err) != provider.ErrorOriginUnknown {
+				t.Fatalf("error = %v, origin = %s; want unknown non-envelope source", err, provider.ErrorOriginOf(err))
+			}
+			if tc.cause != nil && err != tc.cause {
+				t.Errorf("error = %v, want unchanged body read error %v", err, tc.cause)
+			}
+			if tc.name == "malformed" {
+				var syntaxError *json.SyntaxError
+				if !errors.As(err, &syntaxError) {
+					t.Errorf("error = %v, want original JSON syntax error", err)
+				}
+			}
+		})
+	}
+}
+
+type errorReadCloser struct{ err error }
+
+func (r errorReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (r errorReadCloser) Close() error             { return nil }
 
 func TestIsEmptyChunk_KeepsFirstRoleFrame(t *testing.T) {
 	// OpenAI 规范首帧：{"role":"assistant","content":""}

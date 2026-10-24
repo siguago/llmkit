@@ -474,7 +474,7 @@ func TestExtractMediaAssets_FromMessageImagesDataURL(t *testing.T) {
 			}
 		}]
 	}`)
-	assets := extractMediaAssets(raw)
+	assets := extractMediaAssets(raw).flatten()
 	if len(assets) != 1 {
 		t.Fatalf("expected 1 asset, got %d", len(assets))
 	}
@@ -503,7 +503,7 @@ func TestExtractMediaAssets_FromMessageImagesHTTPSURL(t *testing.T) {
 			}
 		}]
 	}`)
-	assets := extractMediaAssets(raw)
+	assets := extractMediaAssets(raw).flatten()
 	if len(assets) != 1 || assets[0].URL != "https://cdn.example.com/x.png" {
 		t.Fatalf("expected https URL preserved: %+v", assets)
 	}
@@ -520,7 +520,7 @@ func TestExtractMediaAssets_FromDeltaImages(t *testing.T) {
 			}
 		}]
 	}`)
-	assets := extractMediaAssets(raw)
+	assets := extractMediaAssets(raw).flatten()
 	if len(assets) != 1 || assets[0].MimeType != "image/jpeg" || assets[0].B64JSON != "Zm9v" {
 		t.Fatalf("delta.images not normalized: %+v", assets)
 	}
@@ -528,8 +528,43 @@ func TestExtractMediaAssets_FromDeltaImages(t *testing.T) {
 
 func TestExtractMediaAssets_EmptyWhenNoImages(t *testing.T) {
 	raw := []byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
-	if got := extractMediaAssets(raw); len(got) != 0 {
+	if got := extractMediaAssets(raw).flatten(); len(got) != 0 {
 		t.Fatalf("expected no assets, got %+v", got)
+	}
+}
+
+// Assets must stay attributed to the choice that emitted them; a flat list
+// cannot express that, which is exactly how the multi-choice bug slipped in.
+func TestExtractMediaAssets_KeepsChoiceAttribution(t *testing.T) {
+	raw := []byte(`{
+		"choices": [
+			{"index": 0, "message": {"role": "assistant", "images": [
+				{"type":"image_url","image_url":{"url":"https://cdn.example/first.png"}},
+				{"type":"image_url","image_url":{"url":"https://cdn.example/first-2.png"}}
+			]}},
+			{"index": 1, "message": {"role": "assistant", "images": [
+				{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,Zm9v"}}
+			]}}
+		],
+		"images": [{"type":"image_url","image_url":{"url":"https://cdn.example/top-level.png"}}]
+	}`)
+
+	got := extractMediaAssets(raw)
+	if len(got.byChoice) != 2 {
+		t.Fatalf("byChoice = %+v, want one entry per choice", got.byChoice)
+	}
+	if len(got.byChoice[0]) != 2 || got.byChoice[0][0].URL != "https://cdn.example/first.png" ||
+		got.byChoice[0][1].URL != "https://cdn.example/first-2.png" {
+		t.Errorf("choice 0 assets = %+v", got.byChoice[0])
+	}
+	if len(got.byChoice[1]) != 1 || got.byChoice[1][0].B64JSON != "Zm9v" {
+		t.Errorf("choice 1 assets = %+v", got.byChoice[1])
+	}
+	if len(got.loose) != 1 || got.loose[0].URL != "https://cdn.example/top-level.png" {
+		t.Errorf("loose assets = %+v", got.loose)
+	}
+	if total := got.total(); total != 4 {
+		t.Errorf("total = %d, want 4", total)
 	}
 }
 
