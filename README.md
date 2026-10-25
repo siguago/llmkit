@@ -921,7 +921,7 @@ go test -tags=integration -v -run TestLive .              # 机器读的断言�
 更贵或更慢的几项要再显式开一道，避免日常冒烟意外扩大耗时和费用：`-media`（图像/视频）、`LLMKIT_RUN_BATCH=1`（Files 与 Batch 全生命周期）、`LLMKIT_RUN_NATIVE_BACKGROUND=1`、`LLMKIT_RUN_NATIVE_THINKING=1`。这些测试都会清理自己创建的资源 —— 上传的文件一律删除，创建的 batch 一律取消（被取消的 OpenAI batch 对象删不掉，会留在账号里直到上游归档）。
 
 <!-- coverage-table:start -->
-覆盖率现状。口径**跨包**，使用 **Go 1.27.2**；精确工具链版本由 `.github/coverage-go-version` 统一维护。Go 补丁版本也可能改变语句数统计，升级该文件后需重新生成下表。
+覆盖率现状。口径**跨包**，使用 **Go 1.27.3**；精确工具链版本由 `.github/coverage-go-version` 统一维护。Go 补丁版本也可能改变语句数统计，升级该文件后需重新生成下表。
 
 跨包统计的是「某个包的语句有没有被**任何**测试执行到」，包内口径（`go test ./... -coverprofile`）只统计包自己的测试，两者数字不可混用：
 
